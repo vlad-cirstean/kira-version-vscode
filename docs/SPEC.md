@@ -5,7 +5,8 @@ bottom panel (alongside the terminal); the same application must run unmodified 
 standalone Electron desktop app.
 
 Status: **v1 requirements**. This document is the source of truth for scope, architecture,
-and phasing. Interactive rebase and everything under §9 are explicitly v2.
+and phasing. Interactive rebase and everything under §9 are explicitly v2. Settled questions
+and their reasoning are logged in §11; §12 is what still needs an answer.
 
 ---
 
@@ -67,6 +68,17 @@ Consequences of the panel choice, all of which the layout must handle:
 - Webview views are **destroyed and recreated** when the panel is hidden, unless
   `retainContextWhenHidden` is set — which is expensive. We instead persist UI state through
   `getState`/`setState` and re-hydrate the graph from the host cache on reveal (§5.4).
+
+### 2.1.1 Supported VS Code contexts
+
+**Local desktop VS Code only.** Remote contexts (SSH, WSL, Codespaces, dev containers) and
+the browser build (vscode.dev, github.dev) are out of scope for v1 and are not tested. The
+browser build is not merely untested but impossible as designed: it has no `git` process and
+no child-process API, so §4 has nothing to spawn. Remote contexts would likely work — the
+extension is a workspace extension and would run on the remote where git lives — but we make
+no claim, run no CI for them, and will not treat a remote-only bug as a v1 defect. The
+manifest declares this honestly (`extensionKind: ["workspace"]`, no `browser` entry point) so
+VS Code does not offer the extension where it cannot function.
 
 ### 2.2 Electron
 
@@ -212,19 +224,30 @@ Resolution order:
    Command Line Tools shim: **running it when CLT is not installed pops a system install
    dialog**, so probe with `xcode-select -p` first and never spawn the shim blind).
 
-**Minimum version: Git 2.38.** Chosen because `git merge-tree --write-tree` (2.38) powers the
-checkout/stash pre-flight analysis in §7.5–7.6. Below that we degrade: the app still works,
-pre-flight predictions downgrade from "will conflict in these files" to "may conflict".
+**Minimum version: Git 2.38 — a hard requirement, not a soft floor.** `git merge-tree
+--write-tree` (2.38, Oct 2022) is what makes the checkout and stash-pop conflict predictions
+in §7.5–7.6 possible at all, and those predictions are a headline feature rather than a
+nicety. Maintaining a second, weaker code path for older Git would double the test matrix to
+produce an experience we would not want to ship.
+
+The target is a developer workstation, where Git is current. Below 2.38 the app does not
+start into a degraded mode; it shows a single clear blocking state naming the detected
+version, the required version, and the platform's upgrade command, plus the
+`kiraVersion.git.path` setting in case a newer Git is installed elsewhere on the machine.
+This is checked once at repo open, off the version probe we already run.
 
 Capabilities are probed once per Git binary and cached by version + path:
 
 | Capability | Needs | Used for |
 |---|---|---|
 | `mergeTreeWriteTree` | 2.38 | conflict prediction without touching the worktree |
-| `forceIfIncludes` | 2.30 | safer force-push |
-| `statusPorcelainV2` | 2.11 | status parsing |
-| `stashPush` | 2.13 | pathspec-scoped stash |
-| `commitGraph` | 2.24 | fast topological walks |
+| `commitGraph` | 2.24 | fast topological walks (also: is a graph file present for this repo?) |
+| `sparseCheckout` | 2.25 | detect a sparse worktree, which changes what "dirty" means |
+
+Everything below 2.38 (`--force-if-includes` 2.30, porcelain v2 2.11, `stash push` 2.13) is
+implied by the floor and needs no probe. The probe remains because capability detection is
+still needed for *repository* facts (is a commit-graph file present, is this worktree sparse,
+is it a linked worktree) and because the floor will move over time.
 
 ### 4.3 Invocation discipline
 
@@ -323,14 +346,47 @@ Measured on a 100k-commit repository, mid-range laptop, warm OS cache:
 | Metric | Budget |
 |---|---|
 | Panel open → first commits painted | ≤ 300 ms |
-| Full 100k walk parsed + laid out | ≤ 2.5 s (streaming; UI interactive throughout) |
+| First page (5k commits) parsed + laid out | ≤ 400 ms (streaming; UI interactive throughout) |
+| "Load more" press → appended rows painted | ≤ 400 ms, scroll position unchanged |
 | Scroll | 60 fps sustained, no frame > 32 ms |
 | Commit select → detail pane populated | ≤ 80 ms |
 | Incremental search keystroke → results | ≤ 120 ms for already-loaded history |
-| Idle memory, 100k commits | ≤ 250 MB renderer |
+| Idle memory, first page | ≤ 80 MB renderer |
+| Idle memory, full 100k loaded | ≤ 250 MB renderer |
 
 These are CI-checked with a synthetic repository generator; a regression beyond 20% fails
-the build.
+the build. The 100k row is the ceiling test — reached by scripted "load more" presses — not
+the default experience.
+
+### 5.1.1 Paging: an explicit "Load more", not infinite scroll
+
+History is loaded in **pages of 5,000 commits** (`kiraVersion.graph.pageSize`), with an
+explicit **Load more** button pinned at the bottom of the list. Not infinite scroll.
+
+This is a deliberate trade against the streaming-everything design, and it is the right one:
+
+- Memory stays proportional to what the user actually looked at. A monorepo with 800k commits
+  costs the same on open as a 200-commit one.
+- Loading is a decision the user makes, so it never competes for CPU with their scrolling.
+  Infinite scroll's failure mode is jank at exactly the moment the user is moving fast.
+- Scroll position is meaningful. With infinite scroll the scrollbar lies — it shrinks under
+  the user as content appends. With paging the thumb is honest between loads.
+- `git log` is still walked lazily either way; the difference is who decides when.
+
+Mechanics: the walk is `git log --skip=<n> --max-count=<pageSize>` continued from the
+previous page, or better, a single long-lived `git log` process per repo that we read
+`pageSize` records from and then **pause** (stop reading; the OS pipe buffer applies
+backpressure and git blocks), resuming on Load more. The second form avoids re-walking and is
+what P2 implements, with `--skip` as the fallback if a repo's process was reclaimed.
+
+The button shows what it will do — "Load 5,000 more (127,400 remaining)" — with the remaining
+count from a cheap `git rev-list --count --all` run once per refresh. A modifier-click loads
+everything, for the user who knows what they are asking for and accepts the memory. Loading
+more never moves the viewport, never disturbs selection, and is cancellable.
+
+Search (§7.8) is unaffected: it queries git across the *whole* history regardless of what is
+loaded, so a commit from page 40 is findable without loading pages 1–39. Selecting such a
+result loads the pages up to it.
 
 ### 5.2 Graph layout
 
@@ -359,10 +415,13 @@ thread.
 
 ### 5.4 Caching and rehydration
 
-The host keeps the parsed commit set per repo in memory for the session. When the panel is
-hidden and the webview disposed, the UI persists only view state (scroll offset, selection,
-filters, column widths) via `setState`; on reveal it re-requests the stream, which the host
-serves from cache — repaint without re-running git.
+The host keeps the parsed commit set per repo in memory for the session — **only the pages
+actually loaded** (§5.1.1). When the panel is hidden and the webview disposed, the UI persists
+view state (scroll offset, selection, filters, column widths, **and how many pages were
+loaded**) via `setState`; on reveal it re-requests the stream, which the host serves from
+cache — the same rows repaint without re-running git and without the user having to press
+Load more again. The cached set is dropped when the repo is deselected or the window has been
+hidden past a threshold (§5.5).
 
 ### 5.5 Memory discipline
 
@@ -410,7 +469,7 @@ Rules:
 │ │ ●  fix: …             bob     3h          │ full message + trailers        │
 │ ●─┘  Merge pull request…  alice 5h  [origin/│ parents (clickable), refs      │
 │ …virtualized…                               │ ── File tree ────────────────  │
-│                                             │  src/  ▸ 3 files  +42 −7       │
+│ [ Load 5,000 more (127,400 remaining) ]     │  src/  ▸ 3 files  +42 −7       │
 └─────────────────────────────────────────────┴────────────────────────────────┘
 ```
 
@@ -487,6 +546,16 @@ over queried state, so it is unit-testable without a repository.
 `git fetch --prune --prune-tags <remote|--all>`. Progress parsed from stderr's counting
 output. Prune is on by default with a setting to disable. Post-fetch the UI shows an
 ahead/behind delta per branch from `%(upstream:track)`.
+
+**Automatic background fetch: implemented, `kiraVersion.fetch.autoInterval` defaults to `0`
+(off).** Setting it to a positive number of minutes enables a periodic fetch. When enabled:
+the timer only runs while the window is focused and the panel visible, it never runs while
+another operation holds the write queue, a failure disables the timer for the rest of the
+session rather than retrying into a rate limit or a repeated auth prompt, and — because
+`GIT_TERMINAL_PROMPT=0` is always set (§4.3) — a credential-less remote fails fast instead of
+hanging. Auto-fetch and force-push safety interact: a background fetch advances the
+remote-tracking ref, which is exactly why §7.4 always passes an explicitly observed lease sha
+rather than relying on bare `--force-with-lease`.
 
 ### 7.2 Push
 
@@ -578,8 +647,8 @@ stash-and-carry as a resolution to a blocked checkout, we predict the pop:
 3. Exit 0 → **"will apply cleanly"**; the flow runs stash → switch → pop automatically.
    Exit 1 → **"will conflict in these files: …"**; we list them and let the user choose
    stash-and-switch-without-popping (the stash stays safely in the list) or cancel.
-4. Below Git 2.38 the prediction degrades to a heuristic path-overlap check and the wording
-   changes from "will" to "may". We never claim certainty we do not have.
+4. The prediction is exact, not heuristic — it is the same merge git would run — so the UI
+   states it as fact. This is what the 2.38 floor (§4.2) buys.
 
 If a pop is executed and does conflict anyway (a race), we report it, and critically: `pop`
 that conflicts **does not drop the stash** — we say so, so the user knows their work is still
@@ -649,7 +718,7 @@ Tags are first-class in v1, not a side effect of the ref list.
 Annotated and lightweight tags are distinguished, since they behave differently: an annotated
 tag is its own object with a tagger, date, and message, and the graph must dereference it
 (`^{commit}`) to place the badge. Signed tags show verification status on selection, under
-the same "only for the selected item" rule as commit signatures (§11 Q9). The tag query is
+the same "only for the selected item" rule as commit signatures (§12 Q7). The tag query is
 part of the `for-each-ref` call in §4.4 — no extra process:
 
 ```
@@ -702,13 +771,57 @@ Pre-flight:
   `--no-commit` (stage the revert without committing, so the user resolves in their editor)
   or cancel. v1 does not resolve conflicts itself, but it must never leave the user stranded
   mid-revert without saying so — `git revert --abort` is offered from the in-progress state
-  banner (§11 Q18).
+  banner (§7.11).
 - Detached HEAD → allowed, with a note that the new commit will not be on any branch.
 
 Reverting multiple selected commits is supported as a single `git revert` invocation with
 several shas (git applies them newest-first), all-or-nothing.
 
-### 7.11 Other v1 operations
+### 7.11 In-progress and conflicted repository state
+
+v1 performs operations that can leave the repository mid-conflict — a stash pop, a
+cherry-pick, a revert — and it does **not** build a conflict-resolution UI. What it must do
+instead is detect the state, make it impossible to miss, and hand the user to a resolver.
+
+**Detection.** `.git` state files, read on every watcher tick (§4.5): `MERGE_HEAD`,
+`CHERRY_PICK_HEAD`, `REVERT_HEAD`, `BISECT_LOG`, `rebase-merge/`, `rebase-apply/`, plus
+unmerged entries from `status --porcelain=v2` (the `u` records, which carry the stage-1/2/3
+object ids).
+
+**Presentation.** A persistent banner across the top of the panel naming the operation in
+progress and listing the unmerged paths, plus per-file conflict markers in the detail pane.
+While this state holds, mutating operations that git would refuse anyway — checkout, reset,
+revert, another stash pop — are disabled with the banner as the explanation, rather than
+being offered and then failing.
+
+**Resolution: delegated, and in VS Code that delegation is genuinely complete.** VS Code
+resolves merge conflicts natively — the built-in `merge-conflict` extension decorates
+conflict markers in any file with inline *Accept Current / Accept Incoming / Accept Both /
+Compare* actions, and the Git extension's SCM view surfaces a **Merge Changes** group whose
+files open in the **three-way merge editor** (Current / Incoming / Result). This works on
+conflicts regardless of which tool created them: they are ordinary conflict markers and index
+stages in the user's repository. So under VS Code we do not reimplement any of it. The banner
+offers:
+
+- **Resolve in VS Code** → reveals the SCM view and opens the first unmerged file in the merge
+  editor, via the `EditorIntegration` port.
+- **Continue** → `git <op> --continue`, enabled only once `status` reports no unmerged paths.
+  We watch `.git/index` and enable it the moment the user finishes resolving, so the flow
+  returns to our UI without a manual refresh.
+- **Abort** → `git <op> --abort`, always available.
+
+**The Electron gap, stated plainly.** A standalone Electron build has no merge editor and no
+host editor to delegate to. v1 does not close that gap. There, the banner offers Abort,
+Continue, "open the conflicted file in the system default editor" (`ExternalOpener`), and a
+read-only view of the conflict hunks. This is the one place where the Electron build is
+deliberately weaker than the VS Code build, and it is why `EditorIntegration` exposes conflict
+resolution as an **optional capability** the UI feature-detects rather than assumes. A built-in
+resolution UI is v2 (§9).
+
+**Non-goal:** we never auto-resolve, never pick a side, and never run `git checkout --theirs`
+on the user's behalf.
+
+### 7.12 Other v1 operations
 
 Cherry-pick (single commit), delete branch (with "not fully merged" detection and an explicit
 force path), rename branch, and copy sha/message/branch/tag name. Each follows the
@@ -756,30 +869,60 @@ rather than abandoning Biome. Biome also enforces our architectural boundaries v
 
 **Verdict: adopt.**
 
-### 8.3 TypeScript 7 — **adopt for the non-Vue code; keep TS 5.x for `.vue` until 7.1**
+### 8.3 TypeScript 7 — **write TS7-clean now, switch the checker when `vue-tsc` supports it**
 
 TypeScript 7.0 (the Go-native compiler, "Project Corsa") went stable in July 2026 with 8–12×
-faster builds. Nothing about it conflicts with VS Code: type-checking is development-time,
-and transformation is done by our bundler regardless.
+faster checks. Nothing about it conflicts with VS Code or Electron: **nothing is compiled by
+`tsc` at all.** Transformation is done by esbuild/Vite/`bun build`; TypeScript runs
+`noEmit` as a pure type checker. So the choice affects CI wall-clock and editor feedback
+latency, and nothing about the shipped artifact. That also means it is reversible at any time,
+which is why it does not deserve to become a risk.
 
-**The real blocker is Vue.** TS 7.0 does not ship the stable programmatic compiler API. Volar
-— which is what `vue-tsc` and the Vue language service are built on — embeds that API to type
-the `.vue` template block. So `vue-tsc` cannot run on TS 7 today; the API is slated for
-TS 7.1 (~October 2026), with `vue-tsc` expected to follow within a release or two.
+**The blocker is Vue, and running both checkers does not route around it.** TS 7.0 does not
+ship the stable programmatic compiler API. Volar — what `vue-tsc` and the Vue language service
+are built on — embeds that API to type `.vue` template blocks, so `vue-tsc` cannot run on TS 7.
+The API is slated for TS 7.1 (~October 2026), with `vue-tsc` expected to follow within a
+release or two.
 
-Concrete plan:
+An earlier draft of this document proposed running tsgo over the `.ts` packages and `vue-tsc`
+over `.vue`. **That plan was wrong, for the reason you would expect:** `vue-tsc` type-checks a
+whole *program*, not a set of files — to type a `.vue` file it must check everything that file
+imports. So a naive two-checker setup has TS 5.x checking the entire codebase anyway, with a
+redundant fast pass layered on top. The slow checker stays the long pole and the win is
+nearly zero. The premise "most of the code is still on TS 5" would have been accurate.
 
-- `tsconfig` targets TS 7 semantics; `tsgo`/`tsc` 7 type-checks `core`, `git`, `ipc`,
-  `host-vscode`, `host-electron`, and all `.ts` in `ui`.
-- `.vue` template type-checking runs through `vue-tsc` on the TS 5.x line, as a separate CI
-  job, until 7.1 + a compatible `vue-tsc` ships. Both toolchains are pinned.
-- This is a real reason to keep SFCs thin: the more logic lives in `.ts`, the more of the
-  codebase gets the fast, current checker, and the smaller the eventual migration.
-- Revisit at P0 and again when TS 7.1 lands; the fallback if anything slips is TS 5.x
-  everywhere, which costs build time and nothing else.
+There are two ways out, and they differ in cost:
 
-**Verdict: adopt with the split above. Confirm the exact `vue-tsc`/TS-7 state at P0 before
-locking versions — this area is moving month to month.**
+1. **Project references + declaration emit.** Give `packages/ui` its own tsconfig that consumes
+   `core`/`git`/`ipc` as built `.d.ts` rather than as source. Then `vue-tsc` only checks the UI
+   package and tsgo checks the bulk, and the split is real rather than notional. This works,
+   but it buys a genuine speedup only once the codebase is big enough for it to matter, and it
+   costs a build graph, a `.d.ts` emit step, and staleness bugs when a reference is not rebuilt.
+2. **Run one checker.** Pick TS 5.x now, flip to TS 7 in a single commit when `vue-tsc`
+   supports it.
+
+**Recommendation: option 2.** Concretely:
+
+- **Write TS7-clean code from day one** — no legacy decorators, no `namespace`, no
+  `enum` where a union or `as const` works, `verbatimModuleSyntax`, `isolatedModules`, explicit
+  `import type`. This is what actually determines whether the eventual switch is a one-line
+  change or a migration, and it costs nothing because it is also just good modern TypeScript.
+- **CI runs a single checker**, TS 5.x, until `vue-tsc` ships TS 7 support.
+- **tsgo is installed and available as an optional fast local check** over the pure-`.ts`
+  packages (`bun run check:fast`). Sub-second feedback in the inner loop, zero CI dependency,
+  and it keeps us honest about TS 7 semantics continuously rather than discovering divergence
+  at switch time.
+- **Flip when the ecosystem does.** TS 7.1 is expected around October 2026, which lands inside
+  this project's P0–P4 window. The switch is then: change one dependency, delete `check:fast`,
+  done. If it slips, we have lost nothing.
+
+The honest scale check: on a codebase this size, `tsc` 5 takes seconds, not minutes. The 8–12×
+win is real but it is a win on a small number. It is not worth a two-checker build graph, and
+it is definitely not worth blocking on.
+
+**Verdict: TS 7 as the stated target and the code written for it; TS 5.x as the checker until
+`vue-tsc` catches up. Re-confirm the `vue-tsc`/TS-7 state at P0 and again at P4 — this area is
+moving month to month, and it may well already be resolved by P4.**
 
 ### 8.4 Playwright — **compatible, and the reason `apps/harness` exists**
 
@@ -864,7 +1007,13 @@ Deferred to v2, listed so the v1 architecture does not preclude them:
 - **Rebase, including interactive rebase.** Explicitly v2. The graph must already model
   in-progress rebase state (§4.5 watches `rebase-merge`/`rebase-apply`) so v1 can *report*
   a rebase in progress and refuse to interfere.
-- Merge with conflict-resolution UI, three-way merge editor.
+- Merge with conflict-resolution UI, and a **built-in three-way merge editor for the Electron
+  build** (7.11 - under VS Code the native merge editor already covers this, so the gap is
+  Electron-only).
+- **Remote and browser VS Code contexts** (2.1.1): SSH, WSL, Codespaces, dev containers,
+  vscode.dev. Local desktop VS Code only.
+- **Support for Git older than 2.38** (4.2). Hard floor, not a degraded mode.
+- **Infinite scroll / eager full-history load** (5.1.1). Paged with an explicit Load more.
 - Commit creation, staging/unstaging (this is a history tool, not a replacement for VS Code's
   SCM view — v1 reads the working tree, it does not edit it, except via the documented
   operations here).
@@ -884,101 +1033,89 @@ Phases are sequential; each ends at a checkpoint.
 
 | # | Phase | Deliverable | Exit criteria |
 |---|---|---|---|
-| **P0** | Foundation | Monorepo, Bun workspaces, Biome, TS 7 + `vue-tsc` split, Vite, CI, `packages/ipc` contract skeleton, `apps/harness` with mock bridge, Playwright wired to it, fixture-repo generator, perf-budget harness. | `bun install && bun run check && bun run test` green in CI; harness renders a placeholder UI; one Playwright test passes; TS7/`vue-tsc` decision confirmed and pinned. |
-| **P1** | Git driver | `GitDriver`: discovery, version + capability probe, spawn discipline (§4.3), streaming NUL parser, cancellation, write queue, `cat-file --batch`, typed error classification. | Unit tests over recorded porcelain fixtures; integration tests against generated repos; capability matrix verified against ≥2 Git versions. |
-| **P2** | History pipeline | Streaming `git log` walk, ref query, status query, commit-graph-aware paging, lane layout algorithm in a worker, packed transferable buffers. | 100k-commit synthetic repo laid out within budget (§5.1); layout unit tests over hand-built topologies incl. octopus merges. |
+| **P0** | Foundation | Monorepo, Bun workspaces, Biome, **single TS 5.x checker with TS7-clean compiler options plus `tsgo` as an optional `check:fast`** (8.3), Vite, CI, `packages/ipc` contract skeleton, `apps/harness` with mock bridge, Playwright wired to it, fixture-repo generator, perf-budget harness (time **and** heap). | `bun install && bun run check && bun run test` green in CI; harness renders a placeholder UI; one Playwright test passes; `vue-tsc`/TS-7 state re-confirmed and versions pinned. |
+| **P1** | Git driver | `GitDriver`: discovery, version probe with the **2.38 hard-floor block state**, repo capability probe, spawn discipline (§4.3), streaming NUL parser, cancellation, write queue, `cat-file --batch`, typed error classification. | Unit tests over recorded porcelain fixtures; integration tests against generated repos; sub-2.38 Git produces the block state, never a half-working app. |
+| **P2** | History pipeline | Streaming `git log` walk with **paused long-lived-process paging (5.1.1)** and remaining-count query, ref query, status query, lane layout in a worker, packed transferable buffers, column-wise typed-array store with string interning (5.5). | First page within budget; repeated Load more to 100k within time **and heap** budget; layout unit tests over hand-built topologies incl. octopus merges. |
 | **P3** | Host bridge | RPC transport for both hosts, VS Code panel webview view registered and reachable, Electron shell booting the same bundle, state persistence/rehydration, theme port + Electron theme shim. | Panel opens in VS Code and shows live data; Electron app shows the same; hide/reveal rehydrates without re-running git. |
-| **P4** | Graph UI | Vue shell, virtualized row list, canvas graph renderer, branch/tag ref badges, columns, selection, refresh action, keyboard nav, responsive breakpoints (§6.2). | 60 fps scroll on the 100k repo; Playwright visual + interaction suite; accessibility pass on the virtualized list. |
+| **P4** | Graph UI | Vue shell, virtualized row list, **Load more button with remaining count and viewport/selection preservation**, canvas graph renderer, branch/tag ref badges, columns, selection, refresh action, keyboard nav, responsive breakpoints (§6.2). | 60 fps scroll on the 100k repo; Playwright visual + interaction suite; accessibility pass on the virtualized list. |
 | **P5** | Commit detail | Right pane: metadata, message/trailers/signature, parents, file tree with statuses and counts, **click-a-file-opens-its-diff** via the in-app unified diff view, copy actions. | Detail populated ≤80 ms; diff opens from tree click and follows keyboard selection; tree correct for renames, merges (parent selector), binary/LFS files. |
-| **P6** | Refs & checkout | Branch list and **tag list with full tag manipulation (§7.9)**, create branch, switch branch, detached checkout, delete/rename, **revert (§7.10)**, and the full checkout pre-flight engine (§7.5). | Pre-flight classification unit-tested exhaustively; integration tests cover clean-carry, blocked-by-tracked, blocked-by-untracked, in-progress-op; tag create/delete/push incl. annotated and remote-delete asymmetry; revert incl. merge-parent selection and conflicting revert. |
-| **P7** | Remote ops | Fetch, push, decomposed pull with strategy selection, force-push with lease + `--force-if-includes`, protected branches, askpass path, progress + typed auth errors. | Integration tests against a local bare remote incl. non-ff rejection, lease violation, hook rejection; no operation can hang on a prompt. |
+| **P6** | Refs & checkout | Branch list and **tag list with full tag manipulation (§7.9)**, create branch, switch branch, detached checkout, delete/rename, **revert (7.10)**, the **in-progress/conflicted-state banner with VS Code merge-editor delegation, continue and abort (7.11)**, and the full checkout pre-flight engine (§7.5). | Pre-flight classification unit-tested exhaustively; integration tests cover clean-carry, blocked-by-tracked, blocked-by-untracked, in-progress-op; tag create/delete/push incl. annotated and remote-delete asymmetry; revert incl. merge-parent selection; an induced conflicting revert reaches the banner, gates other operations, and both continues and aborts cleanly. |
+| **P7** | Remote ops | Fetch (incl. **opt-in background auto-fetch, default off**), push, decomposed pull with strategy selection, force-push with lease + `--force-if-includes`, protected branches, askpass path, progress + typed auth errors. | Integration tests against a local bare remote incl. non-ff rejection, lease violation, hook rejection; no operation can hang on a prompt. |
 | **P8** | Stash | Stash create (incl. `-u`, message, pathspec), list, show, apply/pop/drop/branch, stashes rendered in the graph, and the pop-prediction engine via `merge-tree` (§7.6) wired into checkout resolution. | Prediction verified against actually-executed pops across clean and conflicting cases; degraded path exercised on a pre-2.38 Git. |
 | **P9** | Reset | Soft/mixed/hard with per-mode consequence copy, pre-flight counts, typed confirmation for hard-with-dirty, reflog-backed undo. | Integration tests assert repository state per mode; undo restores; guarded during in-progress operations. |
 | **P10** | Search | Input with case/whole-word/regex toggles, commit/refs(branches+tags)/both scope, hybrid client-side + git-backed matching, next/prev navigation, live regex validation, abort-on-supersede. | Semantics table fully covered by tests (each toggle × scope); ≤120 ms budget met; malformed regex never throws. |
-| **P11** | Ship | Electron packaging (`electron-builder`), `.vsix` packaging without `vscode:prepublish`, marketplace + OpenVSX metadata, cross-platform CI matrix (OS × Git version), docs, settings surface, telemetry-free release checklist. | Installable `.vsix` and signed desktop builds; full Playwright matrix green on Linux/macOS/Windows. |
+| **P11** | Ship | Electron packaging (`electron-builder`), `.vsix` packaging without `vscode:prepublish`, `extensionKind`/no-browser manifest declarations (2.1.1), marketplace + OpenVSX metadata, cross-platform CI matrix (OS x recent Git versions), docs, settings surface, telemetry-free release checklist. | Installable `.vsix` and signed desktop builds; full Playwright matrix green on Linux/macOS/Windows. |
 
 ---
 
-## 11. Open questions
+## 11. Decisions taken
 
-Things I need decided, or that seem worth deciding before they decide themselves. Nothing
-here blocks P0.
+Answered during requirements gathering. Recorded here because the reasoning matters as much
+as the answer, and because several of them are load-bearing elsewhere in this document.
+
+| # | Question | Decision |
+|---|---|---|
+| D1 | History loading strategy | **Paged with an explicit "Load more" button, 5,000 per page. Not infinite scroll.** See 5.1.1 for the mechanics and the reasoning. |
+| D2 | Minimum Git version | **2.38 as a hard requirement**, no degraded path. The target is a developer workstation running current Git; below the floor the app shows a blocking upgrade state (4.2). This is what makes the conflict predictions exact rather than heuristic. |
+| D3 | Background auto-fetch | **Implemented and configurable, default off** (`kiraVersion.fetch.autoInterval = 0`). Guardrails in 7.1. |
+| D4 | Supported hosts | **Local desktop VS Code, plus the standalone Electron build.** Remote contexts (SSH, WSL, Codespaces, dev containers) and browser VS Code (vscode.dev) are out of scope and untested (2.1.1). |
+| D5 | Conflict resolution | **Delegated, not built.** VS Code already resolves conflicts natively - the `merge-conflict` extension's inline actions and the SCM view's three-way merge editor work on any conflict markers, whoever created them. We detect the state, surface it, gate operations, and hand off; we never auto-resolve. The Electron build is deliberately weaker here and gets a built-in resolver in v2 (7.11). |
+| D6 | TypeScript 7 | **Write TS7-clean code from day one, run a single TS 5.x checker until `vue-tsc` supports TS 7** (expected ~7.1, October 2026, inside this project's P0-P4 window). The originally-proposed two-checker split was wrong: `vue-tsc` checks whole programs, so TS 5.x would have been checking everything anyway and the fast pass would have been redundant. Full reasoning in 8.3. |
+| D7 | Frontend framework | **Vue.** Svelte's advantages are real but land outside this app's hot paths, which are canvas, workers and typed arrays. Evaluated in 8.5. |
+| D8 | Git integration approach | **System Git via child process.** Not bundled, not libgit2/NodeGit, not isomorphic-git. Reasoning in 4.1. |
+
+---
+
+## 12. Open questions
+
+Still unanswered. Nothing here blocks P0.
 
 **Product**
 
 1. **Multiple repositories.** A VS Code workspace can hold several. v1 assumes a switcher
-   (one active repo at a time). Is that right, or do you want the multi-root case treated as
-   first-class earlier? Related: submodules — treat as separate repos in the switcher, or
-   ignore in v1?
-2. **Bare repos and worktrees.** Linked worktrees (`git worktree`) share a `.git` dir; do we
-   support opening one, and do we show the other worktrees' HEADs in the graph? Cheap to
-   support at P1, expensive to retrofit.
+   (one active repo at a time). Is that right, or should the multi-root case be first-class
+   earlier? Related: submodules - treat as separate repos in the switcher, or ignore in v1?
+2. **Linked worktrees.** `git worktree` setups share a `.git` dir. Do we support opening one,
+   and do we show the other worktrees' HEADs in the graph? Cheap at P1, expensive to retrofit.
+   (D2 makes the detection itself free - the capability probe already looks at
+   `--git-common-dir`.)
 3. **Default history scope.** `--all` (every ref) vs current branch only vs an explicit ref
-   picker. `--all` is the more useful default for a graph tool but is the expensive one on
-   huge repos. I've assumed `--all` with a toggle — confirm.
-4. **Commit list ceiling.** Do we walk the entire history eagerly, or cap at N (say 50k) with
-   "load more"? I've specced streaming-everything with virtualization, which is nicer but is
-   the thing most likely to blow the memory budget on a monorepo.
-5. **Diff view.** §3.3 specs an in-app unified diff so Electron isn't feature-poor. Do you
-   want side-by-side too in v1, or is unified enough until v2? Side-by-side is a meaningful
-   chunk of P5.
-6. **Where does the app open a file?** In VS Code, clicking a file in the tree could open the
-   diff in an editor tab (native feel) or stay inside the panel (consistent with Electron).
-   I've made "open in editor" a secondary action — confirm that's the right default.
+   picker. I've assumed `--all` with a toggle; D1's paging removes most of the cost objection,
+   so this is now purely a question of what you want to see by default.
+4. **Diff view.** 3.3 specs an in-app unified diff so Electron isn't feature-poor. Side-by-side
+   too in v1, or is unified enough until v2? Side-by-side is a meaningful chunk of P5.
+5. **Where does a file open?** Clicking a file opens its diff in-panel (6.3), with "Open in
+   editor" as a secondary action handing it to `vscode.diff`. Confirm that's the right
+   default rather than the reverse.
 
 **Behaviour**
 
-7. **Auto-fetch.** Background fetch on an interval is the single most useful feature for
-   keeping ahead/behind honest, and the single most likely to annoy (auth prompts, corporate
-   proxies, rate limits). Default off with a setting, or default on at a long interval?
-   Note this interacts with force-push safety (§7.4) — background fetch is exactly why we pass
-   an explicit lease sha.
-8. **Protected branches.** I defaulted to `main`, `master`, `release/*` for the force-push
-   block. Right list? Should the block be a hard refusal or an extra confirmation?
-9. **GPG/SSH signature verification.** Verifying costs a `--show-signature` per commit, which
-   is far too slow in bulk. I've specced verification only for the selected commit. Any need
-   for a bulk indicator?
-10. **`git maintenance` / commit-graph.** Writing a commit-graph makes large repos
-    dramatically faster but writes into the user's `.git`. I've defaulted it **off**. Is a
-    first-run prompt ("this repo is large, enable commit-graph?") acceptable, or should we
-    never write?
+6. **Protected branches.** I defaulted to `main`, `master`, `release/*` for the force-push
+   block. Right list? Hard refusal or extra confirmation?
+7. **Signature verification.** Verifying costs a `--show-signature` per commit, far too slow in
+   bulk, so it's specced for the selected commit only. Any need for a bulk indicator?
+8. **`commit-graph` maintenance.** Writing one makes large repos much faster but writes into
+   the user's `.git`. Defaulted **off**. Is a first-run prompt ("this repo is large, enable
+   commit-graph?") acceptable, or should we never write?
+9. **Undo.** 7.7 gives reset a reflog-backed undo. I'd argue for a general "undo last
+   operation" across branch delete, reset and stash drop - all recoverable via reflog or
+   `stash@{}`. Worth doing in v1?
 
-**Scope / risk**
+**Project**
 
-11. **Minimum Git version.** I set 2.38 (Sept 2022) for `merge-tree --write-tree`. That is
-    the whole basis of the "will this stash pop cleanly" prediction. Are you willing to hard-
-    require it (simpler, better UX) rather than maintaining the degraded path? Debian
-    oldstable and some corporate images ship older.
-12. **VS Code minimum version** (`engines.vscode`). Picking a recent floor unlocks newer
-    webview and theming APIs; picking an old one widens reach. No strong opinion — needs one.
-13. **Web/remote contexts.** VS Code runs in the browser (vscode.dev) and remotely
-    (SSH/WSL/Codespaces/devcontainers). Remote works naturally since the extension is a
-    workspace extension and git runs remotely — but it needs testing. vscode.dev has **no
-    git process at all** and therefore cannot work without a completely different backend.
-    Confirm we're declaring vscode.dev out of scope (I've assumed yes) and that remote
-    contexts are in scope (I've assumed yes — worth a CI job).
-14. **Which VS Code integration points do we want beyond the panel?** SCM view decorations,
-    status bar item, "open Git Graph at this commit" from the blame gutter, command palette
-    entries. Currently only the command palette is specced.
-15. **Licensing and distribution.** Repo has an MIT `LICENSE`. Publishing to both the VS Code
-    Marketplace and OpenVSX? Publisher id / signing identity for the Electron builds needs to
-    exist before P11.
-16. **Telemetry.** I've assumed **none** — no collection at all. Confirm; it's easier to never
-    start than to remove later.
-
-**Things you didn't mention that I think matter**
-
-17. **Undo.** §7.7 gives reset a reflog-backed undo. I'd argue for a general "undo last
-    operation" surface across branch delete, reset, and stash drop (all reflog- or
-    `stash@{}`-recoverable). Worth doing in v1?
-18. **Conflict *reporting*.** v1 has no conflict-resolution UI, but operations can still leave
-    the repo mid-conflict (a pop, a cherry-pick). The app must at minimum detect that state,
-    display it prominently, and offer abort — otherwise we can strand a user. I've folded
-    detection into §4.5 but it deserves an explicit design.
-19. **Large-file / LFS behaviour.** Diffing an LFS pointer shows the pointer, not the content.
-    Detect and label, or ignore in v1?
-20. **Localization.** Not specced. Assuming English-only for v1 — but string extraction is
-    much cheaper to do from the start than to retrofit.
-21. **Settings surface.** ~15 settings are implied across this document. In VS Code they're
-    `contributes.configuration`; in Electron they need a settings UI. Worth one shared schema
+10. **VS Code minimum version** (`engines.vscode`). A recent floor unlocks newer webview and
+    theming APIs; an old one widens reach. Needs a number.
+11. **VS Code integration points beyond the panel.** SCM view decorations, status bar item,
+    "open Git Graph at this commit" from the blame gutter. Currently only the command palette
+    is specced.
+12. **Licensing and distribution.** Repo is MIT. Publishing to both the Marketplace and
+    OpenVSX? A publisher id and a signing identity for the Electron builds must exist before
+    P11.
+13. **Telemetry.** Assumed **none**. Confirm - easier to never start than to remove later.
+14. **Localization.** Assumed English-only for v1, but string extraction is far cheaper done
+    from the start than retrofitted.
+15. **Settings surface.** ~15 settings are implied across this document. In VS Code they're
+    `contributes.configuration`; Electron needs its own settings UI. Worth one shared schema
     driving both, defined at P3 rather than accreting.
+16. **LFS.** Diffing an LFS pointer shows the pointer, not the content. Detect and label
+    (currently specced in 6.3), or go further?
