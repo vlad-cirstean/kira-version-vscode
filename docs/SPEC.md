@@ -64,7 +64,7 @@ Consequences of the panel choice, all of which the layout must handle:
   Electron.
 - The panel can be maximized (`workbench.action.toggleMaximizedPanel`) and moved left/right
   by the user. At narrow widths the detail pane collapses to an overlay drawer. Breakpoints
-  in §6.2.
+  in §6.3.
 - Webview views are **destroyed and recreated** when the panel is hidden, unless
   `retainContextWhenHidden` is set — which is expensive. We instead persist UI state through
   `getState`/`setState` and re-hydrate the graph from the host cache on reveal (§5.4).
@@ -93,21 +93,144 @@ VS Code-only.
 
 ### 3.1 Package layout
 
+A Bun workspace monorepo. This tree is normative: P0 creates it, and later phases fill it in
+rather than reorganising it. Files listed are the ones whose existence is a design decision;
+obvious siblings (`package.json`, `tsconfig.json`, `index.ts` barrels) are implied per package
+and omitted after the first example.
+
 ```
-packages/
-  core/           pure domain: types, graph layout, search, op planning. No I/O, no DOM.
-  git/            git process driver + porcelain parsers. Depends on the ProcessRunner port.
-  ipc/            typed RPC contract + codec, shared by every host and the UI.
-  ui/             Vue 3 app. Depends only on packages/ipc and the HostBridge port.
-  host-vscode/    extension entry, webview view provider, VS Code port implementations.
-  host-electron/  electron main + preload, Electron port implementations.
-apps/
-  harness/        browser-only dev server: UI + fixture-backed mock bridge (Playwright target).
+kira-version-vscode/
+├── AGENTS.md                       working agreement (branch policy, plan-then-implement loop)
+├── README.md
+├── LICENSE
+├── biome.json                      formatter + linter + import-boundary rules
+├── bunfig.toml
+├── package.json                    workspace root; scripts: check, check:fast, test, build, package
+├── tsconfig.base.json              TS7-clean options, shared by every package
+├── tsconfig.json                   solution file referencing all packages
+├── playwright.config.ts            projects: harness (fast), electron, vscode
+├── .github/
+│   └── workflows/
+│       ├── ci.yml                  check + unit + harness e2e, every push
+│       └── integration.yml         real-git + electron + vscode matrix, PR and nightly
+├── docs/
+│   ├── SPEC.md                     this document
+│   └── plans/                      Opus-authored phase plans, P0.md … P11.md
+├── resources/
+│   ├── icon.svg                    panel view container icon
+│   └── marketplace/                README assets, screenshots
+├── scripts/
+│   ├── build.ts                    bundles hosts + ui via bun build / vite
+│   ├── package-vsix.ts             build then `vsce package --no-dependencies`
+│   └── gen-theme-palettes.ts       derives Electron palettes from VS Code theme JSON (§3.4)
+│
+├── packages/
+│   ├── core/                       pure domain. No I/O, no DOM, no git, no framework.
+│   │   ├── package.json
+│   │   ├── tsconfig.json
+│   │   └── src/
+│   │       ├── index.ts
+│   │       ├── model/              commit.ts ref.ts tag.ts stash.ts status.ts repo.ts conflict.ts
+│   │       ├── store/              commitStore.ts   column-wise typed arrays (§5.5)
+│   │       │                       shaTable.ts      20-byte binary sha storage + hex formatting
+│   │       │                       intern.ts        string interning + concatenated subject buffer
+│   │       ├── graph/              layout.ts lanes.ts edges.ts colors.ts types.ts
+│   │       ├── search/             query.ts   parse toggles + scope into a query object
+│   │       │                       matcher.ts client-side matching over the loaded store
+│   │       │                       gitArgs.ts translate a query into git log arguments
+│   │       ├── preflight/          checkout.ts stashPop.ts reset.ts revert.ts push.ts tag.ts
+│   │       │                       types.ts   Hazard / Plan / Resolution unions
+│   │       ├── ports/              processRunner.ts fileWatcher.ts workspaceRoots.ts storage.ts
+│   │       │                       secrets.ts clipboard.ts externalOpener.ts dialogs.ts
+│   │       │                       notifications.ts editorIntegration.ts theme.ts logger.ts
+│   │       │                       index.ts
+│   │       └── util/               nulSplit.ts result.ts assert.ts
+│   │
+│   ├── git/                        the only package that knows git exists
+│   │   └── src/
+│   │       ├── driver.ts           spawn discipline, env hygiene, write queue, cancellation (§4.3)
+│   │       ├── discovery.ts        locate git, probe version, enforce the 2.38 floor (§4.2)
+│   │       ├── capabilities.ts     per-repo facts: commit-graph, sparse, linked worktree
+│   │       ├── catFile.ts          persistent `cat-file --batch` process
+│   │       ├── logSession.ts       long-lived paged `git log` process (§5.1.1)
+│   │       ├── watcher.ts          .git + worktree watching → refsChanged / worktreeChanged
+│   │       ├── errors.ts           exit code + stderr → typed error union
+│   │       ├── parse/              log.ts refs.ts status.ts diffTree.ts stash.ts mergeTree.ts
+│   │       └── ops/                fetch.ts pull.ts push.ts stash.ts branch.ts tag.ts
+│   │                               checkout.ts reset.ts revert.ts cherryPick.ts conflict.ts
+│   │
+│   ├── ipc/                        the contract every host and the UI share
+│   │   └── src/
+│   │       ├── contract.ts         request/response/event/stream type map, versioned
+│   │       ├── transport.ts        Transport interface both hosts implement
+│   │       ├── codec.ts            encode/decode incl. ArrayBuffer transfer lists
+│   │       └── validate.ts         boundary validation; a schema mismatch fails loudly
+│   │
+│   ├── ui/                         Vue 3 app. Imports core + ipc only. Never `vscode`.
+│   │   └── src/
+│   │       ├── main.ts
+│   │       ├── App.vue
+│   │       ├── bridge/             client.ts   typed client over the ipc contract
+│   │       ├── state/              repo.ts graphView.ts selection.ts search.ts settings.ts
+│   │       ├── graph/              GraphCanvas.vue  canvas element + lifecycle
+│   │       │                       renderer.ts      draws lanes/edges/nodes from typed arrays
+│   │       │                       hitTest.ts       arithmetic row/lane hit testing
+│   │       │                       palette.ts       reads theme tokens for canvas use (§3.4)
+│   │       │                       layout.worker.ts lane assignment off the main thread
+│   │       ├── components/
+│   │       │   ├── Toolbar.vue RepoPicker.vue BranchPicker.vue RefreshButton.vue
+│   │       │   ├── CommitList.vue CommitRow.vue LoadMoreButton.vue RefBadge.vue
+│   │       │   ├── DetailPane.vue CommitMeta.vue FileTree.vue DiffView.vue
+│   │       │   ├── SearchBox.vue SearchResults.vue ConflictBanner.vue
+│   │       │   ├── StashList.vue TagList.vue
+│   │       │   └── dialogs/        CheckoutDialog.vue ResetDialog.vue ForcePushDialog.vue
+│   │       │                       StashDialog.vue TagDialog.vue RevertDialog.vue
+│   │       ├── theme/              vscode-tokens.css  the token layer (§3.4)
+│   │       │                       density.css        row heights, spacing scale
+│   │       │                       readTokens.ts      getComputedStyle bridge for canvas
+│   │       └── icons/              codicon.css + the mapping of actions → codicon names
+│   │
+│   ├── host-vscode/                the ONLY package permitted to import `vscode`
+│   │   └── src/
+│   │       ├── extension.ts        activate/deactivate, command registration
+│   │       ├── panelView.ts        WebviewViewProvider for the panel container (§2.1)
+│   │       ├── html.ts             CSP, nonce, asset URIs, initial state injection
+│   │       ├── transport.ts        postMessage Transport implementation
+│   │       └── ports/              one file per port in core/src/ports
+│   │
+│   └── host-electron/
+│       └── src/
+│           ├── main/               index.ts window.ts menu.ts recentRepos.ts
+│           ├── preload/            index.ts   contextBridge surface, nothing more
+│           ├── renderer/           index.html mounts packages/ui unchanged
+│           ├── theme/              palettes.generated.css  (from scripts/gen-theme-palettes.ts)
+│           └── ports/              one file per port in core/src/ports
+│
+├── apps/
+│   └── harness/                    browser-only dev server; the fast Playwright target
+│       ├── index.html
+│       ├── vite.config.ts
+│       └── src/
+│           ├── mockBridge.ts       implements the ipc contract from fixtures
+│           ├── scenarios/          clean.ts dirty.ts conflicted.ts hugeRepo.ts authFailure.ts
+│           └── themeSwitcher.ts    force light/dark/high-contrast for visual tests
+│
+└── tests/
+    ├── fixtures/
+    │   ├── generateRepo.ts         builds real repos: topologies, sizes, conflicts
+    │   └── porcelain/              recorded git output for parser unit tests
+    ├── e2e/                        Playwright against apps/harness
+    ├── integration/                real git + real hosts (electron, vscode)
+    └── perf/                       time + heap budgets (§5.1), CI-enforced
 ```
 
-Dependency rule, enforced in CI: `core` and `ipc` depend on nothing; `git` depends on
-`core` + `ipc`; `ui` depends on `core` + `ipc`; hosts depend on everything; nothing depends
-on a host.
+Unit tests are colocated (`foo.ts` / `foo.test.ts`, run by `bun test`); only the suites that
+need a harness or a real repository live under `tests/`.
+
+**Dependency rule, enforced in CI** by Biome's `noRestrictedImports` plus a bundle check:
+`core` and `ipc` depend on nothing; `git` depends on `core` + `ipc`; `ui` depends on `core` +
+`ipc`; hosts depend on everything; **nothing depends on a host**. The string `vscode` appears
+as an import specifier in exactly one package, and `bun:`/`Bun` in none (§8.1).
 
 ### 3.2 Process/thread topology
 
@@ -152,13 +275,78 @@ we render it in-app. v1 ships a **read-only unified diff view inside the UI** us
 with VS Code additionally offering "Open in editor" — this keeps the port honest and avoids
 an Electron feature hole.
 
-### 3.4 Theming
+### 3.4 Theming — VS Code propagates its theme, and we build on that
 
-The UI styles exclusively against VS Code's CSS custom properties (`--vscode-editor-background`,
-`--vscode-foreground`, `--vscode-panel-border`, …) plus a small set of our own tokens derived
-from them. The Electron host injects a stylesheet defining the same variable names from a
-light and a dark palette. Result: one stylesheet, no per-host branching, and matching the
-user's VS Code theme is automatic.
+**Yes: VS Code pushes the active theme into every webview automatically, and keeps it in
+sync.** This is the mechanism that makes "looks native" achievable rather than an endless
+chase, so the design leans on it hard.
+
+What VS Code injects into the webview document, with no API call on our side:
+
+1. **CSS custom properties for the entire workbench colour palette.** Every theme colour id
+   becomes a variable under a mechanical renaming — dots to dashes, camelCase preserved:
+
+   | Workbench colour id | CSS variable |
+   |---|---|
+   | `editor.background` | `--vscode-editor-background` |
+   | `panel.border` | `--vscode-panel-border` |
+   | `list.activeSelectionBackground` | `--vscode-list-activeSelectionBackground` |
+   | `gitDecoration.modifiedResourceForeground` | `--vscode-gitDecoration-modifiedResourceForeground` |
+
+   Several hundred of them, covering every surface the workbench itself paints. Whatever
+   theme the user has installed — built-in or from the marketplace — its colours are simply
+   there.
+
+2. **Font variables**: `--vscode-font-family`, `--vscode-font-size`, `--vscode-font-weight`,
+   and `--vscode-editor-font-family` / `--vscode-editor-font-size` for the monospace faces.
+   Using these is what makes shas and diffs match the user's editor exactly.
+
+3. **Theme-kind signals on the document**: the classes `vscode-light`, `vscode-dark`,
+   `vscode-high-contrast` (plus `vscode-high-contrast-light`) on `<body>`, and a
+   `data-vscode-theme-kind` attribute. These carry the information colours alone cannot —
+   whether to draw borders that high-contrast themes require, and which of two equally-legible
+   graph palettes to pick.
+
+4. **Live updates.** When the user switches theme, the variables and body classes change in
+   place. No reload, no extension round-trip, no `onDidChangeActiveColorTheme` handler needed
+   for styling — CSS re-cascades on its own.
+
+**How the app uses it.**
+
+- `packages/ui/src/theme/vscode-tokens.css` defines a **small, named token layer** — roughly
+  40 tokens like `--kv-row-bg-hover`, `--kv-graph-lane-1`, `--kv-badge-remote-fg` — each
+  mapped to a `--vscode-*` variable with a `var(--vscode-x, var(--vscode-y, <fallback>))`
+  chain. Components reference only `--kv-*`. Two reasons: not every theme defines every
+  colour id (the fallback chain matters), and one indirection layer means retheming a
+  component is one line in one file rather than a search across the codebase.
+- **The canvas is the one place this needs code.** A `<canvas>` cannot consume CSS variables;
+  `renderer.ts` needs real colour strings. So `theme/readTokens.ts` resolves the token layer
+  once via `getComputedStyle(document.documentElement)`, caches it, and a
+  `MutationObserver` on `<body>`'s class and style attributes re-reads and triggers a full
+  repaint when the theme changes. Without this the graph would keep its old colours after a
+  theme switch while everything around it updated — the most visible possible bug.
+- **Graph lane colours** are the only palette we invent, since no workbench colour id means
+  "branch lane 3". They are generated per theme kind for contrast against
+  `--vscode-editor-background`, checked for WCAG contrast, and made distinguishable under the
+  common colour-vision deficiencies. High-contrast themes get their own set plus outlines.
+- We also expose our colours as **themable contribution points** (`contributes.colors`), so a
+  user or theme author can override lane colours and badge colours from their own theme —
+  the same courtesy other Git extensions extend.
+
+**The Electron side.** No VS Code, so nothing is injected. `scripts/gen-theme-palettes.ts`
+reads the JSON of VS Code's built-in Default Dark Modern, Default Light Modern, and the two
+high-contrast themes, and emits `palettes.generated.css` defining the same `--vscode-*`
+variable names for the subset we actually consume. The Electron host applies one based on the
+OS `prefers-color-scheme`, with a manual override. Result: **one stylesheet, no per-host
+branching, and the Electron build looks like VS Code because it is literally wearing VS Code's
+palette.** Because the generator reads theme files rather than hardcoding hex values,
+refreshing the palettes when VS Code updates its defaults is a script run.
+
+**What we deliberately do not use:** `@vscode/webview-ui-toolkit` is deprecated and archived —
+building on it would be building on something unmaintained. We use plain components styled
+against the token layer, plus **`@vscode/codicons`**, the icon font VS Code itself ships, so
+our chevrons, refresh, checkmarks, and git glyphs are the exact ones the user sees everywhere
+else in the window.
 
 ### 3.5 RPC contract
 
@@ -459,7 +647,44 @@ Rules:
 
 ## 6. User interface
 
-### 6.1 Layout
+### 6.1 Visual language: indistinguishable from VS Code
+
+The target is that a user opening the panel cannot tell where VS Code stops and this
+extension starts. That is a stricter goal than "themed correctly", and it is mostly about
+restraint — every place we invent a visual decision is a place we drift.
+
+Rules:
+
+- **No colour that is not a theme token.** No hardcoded hex anywhere in `packages/ui`,
+  enforced by a lint rule. Colours come from the `--kv-*` token layer, which comes from
+  `--vscode-*` (§3.4). The graph lane palette is the single exception and is generated,
+  contrast-checked, and user-overridable.
+- **VS Code's own components are the reference for ours.** The commit list borrows the
+  workbench list's metrics and states — 22px rows at default density, hover, focus and
+  selection backgrounds from `--vscode-list-*`, the focus outline from
+  `--vscode-focusBorder`. The toolbar borrows the panel title bar's height and button
+  treatment. Dialogs borrow the quick-input surface. Where VS Code has already solved a
+  layout, we copy it rather than design a second answer.
+- **Codicons only** (§3.4), never a second icon set. Refresh, chevrons, git glyphs, check
+  marks, and the ellipsis menu are the exact glyphs used elsewhere in the window.
+- **The user's fonts.** `--vscode-font-family` for UI text, `--vscode-editor-font-family` for
+  shas, diffs, and anything monospace, so the diff view matches the editor beside it.
+- **VS Code's density, not a web app's.** Tight vertical rhythm, no decorative padding, no
+  drop shadows beyond `--vscode-widget-shadow`, no rounded corners where the workbench has
+  square ones, no animation beyond the ~100ms transitions VS Code itself uses. The panel is
+  short; every wasted pixel of chrome is a commit the user cannot see.
+- **Git status colours come from git's own tokens** —
+  `--vscode-gitDecoration-modifiedResourceForeground` and siblings — so a modified file in our
+  file tree is the same colour as in the Explorer.
+- **All four theme kinds are first-class**: light, dark, high-contrast dark, high-contrast
+  light. High contrast is not an afterthought; it requires explicit borders where other
+  themes use background fills alone, and the visual regression suite covers all four.
+
+This is verified, not asserted: the Playwright suite screenshots every surface in all four
+theme kinds (the harness can force a kind via `themeSwitcher.ts`), and P4's review includes
+a side-by-side against the native workbench list at the same density.
+
+### 6.2 Layout
 
 ```
 ┌ Toolbar ─────────────────────────────────────────────────────────────────────┐
@@ -485,7 +710,7 @@ is incremental and does not re-walk. The button shows a spinner while in flight,
 idempotent (a second press while running is a no-op, not a queued second walk), and preserves
 selection and scroll position across the refresh.
 
-### 6.2 Responsive behaviour
+### 6.3 Responsive behaviour
 
 The panel is short and often narrow. Breakpoints on the webview's own width:
 
@@ -495,7 +720,7 @@ The panel is short and often narrow. Breakpoints on the webview's own width:
 
 Vertically the graph is virtualized to whatever height the panel has, down to ~3 rows.
 
-### 6.3 Detail pane (on commit click)
+### 6.4 Detail pane (on commit click)
 
 - **Metadata**: full and short sha (click to copy), subject, body with URL/issue linkification,
   author + committer with avatar initials and both timestamps when they differ, parents as
@@ -522,7 +747,7 @@ Vertically the graph is virtualized to whatever height the panel has, down to ~3
   branches; reset moves the branch pointer and is not.
 - For merge commits, a parent selector controls which diff is shown.
 
-### 6.4 Interaction
+### 6.5 Interaction
 
 Keyboard-first: `↑/↓` move selection, `Enter` open detail, `/` focus search, `F5` refresh,
 `Ctrl/Cmd+F` search, `Esc` close overlay/drawer. Full keyboard reachability and ARIA roles
@@ -749,7 +974,7 @@ Sorting the tag list is version-aware (`--sort=-v:refname`) so `v10` follows `v9
 
 ### 7.10 Revert
 
-A **Revert commit** button in the commit detail pane's action row (§6.3) and in the row
+A **Revert commit** button in the commit detail pane's action row (§6.4) and in the row
 context menu.
 
 ```
@@ -1033,11 +1258,11 @@ Phases are sequential; each ends at a checkpoint.
 
 | # | Phase | Deliverable | Exit criteria |
 |---|---|---|---|
-| **P0** | Foundation | Monorepo, Bun workspaces, Biome, **single TS 5.x checker with TS7-clean compiler options plus `tsgo` as an optional `check:fast`** (8.3), Vite, CI, `packages/ipc` contract skeleton, `apps/harness` with mock bridge, Playwright wired to it, fixture-repo generator, perf-budget harness (time **and** heap). | `bun install && bun run check && bun run test` green in CI; harness renders a placeholder UI; one Playwright test passes; `vue-tsc`/TS-7 state re-confirmed and versions pinned. |
+| **P0** | Foundation | Monorepo per the normative tree in 3.1, Bun workspaces, Biome, **single TS 5.x checker with TS7-clean compiler options plus `tsgo` as an optional `check:fast`** (8.3), Vite, CI, `packages/ipc` contract skeleton, `apps/harness` with mock bridge, Playwright wired to it, fixture-repo generator, perf-budget harness (time **and** heap). | `bun install && bun run check && bun run test` green in CI; harness renders a placeholder UI; one Playwright test passes; `vue-tsc`/TS-7 state re-confirmed and versions pinned. |
 | **P1** | Git driver | `GitDriver`: discovery, version probe with the **2.38 hard-floor block state**, repo capability probe, spawn discipline (§4.3), streaming NUL parser, cancellation, write queue, `cat-file --batch`, typed error classification. | Unit tests over recorded porcelain fixtures; integration tests against generated repos; sub-2.38 Git produces the block state, never a half-working app. |
 | **P2** | History pipeline | Streaming `git log` walk with **paused long-lived-process paging (5.1.1)** and remaining-count query, ref query, status query, lane layout in a worker, packed transferable buffers, column-wise typed-array store with string interning (5.5). | First page within budget; repeated Load more to 100k within time **and heap** budget; layout unit tests over hand-built topologies incl. octopus merges. |
-| **P3** | Host bridge | RPC transport for both hosts, VS Code panel webview view registered and reachable, Electron shell booting the same bundle, state persistence/rehydration, theme port + Electron theme shim. | Panel opens in VS Code and shows live data; Electron app shows the same; hide/reveal rehydrates without re-running git. |
-| **P4** | Graph UI | Vue shell, virtualized row list, **Load more button with remaining count and viewport/selection preservation**, canvas graph renderer, branch/tag ref badges, columns, selection, refresh action, keyboard nav, responsive breakpoints (§6.2). | 60 fps scroll on the 100k repo; Playwright visual + interaction suite; accessibility pass on the virtualized list. |
+| **P3** | Host bridge | RPC transport for both hosts, VS Code panel webview view registered and reachable, Electron shell booting the same bundle, state persistence/rehydration, theme token layer, `readTokens` canvas bridge, and Electron palette generation from VS Code theme JSON (3.4). | Panel opens in VS Code and shows live data; Electron app shows the same; hide/reveal rehydrates without re-running git; switching VS Code theme restyles the panel live, canvas included, with no reload. |
+| **P4** | Graph UI | Vue shell, virtualized row list, **Load more button with remaining count and viewport/selection preservation**, canvas graph renderer, branch/tag ref badges, columns, selection, refresh action, keyboard nav, responsive breakpoints (§6.3). | 60 fps scroll on the 100k repo; Playwright visual + interaction suite; accessibility pass on the virtualized list; visual regression green across all four theme kinds; side-by-side density review against the native workbench list (6.1). |
 | **P5** | Commit detail | Right pane: metadata, message/trailers/signature, parents, file tree with statuses and counts, **click-a-file-opens-its-diff** via the in-app unified diff view, copy actions. | Detail populated ≤80 ms; diff opens from tree click and follows keyboard selection; tree correct for renames, merges (parent selector), binary/LFS files. |
 | **P6** | Refs & checkout | Branch list and **tag list with full tag manipulation (§7.9)**, create branch, switch branch, detached checkout, delete/rename, **revert (7.10)**, the **in-progress/conflicted-state banner with VS Code merge-editor delegation, continue and abort (7.11)**, and the full checkout pre-flight engine (§7.5). | Pre-flight classification unit-tested exhaustively; integration tests cover clean-carry, blocked-by-tracked, blocked-by-untracked, in-progress-op; tag create/delete/push incl. annotated and remote-delete asymmetry; revert incl. merge-parent selection; an induced conflicting revert reaches the banner, gates other operations, and both continues and aborts cleanly. |
 | **P7** | Remote ops | Fetch (incl. **opt-in background auto-fetch, default off**), push, decomposed pull with strategy selection, force-push with lease + `--force-if-includes`, protected branches, askpass path, progress + typed auth errors. | Integration tests against a local bare remote incl. non-ff rejection, lease violation, hook rejection; no operation can hang on a prompt. |
@@ -1063,6 +1288,8 @@ as the answer, and because several of them are load-bearing elsewhere in this do
 | D6 | TypeScript 7 | **Write TS7-clean code from day one, run a single TS 5.x checker until `vue-tsc` supports TS 7** (expected ~7.1, October 2026, inside this project's P0-P4 window). The originally-proposed two-checker split was wrong: `vue-tsc` checks whole programs, so TS 5.x would have been checking everything anyway and the fast pass would have been redundant. Full reasoning in 8.3. |
 | D7 | Frontend framework | **Vue.** Svelte's advantages are real but land outside this app's hot paths, which are canvas, workers and typed arrays. Evaluated in 8.5. |
 | D8 | Git integration approach | **System Git via child process.** Not bundled, not libgit2/NodeGit, not isomorphic-git. Reasoning in 4.1. |
+| D9 | Theme | **Ride VS Code's injected theme.** It pushes the full workbench palette as `--vscode-*` CSS variables plus theme-kind body classes into every webview and keeps them live across theme switches, so matching the user's theme costs nothing. Electron wears the same variable names, generated from VS Code's own built-in theme JSON. Details in 3.4; the wider aesthetic rules in 6.1. |
+| D10 | v1 branch | **All v1 work lands on `feature/kickoff`.** Agents branch from it and add on top for as long as phases remain unfinished. See `AGENTS.md`. |
 
 ---
 
