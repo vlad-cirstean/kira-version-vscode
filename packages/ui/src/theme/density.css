@@ -1,0 +1,18 @@
+/*
+ * Spacing and row-height scale (§6.1): tight vertical rhythm, no decorative padding,
+ * 22px default commit row to match the workbench list at default density.
+ */
+:root {
+  --kv-row-height: 22px;
+  --kv-row-height-compact: 20px;
+  --kv-row-height-comfortable: 26px;
+
+  --kv-space-1: 2px;
+  --kv-space-2: 4px;
+  --kv-space-3: 8px;
+  --kv-space-4: 12px;
+  --kv-space-5: 16px;
+
+  --kv-toolbar-height: 35px;
+  --kv-radius: 0px; /* the workbench has square corners; we do not invent rounded ones */
+}

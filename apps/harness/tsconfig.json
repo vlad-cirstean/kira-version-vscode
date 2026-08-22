@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "outDir": "dist",
+    "rootDir": "src",
+    "types": ["node", "bun", "vite/client"]
+  },
+  "references": [
+    { "path": "../../packages/core" },
+    { "path": "../../packages/ipc" },
+    { "path": "../../packages/ui" }
+  ],
+  "include": ["src"]
+}

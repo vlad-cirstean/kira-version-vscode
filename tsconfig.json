@@ -1,0 +1,13 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/git" },
+    { "path": "packages/ipc" },
+    { "path": "packages/ui" },
+    { "path": "packages/host-vscode" },
+    { "path": "packages/host-electron" },
+    { "path": "apps/harness" },
+    { "path": "tests" }
+  ]
+}

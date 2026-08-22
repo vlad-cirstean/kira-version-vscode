@@ -1,0 +1,12 @@
+{
+  "name": "@kira-version/git",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@kira-version/core": "workspace:*",
+    "@kira-version/ipc": "workspace:*"
+  }
+}

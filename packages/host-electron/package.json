@@ -1,0 +1,17 @@
+{
+  "name": "@kira-version/host-electron",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@kira-version/core": "workspace:*",
+    "@kira-version/git": "workspace:*",
+    "@kira-version/ipc": "workspace:*",
+    "@kira-version/ui": "workspace:*"
+  },
+  "devDependencies": {
+    "electron": "43.4.1"
+  }
+}

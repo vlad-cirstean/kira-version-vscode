@@ -1,0 +1,32 @@
+/*
+ * @vscode/codicons, the icon font VS Code itself ships. Wiring this in P0 proves the font
+ * loads under a webview-style CSP the same way it will need to under the real one (P3).
+ */
+@font-face {
+  font-family: "codicon";
+  src: url("@vscode/codicons/dist/codicon.ttf") format("truetype");
+  font-display: block;
+}
+
+.codicon {
+  font:
+    normal normal normal 16px / 1 codicon,
+    sans-serif;
+  display: inline-block;
+  text-decoration: none;
+  text-rendering: auto;
+  text-align: center;
+  text-transform: none;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Only the glyphs the P0 placeholder toolbar uses; the action -> codicon map grows in icons/index.ts. */
+.codicon-refresh::before {
+  content: "\ea77";
+}
+
+.codicon-search::before {
+  content: "\ea6d";
+}

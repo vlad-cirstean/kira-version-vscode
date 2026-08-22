@@ -1,0 +1,234 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.10/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "includes": ["**", "!**/dist", "!**/.gitkeep"]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double"
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "style": {
+        "noNamespace": "error",
+        "noEnum": "error",
+        "noRestrictedImports": {
+          "level": "error",
+          "options": {
+            "paths": {
+              "vscode": "Only packages/host-vscode may import 'vscode' (B1, §3.1 C1).",
+              "electron": "Only packages/host-electron may import 'electron' (B1, §3.1 C1).",
+              "bun:test": "bun:test is only for *.test.ts files and scripts/** (B2, §8.1).",
+              "bun:sqlite": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1).",
+              "bun:ffi": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1).",
+              "bun:jsc": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1)."
+            }
+          }
+        },
+        "noRestrictedGlobals": {
+          "level": "error",
+          "options": {
+            "deniedGlobals": {
+              "Bun": "The Bun global is banned outside scripts/** and *.test.ts (B2, §8.1)."
+            }
+          }
+        }
+      },
+      "suspicious": {
+        "noExplicitAny": "warn"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["packages/core/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "vscode": "Only packages/host-vscode may import 'vscode' (B1, §3.1 C1).",
+                  "electron": "Only packages/host-electron may import 'electron' (B1, §3.1 C1).",
+                  "bun:test": "bun:test is only for *.test.ts files and scripts/** (B2, §8.1).",
+                  "bun:sqlite": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1).",
+                  "bun:ffi": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1).",
+                  "bun:jsc": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1).",
+                  "@kira-version/git": "B3 — core depends on nothing (§3.1).",
+                  "@kira-version/ipc": "B3 — core depends on nothing (§3.1).",
+                  "@kira-version/ui": "B3 — core depends on nothing (§3.1).",
+                  "@kira-version/host-vscode": "B3 — core depends on nothing (§3.1).",
+                  "@kira-version/host-electron": "B3 — core depends on nothing (§3.1)."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["packages/ipc/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "vscode": "Only packages/host-vscode may import 'vscode' (B1, §3.1 C1).",
+                  "electron": "Only packages/host-electron may import 'electron' (B1, §3.1 C1).",
+                  "bun:test": "bun:test is only for *.test.ts files and scripts/** (B2, §8.1).",
+                  "bun:sqlite": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1).",
+                  "bun:ffi": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1).",
+                  "bun:jsc": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1).",
+                  "@kira-version/core": "B3 — ipc depends on nothing (§3.1).",
+                  "@kira-version/git": "B3 — ipc depends on nothing (§3.1).",
+                  "@kira-version/ui": "B3 — ipc depends on nothing (§3.1).",
+                  "@kira-version/host-vscode": "B3 — ipc depends on nothing (§3.1).",
+                  "@kira-version/host-electron": "B3 — ipc depends on nothing (§3.1)."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["packages/git/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "vscode": "Only packages/host-vscode may import 'vscode' (B1, §3.1 C1).",
+                  "electron": "Only packages/host-electron may import 'electron' (B1, §3.1 C1).",
+                  "bun:test": "bun:test is only for *.test.ts files and scripts/** (B2, §8.1).",
+                  "bun:sqlite": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1).",
+                  "bun:ffi": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1).",
+                  "bun:jsc": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1).",
+                  "@kira-version/ui": "B3 — git may import core + ipc only (§3.1).",
+                  "@kira-version/host-vscode": "B3 — git may import core + ipc only (§3.1).",
+                  "@kira-version/host-electron": "B3 — git may import core + ipc only (§3.1)."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["packages/ui/**", "apps/harness/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "vscode": "Only packages/host-vscode may import 'vscode' (B1, §3.1 C1).",
+                  "electron": "Only packages/host-electron may import 'electron' (B1, §3.1 C1).",
+                  "bun:test": "bun:test is only for *.test.ts files and scripts/** (B2, §8.1).",
+                  "bun:sqlite": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1).",
+                  "bun:ffi": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1).",
+                  "bun:jsc": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1).",
+                  "@kira-version/git": "B3 — ui may import core + ipc only (§3.1).",
+                  "@kira-version/host-vscode": "B3 — ui may import core + ipc only (§3.1).",
+                  "@kira-version/host-electron": "B3 — ui may import core + ipc only (§3.1)."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["packages/host-vscode/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "electron": "Only packages/host-electron may import 'electron' (B1, §3.1 C1).",
+                  "bun:test": "bun:test is only for *.test.ts files and scripts/** (B2, §8.1).",
+                  "bun:sqlite": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1).",
+                  "bun:ffi": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1).",
+                  "bun:jsc": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1)."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["packages/host-electron/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "vscode": "Only packages/host-vscode may import 'vscode' (B1, §3.1 C1).",
+                  "bun:test": "bun:test is only for *.test.ts files and scripts/** (B2, §8.1).",
+                  "bun:sqlite": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1).",
+                  "bun:ffi": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1).",
+                  "bun:jsc": "The bun: runtime is banned outside scripts/** and *.test.ts (B2, §8.1)."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["scripts/**", "**/*.test.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "vscode": "Only packages/host-vscode may import 'vscode' (B1, §3.1 C1).",
+                  "electron": "Only packages/host-electron may import 'electron' (B1, §3.1 C1)."
+                }
+              }
+            },
+            "noRestrictedGlobals": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["**/*.vue"],
+      "linter": {
+        "rules": {
+          "correctness": {
+            "noUnusedImports": "off",
+            "noUnusedVariables": "off"
+          }
+        }
+      }
+    }
+  ]
+}

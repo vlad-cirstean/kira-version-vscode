@@ -1,0 +1,17 @@
+{
+  "name": "@kira-version/host-vscode",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@kira-version/core": "workspace:*",
+    "@kira-version/git": "workspace:*",
+    "@kira-version/ipc": "workspace:*",
+    "@kira-version/ui": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/vscode": "1.134.0"
+  }
+}

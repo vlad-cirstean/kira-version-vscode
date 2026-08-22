@@ -1,0 +1,80 @@
+/*
+ * The --kv-* token layer (§3.4). Every token is a var(--vscode-*, fallback) chain, so a
+ * theme that omits a colour id still renders something reasonable. This is the only file
+ * in packages/ui permitted to contain a colour literal (B4, scripts/check-tokens.ts).
+ *
+ * Components must reference only --kv-* custom properties, never --vscode-* directly and
+ * never a literal colour: retheming a component is then one line in this file.
+ */
+:root {
+  /* Surfaces */
+  --kv-app-bg: var(--vscode-editor-background, #1e1e1e);
+  --kv-app-fg: var(--vscode-editor-foreground, #cccccc);
+  --kv-panel-bg: var(--vscode-panel-background, var(--kv-app-bg));
+  --kv-panel-border: var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  --kv-widget-shadow: var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+
+  /* Toolbar */
+  --kv-toolbar-bg: var(--vscode-editorGroupHeader-tabsBackground, var(--kv-panel-bg));
+  --kv-toolbar-border: var(--vscode-editorGroupHeader-tabsBorder, var(--kv-panel-border));
+  --kv-button-bg: var(--vscode-button-background, #0e639c);
+  --kv-button-fg: var(--vscode-button-foreground, #ffffff);
+  --kv-button-hover-bg: var(--vscode-button-hoverBackground, #1177bb);
+  --kv-button-secondary-bg: var(--vscode-button-secondaryBackground, #3a3d41);
+  --kv-button-secondary-fg: var(--vscode-button-secondaryForeground, #ffffff);
+
+  /* Commit list rows */
+  --kv-row-fg: var(--vscode-list-foreground, var(--kv-app-fg));
+  --kv-row-hover-bg: var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.05));
+  --kv-row-selected-bg: var(--vscode-list-activeSelectionBackground, #094771);
+  --kv-row-selected-fg: var(--vscode-list-activeSelectionForeground, #ffffff);
+  --kv-row-inactive-selected-bg: var(--vscode-list-inactiveSelectionBackground, #37373d);
+  --kv-focus-border: var(--vscode-focusBorder, #007fd4);
+
+  /* Graph lanes — the one invented palette (no workbench colour id means "branch lane N").
+     Contrast-checked against --kv-app-bg per theme kind; generation is a P4 concern. These
+     eight are a placeholder progression, not yet contrast-validated. */
+  --kv-graph-lane-0: var(--vscode-charts-blue, #3794ff);
+  --kv-graph-lane-1: var(--vscode-charts-green, #89d185);
+  --kv-graph-lane-2: var(--vscode-charts-orange, #d18616);
+  --kv-graph-lane-3: var(--vscode-charts-purple, #b180d7);
+  --kv-graph-lane-4: var(--vscode-charts-red, #f14c4c);
+  --kv-graph-lane-5: var(--vscode-charts-yellow, #cca700);
+  --kv-graph-lane-6: var(--vscode-charts-foreground, #cccccc);
+  --kv-graph-lane-7: var(--vscode-terminal-ansiCyan, #29b8db);
+
+  /* Badges */
+  --kv-badge-local-bg: var(--vscode-gitDecoration-untrackedResourceForeground, #73c991);
+  --kv-badge-remote-fg: var(--vscode-gitDecoration-submoduleResourceForeground, #8db9e2);
+  --kv-badge-tag-fg: var(--vscode-gitDecoration-addedResourceForeground, #81b88b);
+  --kv-badge-fg: var(--vscode-badge-foreground, #ffffff);
+  --kv-badge-bg: var(--vscode-badge-background, #4d4d4d);
+
+  /* Status / diff colours reuse Git's own decoration tokens (§6.1) */
+  --kv-diff-added-fg: var(--vscode-gitDecoration-addedResourceForeground, #81b88b);
+  --kv-diff-modified-fg: var(--vscode-gitDecoration-modifiedResourceForeground, #e2c08d);
+  --kv-diff-deleted-fg: var(--vscode-gitDecoration-deletedResourceForeground, #c74e39);
+  --kv-diff-renamed-fg: var(--vscode-gitDecoration-renamedResourceForeground, #73c991);
+  --kv-diff-conflict-fg: var(--vscode-gitDecoration-conflictingResourceForeground, #e4676b);
+
+  /* Fonts */
+  --kv-font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, sans-serif);
+  --kv-font-size: var(--vscode-font-size, 13px);
+  --kv-mono-font-family: var(--vscode-editor-font-family, ui-monospace, monospace);
+  --kv-mono-font-size: var(--vscode-editor-font-size, 12px);
+
+  /* Scrollbar */
+  --kv-scrollbar-thumb-bg: var(--vscode-scrollbarSlider-background, rgba(121, 121, 121, 0.4));
+  --kv-scrollbar-thumb-hover-bg: var(
+    --vscode-scrollbarSlider-hoverBackground,
+    rgba(100, 100, 100, 0.7)
+  );
+}
+
+/* High-contrast themes draw explicit borders where other themes rely on background fills
+   alone (§6.1). This selector list matches the classes VS Code stamps on <body> (§3.4). */
+body.vscode-high-contrast,
+body.vscode-high-contrast-light {
+  --kv-row-selected-border: var(--vscode-contrastActiveBorder, #f38518);
+  --kv-focus-border: var(--vscode-focusBorder, #f38518);
+}

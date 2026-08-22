@@ -1,0 +1,32 @@
+{
+  "name": "kira-version-vscode",
+  "private": true,
+  "version": "0.0.0",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "check": "bun run format:check && bun run lint && bun run check:types && bun run check:tokens",
+    "check:types": "tsc --build --force && bun run --filter '@kira-version/ui' check:vue",
+    "format:check": "biome format .",
+    "format": "biome format --write .",
+    "lint": "biome lint .",
+    "check:tokens": "bun run scripts/check-tokens.ts",
+    "test": "bun test packages tests/fixtures",
+    "test:e2e": "playwright test",
+    "test:perf": "bun run tests/perf/run.ts",
+    "dev:harness": "bun run --filter '@kira-version/harness' dev"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.10",
+    "@playwright/test": "1.62.1",
+    "@types/bun": "1.4.0",
+    "@types/node": "26.2.0",
+    "playwright-core": "1.62.1",
+    "typescript": "7.0.2"
+  }
+}

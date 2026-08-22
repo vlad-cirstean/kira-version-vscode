@@ -141,3 +141,10 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Kira Version project-specific
+tests/fixtures/.cache/
+test-results/
+playwright-report/
+blob-report/
+*.vsix

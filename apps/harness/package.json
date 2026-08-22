@@ -1,0 +1,19 @@
+{
+  "name": "@kira-version/harness",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@kira-version/core": "workspace:*",
+    "@kira-version/ipc": "workspace:*",
+    "@kira-version/ui": "workspace:*",
+    "vue": "3.5.41"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "6.0.8",
+    "vite": "8.2.2"
+  }
+}

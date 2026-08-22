@@ -1,0 +1,23 @@
+{
+  "name": "@kira-version/ui",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "check:vue": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@kira-version/core": "workspace:*",
+    "@kira-version/ipc": "workspace:*",
+    "@vscode/codicons": "0.0.46-24",
+    "vue": "3.5.41"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "6.0.8",
+    "typescript": "6.0.3",
+    "vite": "8.2.2",
+    "vue-tsc": "3.3.11"
+  }
+}
