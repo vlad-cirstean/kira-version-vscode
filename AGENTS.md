@@ -10,7 +10,7 @@ design was chosen — live in `docs/SPEC.md` and each phase plan's own Findings 
   code, or fix findings directly. Its job is to spawn the right subagents in the right order,
   carry context between them, and track progress; the actual writing happens in a subagent every
   time.
-- Each phase (see `docs/SPEC.md` §10 phasing table, P0–P11) gets an Opus-authored plan committed
+- Each phase (see `docs/SPEC.md` §10 phasing table, P0–P12) gets an Opus-authored plan committed
   under `docs/plans/` before any implementation starts. Produce this by spawning an **Opus
   subagent** (`Agent` tool, `model: "opus"`) whose job is only to write that plan.
 - If a phase's plan is missing from `docs/plans/`, do not implement from the spec directly — get
@@ -130,8 +130,8 @@ design was chosen — live in `docs/SPEC.md` and each phase plan's own Findings 
 - Any agent picking up work **starts from the current tip of `feature/kickoff`** and adds on top
   of it. Fetch it first. Never branch from `main` — `main` stays at the pre-v1 state until v1 is
   done.
-- This holds for as long as phases in `docs/SPEC.md` §10 remain unfinished. Once P11 is complete,
-  `feature/kickoff` merges to `main` and the rule lapses.
+- This holds for as long as phases in `docs/SPEC.md` §10 remain unfinished. Once P12 (Ship) is
+  complete, `feature/kickoff` merges to `main` and the rule lapses.
 - **Never rebase or force-push `feature/kickoff`** — another agent's work may already sit on top
   of it. Merge, don't rewrite.
 - The spec and the phase plans live on the same branch as the code, so a phase's plan is

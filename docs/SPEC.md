@@ -37,7 +37,8 @@ out of v1. Interactive rebase is explicitly v2.
 ### 1.3 Naming
 
 Product name: **Kira Version**. Extension id: `kira-version`. Panel view id:
-`kiraVersion.graph`. Command namespace: `kiraVersion.*`.
+`kiraVersion.graph`; sidebar view id (branch review, §6.8): `kiraVersion.review`. Command
+namespace: `kiraVersion.*`.
 
 ---
 
@@ -45,8 +46,11 @@ Product name: **Kira Version**. Extension id: `kira-version`. Panel view id:
 
 ### 2.1 VS Code
 
-The graph lives in the **panel** (the area hosting the terminal), not the sidebar and not
-an editor tab. This is a webview view contributed to a panel view container:
+The **graph** lives in the **panel** (the area hosting the terminal), not the sidebar and not
+an editor tab. That sentence is about the graph specifically and stays true: v1 contributes
+exactly one other webview view — the branch-review view (§6.8) — and that one deliberately
+lives in the sidebar, for the reasons under "Two surfaces, on purpose" below. The graph is a
+webview view contributed to a panel view container:
 
 ```jsonc
 "contributes": {
@@ -71,6 +75,48 @@ Consequences of the panel choice, all of which the layout must handle:
 - Webview views are **destroyed and recreated** when the panel is hidden, unless
   `retainContextWhenHidden` is set — which is expensive. We instead persist UI state through
   `getState`/`setState` and re-hydrate the graph from the host cache on reveal (§5.4).
+
+**Two surfaces, on purpose.** The branch-review view (§6.8) is contributed to its own
+**activity-bar view container**, i.e. the sidebar, and this is a considered choice rather than
+a place we ran out of room in the panel (D29). The two surfaces answer to different shapes of
+use:
+
+- The **graph is primary and long-lived**. It is opened once and revisited all day, resized
+  constantly, and wants to keep its scroll position, selection and loaded pages across every
+  hide/reveal — which is exactly what §5.4's rehydration contract is for. It is also
+  horizontally dense (graph, message, author, date, sha), so the short-and-wide panel is the
+  shape it wants.
+- **Branch review is one-shot and drill-in.** The user opens it against one branch, reads
+  down a list, expands the commits that interest them, closes it. That is the same shape as
+  Search Results, the Explorer, or a Source Control view — a tall, narrow list you open, use
+  and dismiss — which is what VS Code's own UX vocabulary reserves the sidebar for. It is also
+  vertical: a list of commits, each expanding into a file tree, is a tree, and a tree at 300 px
+  wide and full window height reads better than the same tree squeezed into a third region of a
+  short panel.
+
+Squeezing it into the existing panel webview the way the diff view is a third region of the
+detail pane (§6.4) would have made the panel's narrow breakpoints carry a fourth region, and
+would have put a one-shot flow inside the surface whose whole job is to stay put. Two view
+containers cost one extra `WebviewViewProvider` (`reviewView.ts`, §3.1) and one manifest
+contribution, and nothing else — both views mount the same `packages/ui` bundle (§6.8):
+
+```jsonc
+// alongside the panel container above, in the same "contributes" block
+"viewsContainers": {
+  "activitybar": [
+    { "id": "kiraVersionReview", "title": "Branch Review", "icon": "resources/review-icon.svg" }
+  ]
+},
+"views": {
+  "kiraVersionReview": [
+    { "id": "kiraVersion.review", "name": "Branch Review", "type": "webview" }
+  ]
+}
+```
+
+The review view is **temporary in the sense §6.8 defines**: it is revealed by the command that
+opens it, holds one review session, and gets no rehydration guarantee — the destroy-on-hide
+behaviour above applies to it too, and unlike the graph we simply let it go.
 
 ### 2.1.1 Supported VS Code contexts
 
@@ -155,10 +201,11 @@ kira-version-vscode/
 ├── docs/
 │   ├── SPEC.md                     this document
 │   ├── design/
-│   │   └── panel-mockup.html       the approved visual reference (§6.7)
-│   └── plans/                      phase plans, P0.md … P11.md
+│   │   └── panel-mockup.html       the approved visual reference (§6.9)
+│   └── plans/                      phase plans, P0.md … P12.md
 ├── resources/
 │   ├── icon.svg                    panel view container icon
+│   ├── review-icon.svg             sidebar view container icon (§2.1, §6.8)
 │   └── marketplace/                README assets, screenshots
 ├── scripts/
 │   ├── build.ts                    bundles hosts + ui via bun build / vite
@@ -218,11 +265,12 @@ kira-version-vscode/
 │   ├── ui/                         Vue 3 app. Imports core + ipc only. Never `vscode`.
 │   │   ├── vite.config.ts          one build, one entry (webview) (W13)
 │   │   └── src/
-│   │       ├── main.ts
+│   │       ├── main.ts             mounts App or ReviewView per the host's injected view id (§6.8)
 │   │       ├── App.vue
 │   │       ├── bridge/             client.ts   typed client over the ipc contract
 │   │       ├── state/              repo.ts graphView.ts selection.ts search.ts settings.ts
 │   │       │                       viewState.ts    persisted view state (§2.1, §5.4)
+│   │       │                       review.ts       branch-review session state (§6.8)
 │   │       ├── graph/              graphColumn.ts   the graph column's SlickGrid definition + formatter
 │   │       │                       rowSvg.ts        builds one row's <svg> slice from its segments
 │   │       │                       hitTest.ts       arithmetic lane-within-gutter hit testing
@@ -239,6 +287,9 @@ kira-version-vscode/
 │   │       │   ├── DetailPane.vue CommitMeta.vue FileTree.vue DiffView.vue
 │   │       │   ├── SearchBox.vue SearchResults.vue ConflictBanner.vue
 │   │       │   ├── StashList.vue TagList.vue
+│   │       │   ├── review/         ReviewView.vue       the sidebar view's root (§6.8)
+│   │       │   │                   ReviewCommitRow.vue  one commit, expanding to FileTree.vue
+│   │       │   │                   BaseSelector.vue     comparison-base display + override
 │   │       │   └── dialogs/        CheckoutDialog.vue ResetDialog.vue ForcePushDialog.vue
 │   │       │                       StashDialog.vue TagDialog.vue RevertDialog.vue
 │   │       ├── theme/              vscode-tokens.css  the token layer (§3.4)
@@ -250,6 +301,7 @@ kira-version-vscode/
 │       └── src/
 │           ├── extension.ts        activate/deactivate, command registration
 │           ├── panelView.ts        WebviewViewProvider for the panel container (§2.1)
+│           ├── reviewView.ts       WebviewViewProvider for the sidebar container (§2.1, §6.8)
 │           ├── html.ts             CSP, nonce, asset URIs, initial state injection
 │           ├── transport.ts        postMessage Transport implementation
 │           ├── webview/main.ts     browser-context entry mounted inside the webview; never imports `vscode`
@@ -425,12 +477,22 @@ else in the window.
 `packages/ipc` defines a single typed contract used by both transports:
 
 - **Requests** (UI → host, one response): `repo.open`, `graph.query`, `commit.detail`,
-  `refs.list`, `status.get`, `search.run`, `op.<name>`, `preflight.<name>`.
+  `refs.list`, `status.get`, `search.run`, `review.resolveBase`, `op.<name>`,
+  `preflight.<name>`.
 - **Events** (host → UI, push): `repo.changed`, `graph.invalidated`, `op.progress`,
   `op.finished`, `log`.
 - **Streams** (host → UI, chunked with backpressure): `graph.stream` — commit records
   arrive in batches as the `git log` process produces them, so the first screenful renders
   before the walk completes.
+
+Branch review (§6.8) adds one capability and reuses the rest: `graph.query`/`graph.stream`
+take an **optional commit range**, so a `<base>..<branch>` walk is the existing streaming
+walker with a different argv rather than a second pipeline, and `commit.detail` already
+returns the per-commit file tree the review rows expand into. The one genuinely new request is
+`review.resolveBase`, which answers "what should this branch be compared against" — a branch's
+tracking branch, the repository's detected default branch, and the candidate list the override
+picker offers. Wire format, chunking and version number are P7's plan to settle, not this
+document's.
 
 The contract is defined once, in `packages/ipc`. A host supplies a `Transport`
 (`packages/ipc/src/transport.ts`) rather than a protocol of its own — VS Code's is
@@ -590,6 +652,15 @@ Conflict prediction without touching the worktree (§7.5, §7.6):
 git merge-tree --write-tree --messages --name-only <base> <other>
 ```
 Exit code 0 = clean merge, 1 = conflicts (listed on stdout), >1 = error.
+
+Branch review — base resolution and the range walk (§6.8):
+```
+git symbolic-ref --short refs/remotes/origin/HEAD   # detected default branch, where it is set
+git merge-base <base> <branch>                      # unrelated-histories check before walking
+git --no-optional-locks log <base>..<branch> …      # the walk above, with a range in place of --all
+```
+The tracking branch the resolution prefers is `%(upstream)` from the `for-each-ref` call
+already listed — no extra process for the common case.
 
 Mutating operations are listed per feature in §7.
 
@@ -910,9 +981,129 @@ on the virtualized list are v1 requirements, not polish.
 Every mutating action is available from a context menu on the row it applies to and from the
 toolbar where it is repo-scoped.
 
+### 6.8 Review branch changes
+
+Reading a branch end to end — every commit it adds, and for each of those commits every file
+it touched — is a different task from reading history. The graph answers "what happened, and
+where does this commit sit". This answers "what would merging this branch bring in", one
+commit at a time. It is the question a pull request's *Commits* tab answers, asked locally,
+before the pull request exists and without leaving the editor.
+
+**Entry points.** A **Review branch changes** item on the context menu of a branch, wherever a
+branch is already right-clickable:
+
+- the toolbar's branch picker (`BranchPicker.vue`, §3.1) — right-clicking any branch in the
+  dropdown, local or remote-tracking;
+- the inline branch ref badges in the message column (§6.4's badges, built by `refBadges.ts`,
+  §3.1) — right-clicking the badge reviews *that* branch, not the commit under it, which is
+  the one place in the app where a right-click on a row means something other than "act on
+  this commit"; the menu is titled with the branch name so it cannot be misread.
+- `kiraVersion.reviewBranch` in the command palette, prompting for the branch. This is not a
+  fourth integration point — §6.5's rule is already that every action is palette-reachable.
+
+**It opens in the sidebar** (§2.1, D29), in its own activity-bar container, and reveals itself
+when the command runs. It does not disturb the panel: the graph keeps its scroll position and
+selection, and the two surfaces can be read side by side, which is most of the point of not
+putting the review inside the panel.
+
+**Comparison base** (D30). The review is `git log <base>..<branch>` — the commits reachable
+from the branch and not from the base, which is exactly the set a pull request would call
+"this branch's commits", and exactly what merging into the base would introduce. Two-dot, not
+three-dot: we want the branch's own commits, not the symmetric difference.
+
+The base is **resolved, not asked for**, in this order:
+
+1. **The branch's upstream/tracking branch, when it names a different branch.** `%(upstream)`
+   already comes back from the `for-each-ref` call in §4.4, so this costs no extra process.
+   The qualification carries the weight: the ordinary case — `feature-x` tracking
+   `origin/feature-x` — is the same branch on a remote and says nothing about what the branch
+   introduces (comparing against it would show only the commits not yet pushed), so it falls
+   through to step 2. An upstream naming a *different* branch (`feature-x` tracking
+   `origin/develop`) is a deliberate statement of what this branch forked from, and we honour
+   it.
+2. **The repository's detected default branch** — `origin/HEAD` where it resolves
+   (`git symbolic-ref refs/remotes/origin/HEAD`), else the first of
+   `kiraVersion.review.baseCandidates` (default `main`, `master`) that actually exists as a
+   local or remote-tracking ref.
+3. **Nothing detected → we ask**, with the base picker focused and the commit list empty. We
+   never silently review against a guess; a review against the wrong base is worse than no
+   review, because it looks right.
+
+**Override, always available.** The resolved base is shown in the view's header as a picker —
+never as static text — naming the base and how it was resolved ("upstream", "default branch").
+Changing it re-runs the comparison in place, without reopening the view. The override holds
+for the session, per branch; it is deliberately not persisted, because the branch this one
+forked from is a fact about the moment, and a stale remembered base is the same failure mode
+as a wrong detected one. This is the same defaults-with-override shape as the history scope in
+§4.4 (`--all` with a current-branch toggle) and pull's strategy in §7.3: we pick, we say what
+we picked, and we let the user say otherwise.
+
+**Empty and degenerate cases are stated, not blank.** A branch fully merged into its base, or
+the base itself, produces "nothing to review — `<branch>` adds no commits to `<base>`" naming
+both refs, not an empty list. A branch sharing **no merge base** with the chosen base — where
+`<base>..<branch>` would silently list the branch's entire history as though it were all new —
+says so instead, detected with a `git merge-base` check before the walk rather than discovered
+by the user halfway down a very long list.
+
+**Lifecycle: temporary, and outside §5.4's guarantee.** The view holds exactly one review
+session. Reviewing another branch replaces its contents rather than opening a second view. It
+persists no view state through `setState`, is not rehydrated from the host cache on reveal,
+and takes no part in §5.4's "the same rows repaint without re-running git" contract — when the
+sidebar is hidden and the webview disposed, the session is simply gone, and reopening
+re-resolves the base and re-runs the walk. This is affordable precisely because the walk is
+bounded: a branch's own commits are tens or hundreds, not the 100k the graph is built for. The
+range walk uses the same streaming machinery and the same page size (§5.1.1), so the rare
+enormous range gets the same **Load more** button rather than a special case.
+
+**The interaction, top to bottom.**
+
+1. **A commit list**, newest first, in the same topological order the walk produces. Each row
+   is subject, short sha, author and relative date — the message column's content, minus the
+   graph, because a range of one branch has nothing interesting to draw.
+2. **Each row expands** — disclosure triangle, `→`/`←` or `Enter` on the keyboard — into
+   **that commit's file tree**: the same `FileTree.vue` §6.4 specifies, with the same per-file
+   status (A/M/D/R/C), rename arrows, `+adds/−dels`, and directory rows aggregating their
+   children. Several commits can be expanded at once; the tree for a commit is fetched on
+   first expansion (`commit.detail`, §3.5) and kept for the session.
+3. **Clicking a file opens its diff** — the same in-app unified diff view (§3.3, D13, D14),
+   `<parent> → <commit>` for that path, with the same parent selector on merge commits. At
+   sidebar widths the diff opens as a **full-height overlay over the commit list with a back
+   affordance**, which is the treatment §6.4 already defines for the panel's narrow
+   breakpoint, reused rather than reinvented. Arrow keys move between files with the diff
+   following the selection, so a commit is reviewed file by file without the mouse; `Esc`
+   closes the diff, then collapses the row.
+4. **"Open in editor" and "Go to file" (D14a) come along unchanged.** The sidebar is narrow,
+   which makes the native side-by-side editor tab (`vscode.diff`) the natural move for a diff
+   worth reading closely — an argument for the secondary action mattering more here, not for a
+   second diff implementation. "Go to file" is worth more here than anywhere else in the app:
+   reviewing a branch you have *not* checked out is the normal case, so the files it lands on
+   are routinely files that do not exist on disk, which is exactly the virtual-blob fallback
+   D14a exists for.
+
+**What it reuses, and why that is the whole point.** The file tree, the diff view, "Go to
+file", the streaming walk, `commit.detail`, the token layer and the codicon set are P5's and
+P2's, used as they stand. The review view mounts the same `packages/ui` bundle with a
+different root component, selected from the initial state the host injects (`html.ts`, §3.1),
+so `vite.config.ts`'s one-build-one-entry rule still holds and there is no second UI to keep
+in visual step with the first. What P7 genuinely adds is the sidebar view provider, the base
+resolver, the range-scoped walk, and a commit list whose rows expand.
+
+**What it is not.**
+
+- **Not forge integration.** No pull request is read, created, or commented on; nothing leaves
+  the machine. It is a local `<base>..<branch>` read, and it works on a branch that has never
+  been pushed. Forge overlays remain v2 (§9).
+- **Not a persistent filtered graph view.** It draws no lanes and has no view mode to leave
+  behind; the graph's own scope is untouched while it is open (§9's filtered-walks exclusion
+  stands).
+- **Read-only.** No checkout, reset, revert, cherry-pick or branch operation is offered from
+  it — copy sha and copy message are the only actions on a row. Reviewing is reading; the
+  operations live where they already live (§6.4's row menu, §7), on a surface where the
+  pre-flight, confirmation and undo machinery is already present.
+
 ---
 
-### 6.7 Reference mockup
+### 6.9 Reference mockup
 
 `docs/design/panel-mockup.html` is the approved visual reference for §6 — open it in a browser.
 It is a static drawing, not an implementation, but it is not decoration either: the lane graph
@@ -924,7 +1115,10 @@ this document carries — the geometry it shows (row height, lane pitch, node ra
 shape) is what makes it the visual reference, and that geometry is identical in SVG.
 
 It shows the panel in place beside the Terminal tab, all four theme kinds, the conflicted
-state (§7.11), and the narrow-panel drawer breakpoint (§6.3).
+state (§7.11), and the narrow-panel drawer breakpoint (§6.3). It shows **no branch-review
+view** — the mockup predates §6.8 and draws the panel only. That is a gap in the picture, not
+a claim about the design: §6.8 is normative and the review view's visual language is §6.1's,
+inherited component for component from the detail pane it reuses.
 
 Its standing: **where the mockup and this document disagree, this document wins** — the mockup
 is a picture of one moment in the design and will drift. Where it shows something §6 does not
@@ -1478,11 +1672,12 @@ Phases are sequential; each ends at a checkpoint.
 | **P4** | Graph UI | Vue shell, the SlickGrid commit list over the typed-array store, **Load more button with remaining count and viewport/selection preservation**, the SVG graph column, branch/tag ref badges, columns, selection, refresh action, keyboard nav, responsive breakpoints (§6.3). | 60 fps scroll on the 100k repo; Playwright visual + interaction suite; accessibility pass on the virtualized list; visual regression green across all four theme kinds; side-by-side density review against the native workbench list (6.1). |
 | **P5** | Commit detail | Right pane: metadata, message/trailers/signature, parents, file tree with statuses and counts, **click-a-file-opens-its-diff** via the in-app unified diff view, **a line-mapped "Go to file" action (D14a) that opens the live file or falls back to the historical virtual blob**, copy actions. | Detail populated ≤80 ms; diff opens from tree click and follows keyboard selection; tree correct for renames, merges (parent selector), binary/LFS files; "Go to file" lands on the mapped line in the live file when the path exists in the current checkout, and in the virtual historical blob at that same mapped line when it doesn't (deleted, renamed, or belonging to a commit that isn't an ancestor of what's checked out). |
 | **P6** | Refs & checkout | Branch list and **tag list with full tag manipulation (§7.9)**, create branch, switch branch, detached checkout, delete/rename, **revert (7.10)**, **linked-worktree detection (D12)**, the **undo slot (7.12) seeded by branch and tag deletion**, the **in-progress/conflicted-state banner with VS Code merge-editor delegation, continue and abort (7.11)**, and the full checkout pre-flight engine (§7.5). | Pre-flight classification unit-tested exhaustively; integration tests cover clean-carry, blocked-by-tracked, blocked-by-untracked, in-progress-op; tag create/delete/push incl. annotated and remote-delete asymmetry; revert incl. merge-parent selection; an induced conflicting revert reaches the banner, gates other operations, and both continues and aborts cleanly; undo restores a deleted branch and a deleted annotated tag. |
-| **P7** | Remote ops | Fetch (incl. **opt-in background auto-fetch, default off**), push, decomposed pull with strategy selection, force-push with lease + `--force-if-includes`, protected branches, askpass path, progress + typed auth errors. | Integration tests against a local bare remote incl. non-ff rejection, lease violation, hook rejection; no operation can hang on a prompt. |
-| **P8** | Stash | Stash create (incl. `-u`, message, pathspec), list, show, apply/pop/drop/branch, stashes rendered in the graph, and the pop-prediction engine via `merge-tree` (§7.6) wired into checkout resolution. | Prediction verified against actually-executed pops across clean and conflicting cases; a dropped stash is recoverable through the undo slot. |
-| **P9** | Reset | Soft/mixed/hard with per-mode consequence copy, pre-flight counts, typed confirmation for hard-with-dirty, reflog-backed undo completing the undo slot (7.12). | Integration tests assert repository state per mode; undo restores; guarded during in-progress operations. |
-| **P10** | Search | Input with case/whole-word/regex toggles, commit/refs(branches+tags)/both scope, hybrid client-side + git-backed matching, next/prev navigation, live regex validation, abort-on-supersede. | Semantics table fully covered by tests (each toggle × scope); ≤120 ms budget met; malformed regex never throws. |
-| **P11** | Ship | `.vsix` packaging without `vscode:prepublish`, `extensionKind`/no-browser manifest declarations (2.1.1), **`engines.vscode` floor confirmed (D7)**, **SCM title button and status bar item (6.5)**, marketplace + OpenVSX metadata, docs, settings surface, telemetry-free release checklist. | Installable `.vsix`; full Playwright suite green on macOS. |
+| **P7** | Branch review | The sidebar webview view and its own activity-bar container (§2.1), **Review branch changes** on the branch-picker and ref-badge context menus, the base resolver (upstream → detected default branch → ask, never a silent guess) with the header base picker and `review.resolveBase` (§3.5), the `<base>..<branch>` range-scoped walk over P2's existing streaming machinery, and a commit list whose rows expand into **P5's file tree** and whose files open **P5's unified diff, "Open in editor" and line-mapped "Go to file" (D14a)** unchanged (§6.8). | Review opens from both context menus and the palette, first commits painted ≤300 ms on a 200-commit range; base resolves to the tracking branch when it names a different branch, to the detected default branch when it does not, and to the ask-state when neither exists; the override re-runs the comparison in place without reopening the view; a fully-merged branch reports "nothing to review" naming both refs rather than an empty list; every row expands to the same tree P5 renders (renames, merge parent selector, binary/LFS) and every file opens the same diff, with "Go to file" landing on the mapped line in the virtual blob for a branch that is not checked out; hiding the view drops the session and reopening re-resolves and re-walks (no rehydration path, §5.4); Playwright interaction + visual coverage at sidebar widths across all four theme kinds. |
+| **P8** | Remote ops | Fetch (incl. **opt-in background auto-fetch, default off**), push, decomposed pull with strategy selection, force-push with lease + `--force-if-includes`, protected branches, askpass path, progress + typed auth errors. | Integration tests against a local bare remote incl. non-ff rejection, lease violation, hook rejection; no operation can hang on a prompt. |
+| **P9** | Stash | Stash create (incl. `-u`, message, pathspec), list, show, apply/pop/drop/branch, stashes rendered in the graph, and the pop-prediction engine via `merge-tree` (§7.6) wired into checkout resolution. | Prediction verified against actually-executed pops across clean and conflicting cases; a dropped stash is recoverable through the undo slot. |
+| **P10** | Reset | Soft/mixed/hard with per-mode consequence copy, pre-flight counts, typed confirmation for hard-with-dirty, reflog-backed undo completing the undo slot (7.12). | Integration tests assert repository state per mode; undo restores; guarded during in-progress operations. |
+| **P11** | Search | Input with case/whole-word/regex toggles, commit/refs(branches+tags)/both scope, hybrid client-side + git-backed matching, next/prev navigation, live regex validation, abort-on-supersede. | Semantics table fully covered by tests (each toggle × scope); ≤120 ms budget met; malformed regex never throws. |
+| **P12** | Ship | `.vsix` packaging without `vscode:prepublish`, `extensionKind`/no-browser manifest declarations (2.1.1), **`engines.vscode` floor confirmed (D7)**, **SCM title button and status bar item (6.5)**, marketplace + OpenVSX metadata, docs, settings surface, telemetry-free release checklist. | Installable `.vsix`; full Playwright suite green on macOS. |
 
 **A note on P3's row, for anyone reconciling it against `docs/plans/P3.md`.** P3 originally also
 built and shipped a second, standalone desktop host booting the identical UI bundle, plus the
@@ -1512,7 +1707,7 @@ deliberately deferred rather than left undecided.**
 | D4 | TypeScript 7 | **Write TS7-clean code from day one, run a single TS 5.x checker until `vue-tsc` supports TS 7** (expected ~7.1, October 2026, inside this project's P0-P4 window). The originally-proposed two-checker split was wrong: `vue-tsc` checks whole programs, so TS 5.x would have been checking everything anyway. Full reasoning in 8.3. |
 | D5 | Theme | **Ride VS Code's injected theme.** It pushes the full workbench palette as `--vscode-*` CSS variables plus theme-kind body classes into every webview and keeps them live across theme switches. Details in 3.4, aesthetic rules in 6.1. |
 | D6 | Supported hosts | **Local desktop VS Code.** Remote contexts (SSH, WSL, Codespaces, dev containers) and browser VS Code are out of scope and untested (2.1.1). See §2.2 for why the port seam every host implementation sits behind outlives having only one host to show for it. |
-| D7 | `engines.vscode` floor | **Roughly six months behind current stable — but raised without hesitation whenever a newer API genuinely earns it.** Reach is not worth working around a missing API. The concrete number is set at P0 from the then-current release and revisited at P11. |
+| D7 | `engines.vscode` floor | **Roughly six months behind current stable — but raised without hesitation whenever a newer API genuinely earns it.** Reach is not worth working around a missing API. The concrete number is set at P0 from the then-current release and revisited at P12 (Ship). |
 | D8 | v1 branch | **All v1 work lands on `feature/kickoff`.** Agents start from its tip and add on top for as long as phases remain unfinished; never rebased or force-pushed. A phase may be implemented on its own phase-scoped working branch rather than directly on `feature/kickoff`; once the phase is done, that branch's commits are replayed onto `feature/kickoff`, which stays the one history every later phase starts from regardless of which branch the implementation work happened on. See `AGENTS.md`. |
 
 ### 11.2 Product scope
@@ -1529,6 +1724,8 @@ deliberately deferred rather than left undecided.**
 | D15 | Conflict resolution | **Delegated, not built.** VS Code resolves conflicts natively — the `merge-conflict` extension's inline actions and the SCM view's three-way merge editor work on any conflict markers, whoever created them. We detect, surface, gate operations and hand off; we never auto-resolve (7.11). |
 | D16 | Undo | **Yes, in v1: single-level "undo last operation"** across reset, branch delete, tag delete and stash drop. The recovery data already exists in the reflog and `stash@{}` — we surface it rather than implement it. Limits stated in the UI, not hidden (7.12). |
 | D17 | VS Code integration points | **Three: command palette, an "Open Git Graph" button in the SCM view title, and a status bar item** showing branch plus ahead/behind. The status bar item sits beside VS Code's built-in one with a distinguishing icon and a setting to disable it (6.5). Blame gutter and editor title actions are v2. |
+| D29 | Where branch review lives | **The sidebar, in its own activity-bar view container — a second webview view, not a third region of the panel** (2.1, 6.8). The graph is the primary, long-lived, frequently-resized surface that wants to stay put and keep its state (5.4), and it is horizontally dense, which is what the short-and-wide panel is good for. Branch review is the opposite shape: one-shot, drill-in, vertical — a list you open against one branch, read down, and dismiss, which is what VS Code itself reserves the sidebar for (Search Results, Explorer, Source Control). Putting it in the panel would have added a fourth region to §6.3's narrow breakpoints and buried an ephemeral flow inside the surface whose job is permanence. The cost is one extra `WebviewViewProvider` and one manifest contribution: both views mount the same `packages/ui` bundle with a different root, so there is no second UI to keep in visual step. Deliberate scope, taken with the feature. |
+| D30 | Branch review's comparison base | **Resolved by default, overridable always, never guessed silently.** `git log <base>..<branch>` (two-dot — the branch's own commits, the set a pull request calls "this branch's commits"), with `<base>` resolved as: the branch's upstream when it names a *different* branch, else the repository's detected default branch (`origin/HEAD`, else the first existing of `kiraVersion.review.baseCandidates` = `main`, `master`), else we ask with an empty list rather than reviewing against a guess — a review against the wrong base looks right, which is what makes guessing worse than asking. The resolved base is a picker in the view header, not static text, and says how it was resolved; changing it re-runs in place. The override is session-scoped and deliberately not persisted: what a branch forked from is a fact about the moment, and a stale remembered base fails exactly like a wrongly detected one (6.8). Same defaults-with-override shape as D10's `--all` scope and §7.3's pull strategy. |
 
 ### 11.3 Behaviour and safety
 
@@ -1547,7 +1744,7 @@ deliberately deferred rather than left undecided.**
 | D23 | Telemetry | **None at all.** Nothing collected, so there is no opt-out to design and no privacy policy to write. Easier to never start than to remove later. |
 | D24 | Localization | **English only, and no l10n infrastructure** — no bundle, no string-id indirection, no scaffolding carried for a future that may not come. If it is ever wanted, it is a mechanical change made then. |
 | D25 | Settings | **One schema in `core`**, generating `contributes.configuration` for VS Code at build time. Defined at P3, before ~15 settings accrete in two places; a future host's own settings surface would generate from the same schema rather than inventing a second one. |
-| D26 | Licensing and distribution | **MIT; published to both the VS Code Marketplace and OpenVSX.** The `.vsix` is not notarized. The Apple Developer account and notarization requirement this row used to flag as a decide-before-P11 item belonged to the standalone desktop build (`docs/plans/P4b-remove-electron.md`) and was retired with it, not decided the hard way — no such cost or identity is needed for a `.vsix`. No Windows certificate is needed while D27 holds. |
+| D26 | Licensing and distribution | **MIT; published to both the VS Code Marketplace and OpenVSX.** The `.vsix` is not notarized. The Apple Developer account and notarization requirement this row used to flag as a decide-before-ship item belonged to the standalone desktop build (`docs/plans/P4b-remove-electron.md`) and was retired with it, not decided the hard way — no such cost or identity is needed for a `.vsix`. No Windows certificate is needed while D27 holds. |
 | D27 | Operating systems | **macOS only for v1.** Windows and Linux are not supported or tested. Platform-conditional code sits behind named strategies with the other platforms as explicit unimplemented cases, so adding one later is implementation rather than untangling (2.1.2). |
 | D28 | Continuous integration | **None for now.** No workflows, no hosted runners. `bun run check`, `bun test`, `test:e2e` and `test:perf` are run locally on macOS, and running them before closing a phase is part of the phase's exit criteria rather than something a pipeline enforces. The scripts are written to be CI-callable so adding a pipeline later is configuration, not rework. |
 
