@@ -162,7 +162,7 @@ The port seam that host required is kept deliberately, for three reasons:
   That is not a speculative future host — it is the Playwright suite's primary target (§8.4), and
   it only works because `core`/`ipc`/`ui` compile and run with no host API reachable from them.
   The seam is exercised continuously, not maintained on faith.
-- **A narrow, named boundary is worth having for its own sake.** Twelve small interfaces with one
+- **A narrow, named boundary is worth having for its own sake.** Thirteen small interfaces with one
   implementation each is a legible surface: it is the complete list of what the app asks of its
   environment, it makes each capability independently fakeable in unit tests
   (`ports/testFakes.ts` exists for exactly this), and it keeps `packages/ui` from growing
@@ -202,7 +202,7 @@ kira-version-vscode/
 │   ├── SPEC.md                     this document
 │   ├── design/
 │   │   └── panel-mockup.html       the approved visual reference (§6.9)
-│   └── plans/                      phase plans, P0.md … P12.md
+│   └── plans/                      phase plans, P0.md … P13.md
 ├── resources/
 │   ├── icon.svg                    panel view container icon
 │   ├── review-icon.svg             sidebar view container icon (§2.1, §6.8)
@@ -230,9 +230,9 @@ kira-version-vscode/
 │   │       │                       types.ts   Hazard / Plan / Resolution unions
 │   │       ├── settings/           schema.ts  SETTINGS, coerceSettings, toVsCodeConfiguration (D25)
 │   │       ├── ports/              processRunner.ts fileWatcher.ts workspaceRoots.ts storage.ts
-│   │       │                       secrets.ts clipboard.ts externalOpener.ts dialogs.ts
-│   │       │                       notifications.ts editorIntegration.ts theme.ts logger.ts
-│   │       │                       disposable.ts testFakes.ts index.ts
+│   │       │                       secrets.ts githubAuth.ts clipboard.ts externalOpener.ts
+│   │       │                       dialogs.ts notifications.ts editorIntegration.ts theme.ts
+│   │       │                       logger.ts disposable.ts testFakes.ts index.ts
 │   │       └── util/               nulSplit.ts result.ts assert.ts
 │   │
 │   ├── git/                        the only package that knows git exists
@@ -245,6 +245,7 @@ kira-version-vscode/
 │   │       ├── catFile.ts          persistent `cat-file --batch` process
 │   │       ├── logSession.ts       long-lived paged `git log` process (§5.1.1)
 │   │       ├── watcher.ts          .git + worktree watching → refsChanged / worktreeChanged
+│   │       ├── github.ts           origin URL → owner/repo; branch → PR lookup, cached (§6.7)
 │   │       ├── repoService.ts      composes driver+logSession+store+watcher; cache/eviction (§5.4)
 │   │       ├── rpcHandlers.ts      binds the ipc contract's keys to RepoService + W5's ports
 │   │       ├── errors.ts           exit code + stderr → typed error union
@@ -271,6 +272,7 @@ kira-version-vscode/
 │   │       ├── state/              repo.ts graphView.ts selection.ts search.ts settings.ts
 │   │       │                       viewState.ts    persisted view state (§2.1, §5.4)
 │   │       │                       review.ts       branch-review session state (§6.8)
+│   │       │                       pullRequests.ts branch → PR records for the session (§6.7)
 │   │       ├── graph/              graphColumn.ts   the graph column's SlickGrid definition + formatter
 │   │       │                       rowSvg.ts        builds one row's <svg> slice from its segments
 │   │       │                       hitTest.ts       arithmetic lane-within-gutter hit testing
@@ -374,8 +376,9 @@ under `packages/`) and changes nothing to the left of it (§2.2).
 | `WorkspaceRoots` | candidate repository roots, add/remove events | `workspace.workspaceFolders` |
 | `Storage` | small persisted key/value (per repo and global) | `Memento` (workspace + global) |
 | `Secrets` | credentials the app itself holds (rare — Git owns auth) | `SecretStorage` |
+| `GitHubAuth` | a host-brokered GitHub session token for §6.7's PR lookup, requested lazily and allowed to return none | `authentication.getSession('github', ['repo'])` |
 | `Clipboard` | copy sha, branch, message | `env.clipboard` |
-| `ExternalOpener` | open compare/PR URLs | `env.openExternal` |
+| `ExternalOpener` | open compare/PR URLs (§6.7's PR badge is what opens them) | `env.openExternal` |
 | `Dialogs` | native confirm / pick folder / save file | `window.show*` |
 | `Notifications` | toast + progress reporting | `window.withProgress`, `showMessage` |
 | `EditorIntegration` | open a file at a revision, show a diff, **jump to a mapped line in the live or virtual file (D14a)** | `vscode.diff`, virtual `TextDocumentContentProvider`, `window.showTextDocument` with a `selection` |
@@ -477,8 +480,8 @@ else in the window.
 `packages/ipc` defines a single typed contract used by both transports:
 
 - **Requests** (UI → host, one response): `repo.open`, `graph.query`, `commit.detail`,
-  `refs.list`, `status.get`, `search.run`, `review.resolveBase`, `op.<name>`,
-  `preflight.<name>`.
+  `refs.list`, `status.get`, `search.run`, `review.resolveBase`, `branch.resolvePr`,
+  `op.<name>`, `preflight.<name>`.
 - **Events** (host → UI, push): `repo.changed`, `graph.invalidated`, `op.progress`,
   `op.finished`, `log`.
 - **Streams** (host → UI, chunked with backpressure): `graph.stream` — commit records
@@ -493,6 +496,17 @@ returns the per-commit file tree the review rows expand into. The one genuinely 
 tracking branch, the repository's detected default branch, and the candidate list the override
 picker offers. Wire format, chunking and version number are P7's plan to settle, not this
 document's.
+
+Pull request linking (§6.7) adds one request and no events or streams: `branch.resolvePr`,
+which answers "which pull request, if any, belongs to this branch" with a PR number, title,
+URL and state — or with an explicit *none*, which the UI renders as no badge rather than as a
+failure. It is host-side by construction: the GitHub session and the token it yields stay in
+the extension host and never cross the transport, so the webview asks for a PR record and
+receives a PR record and nothing else. Answers are cached per branch and invalidated by the
+same `refsChanged` signal (§4.5) that invalidates the ref list, so the UI re-requests after a
+fetch without needing to know whether it is served from cache or re-resolved. Wire format,
+whether a request carries one branch or the visible ref set, and the version number are P12's
+plan to settle, not this document's.
 
 The contract is defined once, in `packages/ipc`. A host supplies a `Transport`
 (`packages/ipc/src/transport.ts`) rather than a protocol of its own — VS Code's is
@@ -661,6 +675,12 @@ git --no-optional-locks log <base>..<branch> …      # the walk above, with a r
 ```
 The tracking branch the resolution prefers is `%(upstream)` from the `for-each-ref` call
 already listed — no extra process for the common case.
+
+GitHub pull request linking (§6.7) needs exactly one git command; everything else it does is
+an HTTP call, not a spawn:
+```
+git remote get-url origin     # parsed for owner/repo; any non-GitHub answer leaves it inert
+```
 
 Mutating operations are listed per feature in §7.
 
@@ -981,6 +1001,84 @@ on the virtualized list are v1 requirements, not polish.
 Every mutating action is available from a context menu on the row it applies to and from the
 toolbar where it is repo-scoped.
 
+### 6.7 GitHub pull request links
+
+A local branch on a GitHub repository usually has a pull request, and its number is a fact the
+user wants at hand — to quote it in a message, to find the branch again by it, or to open it
+in the browser. v1 resolves that association and does exactly two things with it: it shows the
+number as a badge on the branch, and it feeds the number and title to search (§7.8). It reads;
+it does not overlay, review, or write (see "What it is not" below).
+
+**How the link is resolved.**
+
+1. **Is this a GitHub repository at all?** `git remote get-url origin`, parsed for `owner/repo`
+   in either the https or the ssh form. Anything else — a GitLab remote, a bare path, no
+   remote at all — and the feature is **inert**: no badge, no network call, no auth prompt,
+   ever. This is the check that runs first, precisely so that the repositories the feature does
+   not apply to never see any of it.
+2. **A session from VS Code itself.** `vscode.authentication.getSession('github', ['repo'],
+   { createIfNone: true })` through the `GitHubAuth` port (§3.3). VS Code ships a GitHub
+   authentication provider in the box: there is no second extension to require, no OAuth
+   application of ours to register, and no login flow we write — it is the GitHub account the
+   user already gave their editor (D31). The session is requested **lazily**, on first actual
+   need — the first badge render, or the first search that could match PR text — and never at
+   activation. Declining is a normal outcome: we do not ask again for the session, and the app
+   is otherwise unaffected.
+3. **One REST call per branch.** `GET /repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=all`,
+   yielding number, title, URL and state. Merged is not a distinct GitHub state — a merged PR
+   is closed with a merge timestamp — so we read both fields rather than reporting a merged PR
+   as merely closed. The result (including "no PR") is cached per branch, bounded by the branch
+   count, dropped with the repo's cached set (§5.4), and invalidated on `refsChanged` from the
+   existing watcher (§4.5) like every other per-ref fact. Nothing polls.
+
+**An installed GitHub extension is enrichment, never a requirement.** Where the GitHub Pull
+Requests extension or GitLens is present, it may be feature-detected for state it has already
+fetched. That is the same optional-capability shape §7.11 and D15 use for conflict resolution:
+detected if there, ignored if not, and nothing in this feature degrades when it is absent —
+which is also why the association is not built on those extensions' internals in the first
+place (D31).
+
+**The badge, in the two places branches are already first-class.** A small `#123` badge on the
+toolbar branch picker's rows (`BranchPicker.vue`, §3.1) and on the inline branch ref badges in
+the message column (`refBadges.ts`, §6.4). It is a ref badge in every visual respect — token
+layer, density, shape vocabulary (§6.1) — with the PR state carried as styling rather than as
+extra words, because badge width in a short panel is scarce. The tooltip names the title and
+the state. **Clicking it opens the pull request in the browser through the `ExternalOpener`
+port** (§3.3), whose stated purpose is already "open compare/PR URLs" — this feature is the
+one that opens them, and it needs no new port to do it.
+
+**Inert, never noisy.** No GitHub remote, no matching pull request, the setting off, the auth
+declined, or the lookup failed — every one of those renders as *no badge*. Never a spinner in
+a virtualized grid row, never an error badge, never a retry loop; a failed lookup is a
+`Logger` line and nothing on screen. A row in the commit list is the worst surface in the app
+on which to display a pending network state, and this is the only feature that could have put
+one there (D32).
+
+**The setting.** `kiraVersion.github.enabled`, default on — but "on" does nothing without a
+GitHub-shaped remote. Off means no session is requested, no request is made, no badge is
+rendered, and search behaves exactly as it did before. It earns its own switch because this is
+the one thing the app does that touches no local git state and leaves the machine on its own
+initiative, and some users will not want their editor's GitHub session spent on it.
+
+**Search.** §7.8's `Refs` scope also matches a branch on its PR number and title. The match
+runs over the cached records described above, so it costs no network round trip per keystroke
+and the ≤120 ms budget in §5.1 is untouched.
+
+**What it is not.**
+
+- **Not PR overlays.** No pull request state is drawn onto commits, rows, or the graph, and no
+  view mode is added. §9's forge-integration exclusion is about exactly that and still stands:
+  a number that links out, plus text that search can find, is a link — not the forge inside
+  the editor.
+- **Not a review or comment UI.** Nothing reads, renders, or posts a review, a comment, or a
+  reviewer list. §6.8 is how you read a branch's changes, locally and without a forge; this
+  section only tells you which pull request that branch belongs to.
+- **No CI or check status.** Not fetched, not shown. A red build is a thing to act on, and
+  acting on it is not in v1.
+- **No writes.** Nothing is created, merged, closed, commented on, or updated on GitHub. The
+  `repo` scope is requested to read private repositories' pull requests, not to change them.
+- **GitHub only.** GitLab, Bitbucket and self-hosted forges are v2 (§9), as is issue linking.
+
 ### 6.8 Review branch changes
 
 Reading a branch end to end — every commit it adds, and for each of those commits every file
@@ -1090,9 +1188,10 @@ resolver, the range-scoped walk, and a commit list whose rows expand.
 
 **What it is not.**
 
-- **Not forge integration.** No pull request is read, created, or commented on; nothing leaves
-  the machine. It is a local `<base>..<branch>` read, and it works on a branch that has never
-  been pushed. Forge overlays remain v2 (§9).
+- **Not forge integration.** The review itself reads, creates and comments on no pull request,
+  and nothing about it leaves the machine — §6.7's PR link is a separate feature that adds
+  nothing to this view. It is a local `<base>..<branch>` read, and it works on a branch that
+  has never been pushed. Forge overlays remain v2 (§9).
 - **Not a persistent filtered graph view.** It draws no lanes and has no view mode to leave
   behind; the graph's own scope is untouched while it is open (§9's filtered-walks exclusion
   stands).
@@ -1293,7 +1392,13 @@ Semantics:
 - **Refs.** Matches local branches, remote-tracking branches, **and tags** by name, over the
   ref list already in memory. Tags additionally match on their annotation message. Results
   are grouped and labelled by kind (local / remote / tag) so `v1.2.0` the tag is never
-  confused with `v1.2.0` the branch. Same three toggles apply.
+  confused with `v1.2.0` the branch. Same three toggles apply. A branch with a resolved pull
+  request (§6.7) additionally matches on its **PR number** — with or without the leading `#` —
+  and on its **PR title**, and surfaces as that same branch hit, carrying its badge. Matching
+  runs over the PR records already cached in memory, so it adds no process and no network
+  round trip to a keystroke. This part arrives with §6.7 at P12, not with the search phase
+  itself; branches without a PR, and every repository without a GitHub remote, match exactly
+  as they did before.
 - **Both.** Two result groups in one dropdown, refs first (they are few and usually what you
   meant), then commits. Selecting a ref scrolls to and highlights the commit it points at
   (for an annotated tag, the commit it dereferences to); selecting a commit selects it in the
@@ -1677,7 +1782,8 @@ Phases are sequential; each ends at a checkpoint.
 | **P9** | Stash | Stash create (incl. `-u`, message, pathspec), list, show, apply/pop/drop/branch, stashes rendered in the graph, and the pop-prediction engine via `merge-tree` (§7.6) wired into checkout resolution. | Prediction verified against actually-executed pops across clean and conflicting cases; a dropped stash is recoverable through the undo slot. |
 | **P10** | Reset | Soft/mixed/hard with per-mode consequence copy, pre-flight counts, typed confirmation for hard-with-dirty, reflog-backed undo completing the undo slot (7.12). | Integration tests assert repository state per mode; undo restores; guarded during in-progress operations. |
 | **P11** | Search | Input with case/whole-word/regex toggles, commit/refs(branches+tags)/both scope, hybrid client-side + git-backed matching, next/prev navigation, live regex validation, abort-on-supersede. | Semantics table fully covered by tests (each toggle × scope); ≤120 ms budget met; malformed regex never throws. |
-| **P12** | Ship | `.vsix` packaging without `vscode:prepublish`, `extensionKind`/no-browser manifest declarations (2.1.1), **`engines.vscode` floor confirmed (D7)**, **SCM title button and status bar item (6.5)**, marketplace + OpenVSX metadata, docs, settings surface, telemetry-free release checklist. | Installable `.vsix`; full Playwright suite green on macOS. |
+| **P12** | GitHub PR links | Branch → pull request resolution (§6.7): GitHub-remote detection from `origin`, the `GitHubAuth` port over VS Code's built-in GitHub authentication provider (D31), the REST lookup, the per-branch cache invalidated by the watcher, `branch.resolvePr` (§3.5), the `#123` badge on branch-picker rows and message-column ref badges opening the PR via `ExternalOpener` (D32), `kiraVersion.github.enabled`, and PR number/title matching added to §7.8's `Refs` scope. | A branch with a pull request shows its badge in both places, distinguishes open/merged/closed, and opens the PR URL externally; search finds that branch by PR number and title within the ≤120 ms budget with no per-keystroke network call; no GitHub remote, no matching PR, the setting off, or a declined session each produce no badge, no request and no repeat prompt, with the rest of the app unaffected; the session is requested on first use only, never at activation, verified by an activation-time assertion. |
+| **P13** | Ship | `.vsix` packaging without `vscode:prepublish`, `extensionKind`/no-browser manifest declarations (2.1.1), **`engines.vscode` floor confirmed (D7)**, **SCM title button and status bar item (6.5)**, marketplace + OpenVSX metadata, docs, settings surface, telemetry-free release checklist. | Installable `.vsix`; full Playwright suite green on macOS. |
 
 **A note on P3's row, for anyone reconciling it against `docs/plans/P3.md`.** P3 originally also
 built and shipped a second, standalone desktop host booting the identical UI bundle, plus the
@@ -1707,7 +1813,7 @@ deliberately deferred rather than left undecided.**
 | D4 | TypeScript 7 | **Write TS7-clean code from day one, run a single TS 5.x checker until `vue-tsc` supports TS 7** (expected ~7.1, October 2026, inside this project's P0-P4 window). The originally-proposed two-checker split was wrong: `vue-tsc` checks whole programs, so TS 5.x would have been checking everything anyway. Full reasoning in 8.3. |
 | D5 | Theme | **Ride VS Code's injected theme.** It pushes the full workbench palette as `--vscode-*` CSS variables plus theme-kind body classes into every webview and keeps them live across theme switches. Details in 3.4, aesthetic rules in 6.1. |
 | D6 | Supported hosts | **Local desktop VS Code.** Remote contexts (SSH, WSL, Codespaces, dev containers) and browser VS Code are out of scope and untested (2.1.1). See §2.2 for why the port seam every host implementation sits behind outlives having only one host to show for it. |
-| D7 | `engines.vscode` floor | **Roughly six months behind current stable — but raised without hesitation whenever a newer API genuinely earns it.** Reach is not worth working around a missing API. The concrete number is set at P0 from the then-current release and revisited at P12 (Ship). |
+| D7 | `engines.vscode` floor | **Roughly six months behind current stable — but raised without hesitation whenever a newer API genuinely earns it.** Reach is not worth working around a missing API. The concrete number is set at P0 from the then-current release and revisited at P13 (Ship). |
 | D8 | v1 branch | **All v1 work lands on `feature/kickoff`.** Agents start from its tip and add on top for as long as phases remain unfinished; never rebased or force-pushed. A phase may be implemented on its own phase-scoped working branch rather than directly on `feature/kickoff`; once the phase is done, that branch's commits are replayed onto `feature/kickoff`, which stays the one history every later phase starts from regardless of which branch the implementation work happened on. See `AGENTS.md`. |
 
 ### 11.2 Product scope
@@ -1726,6 +1832,8 @@ deliberately deferred rather than left undecided.**
 | D17 | VS Code integration points | **Three: command palette, an "Open Git Graph" button in the SCM view title, and a status bar item** showing branch plus ahead/behind. The status bar item sits beside VS Code's built-in one with a distinguishing icon and a setting to disable it (6.5). Blame gutter and editor title actions are v2. |
 | D29 | Where branch review lives | **The sidebar, in its own activity-bar view container — a second webview view, not a third region of the panel** (2.1, 6.8). The graph is the primary, long-lived, frequently-resized surface that wants to stay put and keep its state (5.4), and it is horizontally dense, which is what the short-and-wide panel is good for. Branch review is the opposite shape: one-shot, drill-in, vertical — a list you open against one branch, read down, and dismiss, which is what VS Code itself reserves the sidebar for (Search Results, Explorer, Source Control). Putting it in the panel would have added a fourth region to §6.3's narrow breakpoints and buried an ephemeral flow inside the surface whose job is permanence. The cost is one extra `WebviewViewProvider` and one manifest contribution: both views mount the same `packages/ui` bundle with a different root, so there is no second UI to keep in visual step. Deliberate scope, taken with the feature. |
 | D30 | Branch review's comparison base | **Resolved by default, overridable always, never guessed silently.** `git log <base>..<branch>` (two-dot — the branch's own commits, the set a pull request calls "this branch's commits"), with `<base>` resolved as: the branch's upstream when it names a *different* branch, else the repository's detected default branch (`origin/HEAD`, else the first existing of `kiraVersion.review.baseCandidates` = `main`, `master`), else we ask with an empty list rather than reviewing against a guess — a review against the wrong base looks right, which is what makes guessing worse than asking. The resolved base is a picker in the view header, not static text, and says how it was resolved; changing it re-runs in place. The override is session-scoped and deliberately not persisted: what a branch forked from is a fact about the moment, and a stale remembered base fails exactly like a wrongly detected one (6.8). Same defaults-with-override shape as D10's `--all` scope and §7.3's pull strategy. |
+| D31 | How a branch's pull request is resolved | **VS Code's own built-in GitHub authentication provider, plus a direct REST call — not another extension's internals.** `vscode.authentication.getSession('github', ['repo'], …)` ships inside VS Code: no second extension to require, no OAuth application of ours to register, no login flow to write, and the session is the GitHub account the user already granted their editor. The alternative — reading what the GitHub Pull Requests extension or GitLens has already fetched — was rejected because neither publishes a documented, stable API for "the pull request for branch X"; that association would be a dependency on undocumented internals, breaking on someone else's release, for a feature the user could not then repair. `owner/repo` comes from `origin`'s URL (https or ssh), the lookup is `GET /repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=all`, and the answer is cached per branch and invalidated by §4.5's watcher like every other per-ref fact. The session is requested lazily on first real use, never at activation, and never at all without a GitHub-shaped remote or with `kiraVersion.github.enabled` off. An installed GitHub-aware extension may still be feature-detected as **enrichment only** — the same optional-capability shape as D15's conflict resolution, never a requirement and never a fallback we depend on (6.7). |
+| D32 | What "linked" means in the UI | **A badge on the branch, not only a search index entry.** The number shows where branches are already first-class — the toolbar branch picker's rows and the message column's inline branch ref badges — and clicking it opens the pull request through the existing `ExternalOpener` port (§3.3), whose stated purpose is already "open compare/PR URLs"; no new port. Indexing the association for search alone would have made it real but unfindable: you would have to already know the number to search for it. The badge is **inert rather than noisy** — absent when there is no GitHub remote, no matching PR, the setting is off, or a lookup failed, and absent rather than a spinner or an error while one is in flight — because a row in a virtualized grid is the worst place in this app to display a pending network state (6.1, 6.7). PR number and title also join §7.8's `Refs` scope, so the badge and the search hit are one association surfaced twice, not two features. |
 
 ### 11.3 Behaviour and safety
 
