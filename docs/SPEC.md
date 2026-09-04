@@ -854,10 +854,12 @@ write fails, say so; a copy affordance that silently does nothing is worse than 
   it maps whichever line the cursor/selection sits on in the diff to the corresponding line in
   the target revision, then opens *that* — the real working-tree file at that line when the
   path exists in the current checkout, or the same read-only virtual blob content the diff
-  itself is already rendered from (git object content by sha) when it doesn't, e.g. the file
-  was deleted, renamed since, or the commit isn't an ancestor of what's checked out. It always
-  lands somewhere, and always at the mapped line — it never simply fails because the branch
-  isn't the one on disk. Arrow keys move between files in the tree with the diff
+  itself is already rendered from (git object content by sha) when it doesn't — because the
+  file was deleted or renamed since, or because it **doesn't exist on disk at all**: it was
+  only ever added on a commit that isn't an ancestor of what's checked out (a feature branch
+  not yet merged, a commit on another branch entirely). It always lands somewhere, and always
+  at the mapped line — it never simply fails because the branch isn't the one on disk. Arrow
+  keys move between files in the tree with the diff
   following the selection, so a commit can be reviewed file by file without the mouse.
   Renames show the old → new path; binary files and LFS pointers are labelled rather than
   rendered as garbage.
@@ -1523,7 +1525,7 @@ deliberately deferred rather than left undecided.**
 | D12 | Linked worktrees | **Supported.** `--git-common-dir` already tells us we are in one, so detection is free at P1, and showing the other worktrees' HEADs as badges heads off the "why can't I check out this branch" confusion. Expensive to retrofit later. |
 | D13 | Diff view | **Unified only in v1; side-by-side is v2.** "Open in editor" already gives VS Code users a native side-by-side view via `vscode.diff`, so building our own would duplicate the editor for the one host v1 ships. |
 | D14 | Clicking a file | **Opens its diff in-panel** (6.4). Keeps the user in the graph and keeps both hosts behaving alike; "Open in editor" is the secondary action. |
-| D14a | "Go to file" from the diff | **Line-mapped, and falls back to a virtual document rather than failing.** Computes the corresponding line in the target revision from the diff cursor position; opens the live working-tree file there when the path exists in the current checkout, otherwise the same read-only virtual blob content the diff view already renders from (git object content by sha, independent of what's checked out). Goes further than VS Code's own diff-editor "Go to File" (which only handles the trivial case where the file exists at the checked-out path) — the precedent is GitLens's enhanced "Open File" (6.4). |
+| D14a | "Go to file" from the diff | **Line-mapped, and falls back to a virtual document rather than failing.** Computes the corresponding line in the target revision from the diff cursor position; opens the live working-tree file there when the path exists in the current checkout, otherwise the same read-only virtual blob content the diff view already renders from (git object content by sha, independent of what's checked out) — this covers a file deleted or renamed since, and just as much a file that **has never existed on disk at all**, because it was only ever added on a commit that isn't an ancestor of what's checked out. Goes further than VS Code's own diff-editor "Go to File" (which only handles the trivial case where the file exists at the checked-out path) — the precedent is GitLens's enhanced "Open File" (6.4). |
 | D15 | Conflict resolution | **Delegated, not built.** VS Code resolves conflicts natively — the `merge-conflict` extension's inline actions and the SCM view's three-way merge editor work on any conflict markers, whoever created them. We detect, surface, gate operations and hand off; we never auto-resolve (7.11). |
 | D16 | Undo | **Yes, in v1: single-level "undo last operation"** across reset, branch delete, tag delete and stash drop. The recovery data already exists in the reflog and `stash@{}` — we surface it rather than implement it. Limits stated in the UI, not hidden (7.12). |
 | D17 | VS Code integration points | **Three: command palette, an "Open Git Graph" button in the SCM view title, and a status bar item** showing branch plus ahead/behind. The status bar item sits beside VS Code's built-in one with a distinguishing icon and a setting to disable it (6.5). Blame gutter and editor title actions are v2. |
