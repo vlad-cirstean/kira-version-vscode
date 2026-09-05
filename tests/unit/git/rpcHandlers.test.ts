@@ -29,7 +29,11 @@ import type {
   ServerHandlers,
   StreamChunkOf,
 } from "../../../packages/ipc/src/index.ts";
-import { createRpcClient, createRpcServer } from "../../../packages/ipc/src/index.ts";
+import {
+  CONTRACT_VERSION,
+  createRpcClient,
+  createRpcServer,
+} from "../../../packages/ipc/src/index.ts";
 
 /**
  * W8's own "Done when": every contract key has a handler, and a fake `RepoService` drives a
@@ -42,6 +46,7 @@ function createInMemoryChannelPair(): readonly [MessageChannelLike, MessageChann
   let handlerB: ((message: unknown) => void) | undefined;
 
   const a: MessageChannelLike = {
+    bufferEncoding: "native",
     post(message, transfer) {
       const cloned = transfer
         ? structuredClone(message, { transfer: transfer as ArrayBuffer[] })
@@ -57,6 +62,7 @@ function createInMemoryChannelPair(): readonly [MessageChannelLike, MessageChann
     close() {},
   };
   const b: MessageChannelLike = {
+    bufferEncoding: "native",
     post(message, transfer) {
       const cloned = transfer
         ? structuredClone(message, { transfer: transfer as ArrayBuffer[] })
@@ -341,7 +347,7 @@ describe("createRepoHandlers", () => {
     try {
       const result = await client.request("app.init", {});
       expect(result.host).toBe("harness");
-      expect(result.contractVersion).toBe(5);
+      expect(result.contractVersion).toBe(CONTRACT_VERSION);
       expect(result.settings).toEqual(defaultSettings());
       expect(result.git).toEqual({ kind: "ok", path: "/usr/bin/git", version: "2.40.0" });
       expect(result.capabilities).toEqual({

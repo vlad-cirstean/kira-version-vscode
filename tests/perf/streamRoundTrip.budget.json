@@ -1,9 +1,11 @@
 {
-  "packMs": 7.855990999999904,
-  "cloneMs": 0.3637119999998504,
-  "cloneMsNoTransfer": 1.0793549999998504,
-  "appendMs": 43.07194699999991,
+  "packMs": 7.115360000000237,
+  "cloneMs": 0.1904700000000048,
+  "cloneMsNoTransfer": 1.0729379999997946,
+  "appendMs": 39.907377,
   "wireBytesFirstPage": 420028,
   "wireBytes100k": 8397970,
-  "roundTripMs100k": 716.9024090000003
+  "roundTripMs100k": 789.2900260000001,
+  "hostBoundaryMs": 4.743741000000227,
+  "hostWireBytes": 563748
 }

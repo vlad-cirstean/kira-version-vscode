@@ -264,7 +264,8 @@ kira-version-vscode/
 │   │   └── src/
 │   │       ├── contract.ts         request/response/event/stream type map, versioned
 │   │       ├── transport.ts        Transport interface both hosts implement
-│   │       ├── codec.ts            encode/decode incl. ArrayBuffer transfer lists
+│   │       ├── codec.ts            encode/decode incl. ArrayBuffer transfer lists + per-transport
+│   │       │                       buffer encoding (native/base64) (§3.5, D34/D35)
 │   │       ├── rpc.ts              the one generic endpoint: correlation, stream credits,
 │   │       │                       cancellation, version validation (P3 W2)
 │   │       └── validate.ts         boundary validation; a schema mismatch fails loudly
@@ -542,14 +543,30 @@ plan to settle, not this document's.
 
 The contract is defined once, in `packages/ipc`. A host supplies a `Transport`
 (`packages/ipc/src/transport.ts`) rather than a protocol of its own — VS Code's is
-`webview.postMessage` (structured clone, `ArrayBuffer` transferable). Every message is
-versioned and validated at the boundary; a schema mismatch fails loudly rather than
-half-working.
+`webview.postMessage`, which, measured directly against a real `WebviewView` (P15's W1
+finding), carries **neither** a structured clone of a raw `ArrayBuffer` nor a transfer list: a
+bare buffer arrives as `{}`. Every message is versioned and validated at the boundary; a schema
+mismatch fails loudly rather than half-working.
 
-The wire encoding itself (JSON-shaped payloads over structured clone) is not pinned for the
-long term. A future migration to a binary format (FlatBuffers) is tracked as **P15, §10** —
-deliberately last, not designed yet, so this is a placeholder mention rather than a commitment
-to a shape.
+A host's `Transport` also declares what its own channel can carry — `MessageChannelLike.
+bufferEncoding` (`packages/ipc/src/rpc.ts`), one of `"native"` (a real `ArrayBuffer`/transfer
+list survives) or `"base64"` (it does not, so `packages/ipc/src/codec.ts` replaces every buffer
+with a tagged base64 string before the message ever reaches the channel). The encoding itself
+is `packages/ipc`'s decision, not a host's: `codec.ts` walks the whole message generically and
+applies whichever transform the declared encoding calls for, so a host's own channel adapter
+stays a thin `postMessage` wrapper with no format logic of its own (D34).
+
+**P15 measured FlatBuffers against this boundary and declined it (D33).** On the only host v1
+ships, the zero-copy/transferable advantage FlatBuffers would trade on is unavailable by
+construction (the paragraph above), so a FlatBuffers payload must be base64'd exactly like
+today's packed columns — measured component-for-component, it is indistinguishable from
+base64-over-the-existing-format on the graph stream and loses on a 1 MiB diff, for the cost of
+a native `flatc` toolchain with no working npm distribution and the loss of
+`wireConformance.test.ts`'s compile-time drift check. The wire encoding is base64-tagged JSON
+(D35), applied uniformly to every buffer on the contract (D36), not FlatBuffers — reopen only if
+a host arrives whose transport carries binary natively and a payload is measured where encoding,
+not `packages/core`'s own `appendPacked`, is the bottleneck. Full reasoning, measurements and the
+FlatBuffers work program (should that reopening ever happen) are in `docs/plans/P15.md`.
 
 ---
 
@@ -1841,7 +1858,7 @@ Phases are sequential; each ends at a checkpoint.
 | **P12** | GitHub PR links | Branch → pull request resolution (§6.7): GitHub-remote detection from `origin`, the `GitHubAuth` port over VS Code's built-in GitHub authentication provider (D31), the REST lookup, the per-branch cache invalidated by the watcher, `branch.resolvePr` (§3.5), the `#123` badge on branch-picker rows and message-column ref badges opening the PR via `ExternalOpener` (D32), `kiraVersion.github.enabled`, and PR number/title matching added to §7.8's `Refs` scope. | A branch with a pull request shows its badge in both places, distinguishes open/merged/closed, and opens the PR URL externally; search finds that branch by PR number and title within the ≤120 ms budget with no per-keystroke network call; no GitHub remote, no matching PR, the setting off, or a declined session each produce no badge, no request and no repeat prompt, with the rest of the app unaffected; the session is requested on first use only, never at activation, verified by an activation-time assertion. |
 | **P13** | Ship | `.vsix` packaging without `vscode:prepublish`, `extensionKind`/no-browser manifest declarations (2.1.1), **`engines.vscode` floor confirmed (D7)**, **SCM title button and status bar item (6.5)**, the **`kiraVersion.*` command-palette audit** wiring a command for every mutating operation introduced across P6–P10 (6.5/6.6's "every action is palette-reachable", which no earlier row owns), marketplace + OpenVSX metadata, docs, settings surface, telemetry-free release checklist. | Installable `.vsix`; every mutating operation reachable from the palette; full Playwright suite green on macOS. |
 | **P14** | Worktree support | *Not designed yet — planned in full only when this phase's turn comes up, after P13.* Placeholder so the request is not lost: git worktree create/list/switch/remove (building on D12's existing linked-worktree detection from P6), and a user-configurable "prepare script" run after creating a worktree, with visible progress feedback while it runs (it can take a while). | *To be defined at design time.* |
-| **P15** | IPC wire format migration | *Designed and implemented out of sequence, ahead of P7, by explicit instruction — this row's "deliberately last" production-order intent is unchanged for anything not yet done; see `docs/plans/P15.md`.* Placeholder text below is superseded once the phase's own commits land; original brief: replace today's JSON-shaped `structured clone` wire encoding (§3.5) with FlatBuffers, for lower serialization overhead on large payloads (e.g. graph streaming). Scope, versioning and migration path are to be decided at design time, not here. | *To be defined at design time — see `docs/plans/P15.md`'s own exit criteria and D33's recommendation.* |
+| **P15** | IPC wire format fix | **Designed and implemented out of sequence, ahead of P7, by explicit instruction** (the "deliberately last" production-order intent above is unchanged for anything not yet done). The row's original brief asked for a FlatBuffers migration; measured directly against the real host boundary, FlatBuffers was declined (D33) — the transferable/zero-copy win it would trade on does not exist on `webview.postMessage` (P15's W1 finding), so it ties or loses against a simpler fix. What shipped instead: `toWireSafe`'s ad hoc, untested `number[]` transform is deleted, replaced by a per-transport `bufferEncoding` (D34) that `packages/ipc/src/codec.ts` applies uniformly — base64-tagged buffers (D35/D36) where a channel cannot carry bytes, proven by a genuine runtime round trip at the real boundary, not only a compile-time shape check (D37). See `docs/plans/P15.md` for the measurements and full reasoning. | Met: `toWireSafe` gone, every transport declares its `bufferEncoding` explicitly (the two `host-vscode` halves from one shared constant), `wireConformance.test.ts` proves a real round trip, `tests/perf/streamRoundTrip.ts` gates the boundary's own cost (~4.7 ms / ~564 KB per 5,000-row page under `"base64"`, against a ~47 ms / ~1.33 MB baseline under the deleted transform), the VS Code e2e tier asserts real row content crossed the wire intact, `CONTRACT_VERSION` is 6, and no FlatBuffers artefact exists anywhere in the tree. Full checklist and measured numbers in `docs/plans/P15.md`'s own Findings. |
 
 **A note on P3's row, for anyone reconciling it against `docs/plans/P3.md`.** P3 originally also
 built and shipped a second, standalone desktop host booting the identical UI bundle, plus the
@@ -1873,6 +1890,11 @@ deliberately deferred rather than left undecided.**
 | D6 | Supported hosts | **Local desktop VS Code.** Remote contexts (SSH, WSL, Codespaces, dev containers) and browser VS Code are out of scope and untested (2.1.1). See §2.2 for why the port seam every host implementation sits behind outlives having only one host to show for it. |
 | D7 | `engines.vscode` floor | **Roughly six months behind current stable — but raised without hesitation whenever a newer API genuinely earns it.** Reach is not worth working around a missing API. The concrete number is set at P0 from the then-current release and revisited at P13 (Ship). |
 | D8 | v1 branch | **All v1 work lands on `feature/kickoff`.** Agents start from its tip and add on top for as long as phases remain unfinished; never rebased or force-pushed. A phase may be implemented on its own phase-scoped working branch rather than directly on `feature/kickoff`; once the phase is done, that branch's commits are replayed onto `feature/kickoff`, which stays the one history every later phase starts from regardless of which branch the implementation work happened on. See `AGENTS.md`. |
+| D33 | FlatBuffers for the IPC wire format | **Declined for v1, on measured grounds — not deferred vaguely.** On the one host v1 ships, `webview.postMessage` carries no transfer list and (P4c) no raw bytes, so FlatBuffers' zero-copy/transferable advantage is unavailable by construction and its payload must be base64'd exactly like today's packed columns. Measured component-for-component on a 5,000-row chunk it is *indistinguishable* from base64-over-the-existing-format (2.45 ms vs 2.47 ms, 560,416 vs 560,395 bytes); on a 1 MiB `commit.fileDiff` it is 2.4x slower to encode; on every small request it is irrelevant. Against that it costs `.fbs` schemas, a native `flatc` with no working npm distribution, committed generated code, and the loss of `wireConformance.test.ts`'s compile-time drift check. Reopen only if a host arrives whose transport carries binary natively **and** a payload is measured where encoding, not `appendPacked`, is the bottleneck. Full measurements: `docs/plans/P15.md`. |
+| D34 | Where a payload encoding lives | **In `packages/ipc/src/codec.ts`, declared per transport — never hand-rolled per host.** `encode`/`decode` are already the seam (`rpc.ts`'s `post`/`receive` are their only callers). A transport declares what it can carry (`MessageChannelLike.bufferEncoding`); `codec.ts` applies the matching transform. `host-vscode/src/transport.ts`'s old `toWireSafe` is deleted, not moved: a host's channel adapter is ~10 lines of `postMessage` plumbing (§3.5) and must not be where the wire format is decided. |
+| D35 | The encoding for a transport that cannot carry binary | **base64, via `Uint8Array.prototype.toBase64` / `Uint8Array.fromBase64` where present, with a small feature-detected fallback.** Measured against the alternatives on a 420,028-byte page: base64 → 560,048 JSON bytes; a latin1 binary-string encoding is *larger* (JSON escaping of control bytes inflates it past base64) at 4x the stringify cost; hex is larger still. The packed columnar format itself does not change — `packSlice`/`appendPacked`, the interning scheme and `PackedCommitChunk`'s field list are untouched. |
+| D36 | What the encoding applies to | **Buffers, wherever they appear on the contract** — not a per-key allowlist and not "the graph stream": `codec.ts` walks the message generically, and a rule expressed as "every `ArrayBuffer`" cannot be forgotten by the next phase that adds one. |
+| D37 | Is the real host's boundary tested and budgeted | **Both.** `wireConformance.test.ts` has a genuine round trip through each declared encoding, and `tests/perf/streamRoundTrip.ts` has a gated metric modelling the real VS Code path — the harness's `structuredClone`-with-transfer bridge is strictly *better* than what ships, so no other suite can see a regression on the boundary that matters. |
 
 ### 11.2 Product scope
 

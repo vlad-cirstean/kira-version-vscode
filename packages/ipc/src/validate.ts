@@ -4,7 +4,7 @@ import type { EventKey, RequestKey, StreamKey } from "./contract.ts";
  * Boundary validation. Per §3.5, a contract mismatch must fail loudly rather than
  * half-work — so this throws, it does not degrade.
  */
-export const CONTRACT_VERSION = 5;
+export const CONTRACT_VERSION = 6;
 
 export class ContractVersionMismatchError extends Error {
   readonly received: number;

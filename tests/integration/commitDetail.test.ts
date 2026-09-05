@@ -337,6 +337,7 @@ function createInMemoryChannelPair(): readonly [MessageChannelLike, MessageChann
   let handlerA: ((message: unknown) => void) | undefined;
   let handlerB: ((message: unknown) => void) | undefined;
   const a: MessageChannelLike = {
+    bufferEncoding: "native",
     post(message, transfer) {
       const cloned = transfer
         ? structuredClone(message, { transfer: transfer as ArrayBuffer[] })
@@ -352,6 +353,7 @@ function createInMemoryChannelPair(): readonly [MessageChannelLike, MessageChann
     close() {},
   };
   const b: MessageChannelLike = {
+    bufferEncoding: "native",
     post(message, transfer) {
       const cloned = transfer
         ? structuredClone(message, { transfer: transfer as ArrayBuffer[] })
