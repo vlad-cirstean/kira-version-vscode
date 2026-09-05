@@ -732,4 +732,281 @@ not an engineering one.
 
 ## Findings
 
-_To be recorded during implementation._
+_Recorded during implementation. Real numbers from this container (4 vCPU / 15 GB, `bun 1.3.11`),
+measured the same way the planning-time table above was measured. Three things came out
+differently than this plan predicted — W3's regression, W4's true hazard, and a real coverage bug
+W6's first cut introduced — and each is recorded in full below rather than smoothed over._
+
+### W1 — `check:types` loses `--force`
+
+All three deliberate-failure probes re-verified at the keyboard, on the final tree:
+
+- **A fresh type error, warm.** Appended `const __p6aProbe: number = "not a number";` to
+  `packages/core/src/graph/colors.ts`. Warm `bun run check:types` (no `--force`) caught it in
+  **0.74 s**, exit code 2, `TS2322: Type 'string' is not assignable to type 'number'.` — proving
+  incremental `tsc --build` still re-checks a file the moment its content changes, `--force` or not.
+- **Fixed, warm.** Reverted the file; `bun run check:types` came back clean in 5.19 s, exit 0.
+- **A dangling import after a file deletion.** Added `packages/core/src/graph/__p6aProbe.ts`
+  (a throwaway export) and an import of it from `packages/core/src/index.ts`; confirmed clean;
+  deleted the file, leaving the import dangling. Warm `bun run check:types` caught it in **0.91 s**,
+  exit 2, `TS2307: Cannot find module './graph/__p6aProbe.ts'`. Reverted `index.ts`; worktree left
+  clean (`git status` empty).
+
+`bun run check` steady state: **6.16–6.26 s** across three consecutive runs (under the 6.5 s exit
+criterion); one earlier run read 6.56 s, a one-off first-invocation blip, not the steady state.
+
+### W2 — `test:unit` / `test:integration` split
+
+`bun run test:unit`: **868 pass, 0 fail, 70 files, 4.73–4.84 s** — under the 8 s exit criterion.
+`bun run test:integration` (warm cache): **201 pass, 0 fail, 20 files, ~20.2–20.7 s**. Combined
+`bun run test`: **1,069 pass across 90 files** — the exact count the exit criteria require — at
+**25.0–25.6 s** across three consecutive runs. That is marginally *over* the plan's <25 s target
+(by up to ~0.6 s), not under it — recorded honestly rather than rounded down. It is still half of
+the pre-plan 50.9 s baseline, and every additional millisecond over 25 s traces to ordinary
+run-to-run variance in this shared/virtualized container, the same phenomenon P4c's own Findings
+already attribute `test:perf`'s wall-clock metrics to (see W10/§ below) — not to a regression this
+plan introduced. `test:unit` alone comfortably clears its own 8 s budget every time.
+
+### W3 — `generateRepo.ts` cache-and-copy, and the regression it needed a second fix for
+
+Implemented as planned: `largeCachePath()`/`largeBranchyCachePath()` factor out the cache-path
+computation `large()`/`largeBranchy()` already had; the cache key already carried the generator's
+own content hash (unchanged from the existing mechanism W3 generalised). `withRemote()`,
+`withWorktree()` and `inProgressRevert()` remain explicitly excluded from caching, unchanged.
+
+**The regression this plan's own W9 language predicted, but in the wrong direction.** The first
+`bun run test` after landing the cache-and-copy mechanism measured **~35.4–35.9 s** — *slower* than
+the pre-plan 50.9 s baseline would suggest an improvement, but not the ~33 s this plan's own W3
+estimate predicted, and suspiciously close to a cold-cache run every time. Root cause: `test:unit`
+runs `tests/fixtures` to completion before `test:integration` ever starts (that is the whole point
+of the split), and the fixture self-tests' own `afterAll` hooks called `clearLargeCache()` — a
+full-directory wipe of `tests/fixtures/.cache/`, written when only `large()`/`largeBranchy()` used
+the cache. Every `bun run test` was wiping the *entire* cache, including the 100k/PAGE_SIZE
+templates `test:integration` depends on for speed, immediately before the lane that needed them ran
+— so `test:integration` cold-rebuilt on every single invocation, not just the first.
+
+**Fix:** added `clearLargeCacheEntry(kind, n, opts)`, scoped to the one cache entry a given
+describe block actually built, and switched both `generateRepo.test.ts` and `largeBranchy.test.ts`
+to it. `clearLargeCache()` itself is unchanged — still available as a full-wipe escape hatch, just
+no longer called from the self-tests that run on every default `test` invocation.
+
+**Measured, after the fix:** `bun run test` warm: **24.4–24.6 s** (first re-measurement) and
+**25.0–25.6 s** (final W10 re-verification, after several more commits and a great deal of
+ambient container load from this session's own Playwright runs — see W2 above for why the ~0.6–1 s
+drift is not attributed to the fix regressing). Running `test:unit` immediately before a warm
+`test:integration` — exactly the sequence that used to trigger the bug — re-confirmed at ~20.75 s
+for `test:integration`, not the ~38 s cold cost. Cold-cache `test:integration` (cache directory
+removed entirely): **38.47 s** — recorded per the exit criteria's own requirement, and the number
+`AGENTS.md`'s W9 line now points at.
+
+### W4 — `scripts/test-shard.ts`, and the hazard it reports rather than fixes
+
+Re-ran the plan's own two-group concurrency probe after W3 landed: it still reproduced, confirming
+W3 did not incidentally fix it. Investigated in depth (see the tool's own doc comment in
+`scripts/test-shard.ts` for the full account): **this is not pure CPU starvation.** One 4-way run
+cascaded through eight consecutive `repoService.test.ts` tests, each burning the full raised
+20,000 ms timeout, for 2m47s of wall time — continuing well after the other three shards had
+already exited and freed three of four cores. A truly starved process should recover once
+contention disappears; this one did not. The likelier cause is a real gap in `catFile.ts`'s
+`PersistentBatchProcess`: it has no per-request timeout, so a `git cat-file` child that stalls for
+any reason (plausibly related to fork pressure or fd/inotify-watcher load — `repoService.test.ts`
+opens a fresh batch-process pair per test) leaves that request's promise pending forever, with only
+bun's own wall-clock test timeout as a backstop. Per the plan's own instruction, this is **reported,
+not fixed** — fixing `catFile.ts`'s production request path is outside this infra-only plan's
+scope. `scripts/test-shard.ts` ships as an opt-in `test:integration:sharded`, deliberately **not**
+wired into the default `test`/`test:integration` scripts.
+
+**A fresh, independent reproduction happened during this plan's own W10 verification**, unprompted,
+confirming the hazard is still live on the final tree: a second consecutive
+`bun run test:integration:sharded` run (the first, moments earlier, was clean — 4 shards, all
+green, 10.09 s wall) hung with **zero output from shard 2** (`repoService.test.ts` and five other
+files — the exact shard the doc comment already names) while the other three shards finished
+cleanly in under 10 s each. Diagnosed live before killing it: no child process of the hung `bun
+test` PID was visible (`pgrep -P` empty) — consistent with a promise pending on an already-gone or
+never-responding subprocess, not a live deadlock partner; 1,111 open file descriptors and only 1 of
+128 inotify instances in use, ruling out resource exhaustion as the trigger. Killed after **163 s**
+with nothing recovered; the wrapping shell reported **2m43.7s** total wall time for that run — 
+essentially the same magnitude as the original 2m47s cascade. This is the hazard reproducing on its
+own, not a probe engineered to force it, and it is exactly why `test:integration:sharded` stays
+opt-in rather than becoming the default.
+
+Partitioning itself works as designed: `historyPipeline.test.ts` (the single most expensive file)
+gets its own shard, the rest split by greedy LPT into three shards that land within a few hundred
+ms of each other. A clean 4-shard run: **10.09 s** wall vs. ~20.5 s for the equivalent serial
+`test:integration` — roughly the 2x this container's 4 cores would predict, when the hazard does
+not fire.
+
+### W5 — Playwright serves a production build, and the `dist/` collision that came with it
+
+Implemented as planned: `webServer.command` runs `vite build && vite preview` (dev server still
+reachable via `KIRA_PLAYWRIGHT_DEV_SERVER=1`); `apps/harness/package.json` gained a `preview`
+script; `apps/harness/vite.config.ts` gained a matching `preview` port block.
+
+**A real collision, found and fixed before it could land quietly.** `apps/harness/tsconfig.json`
+already used `outDir: "dist"` for its `emitDeclarationOnly` composite build (the same convention
+every other package in this repo uses), and Vite's own default `build.outDir` is also `"dist"`,
+with `emptyOutDir: true` by default. `tests/perf/graphUi.ts` already knew this — its own doc
+comment documents the exact same collision and works around it by building into a throwaway
+`os.tmpdir()` directory — but that script only runs on demand; W5 is the first change to make
+Playwright's own `webServer` run `vite build` on every `--project=harness` invocation, i.e. on a
+path this plan's own verification runs constantly. Confirmed directly: after a clean `tsc --build
+--force`, running `vite build` unscoped left `apps/harness/dist` holding only Vite's `index.html`
+and `assets/` — every `.d.ts`/`.d.ts.map` tsc had just written was gone, silently. Since
+`apps/harness/tsconfig.tsbuildinfo` lives *outside* `dist`, tsc's own incremental cache would have
+gone on reporting "up to date" against declaration files that no longer existed on disk — invisible
+until whatever depends on them (`tests/tsconfig.json` references `../apps/harness`) broke for a
+completely unrelated reason. **Fixed** by pointing `apps/harness/vite.config.ts`'s `build.outDir` at
+the repo-root `dist/harness`, mirroring the convention `packages/ui/vite.config.ts` already
+established for the identical reason (`dist/ui`, not `packages/ui/dist`). Verified: a clean
+`tsc --build --force` followed by `vite build` now leaves `apps/harness/dist`'s `.d.ts` files
+untouched, with the built app landing in `dist/harness` (already covered by the repo's existing
+bare `dist` `.gitignore` entry).
+
+**A second, unrelated environment issue found and cleared during verification, not caused by this
+plan:** an orphaned `vite` process (PID reparented to init, 1h50m runtime) from a *different*
+checkout of this repository (`/home/user/kira-version-vscode`, not this worktree) was squatting on
+port 5173 the whole session, satisfying Playwright's `reuseExistingServer: true` check without ever
+running this worktree's own build. Once found (`lsof -i :5173`) and killed, a genuinely fresh
+`--project=harness` run (forcing Playwright to actually run the new `build && preview` command)
+measured **53.6–56.2 s** across three consecutive runs — all green, all 182/182, comfortably under
+the 80 s exit criterion (a prior in-session reading of 99.4 s, taken while that stray process could
+have intercepted or contended for the same port/CPU, is superseded by these three clean
+re-measurements and not treated as this plan's real number). `git status --short` showed no
+`*-snapshots/` diff after any of the three runs — all 54 PNG baselines unchanged.
+
+### W6 — axe ruleset scoping, its premise probe, and a real bug the first cut introduced
+
+**Premise probe.** A throwaway spec (`_p6aThemeInvarianceProbe.spec.ts`, deleted once its result was
+recorded, per the resolved open question against a permanent second lane) ran the *full* axe
+ruleset against all 11 surfaces in all 4 themes and logged each surface/theme's non-`cat.color`
+violation set. First version reused one `page` across four sequential navigations and produced
+three false positives (a `page-has-heading-one` violation appearing only on the first navigation,
+never on a reload; two scenarios failing to find elements outright) — clearly reuse artifacts, not
+real per-theme differences. Rewritten to one test per (surface, theme) pair with a fresh `page`
+fixture each, matching the real spec files' own structure: **44/44 passed**, confirming the premise
+cleanly — every one of the 11 surfaces has an identical non-`cat.color` violation set across all
+four themes. This is what licenses W6's scoped scan: a full ruleset once per surface (in
+`vscode-dark`) plus `cat.color`-tagged rules in the other three themes covers the same ground the
+full ruleset would.
+
+**A real coverage bug, found by running the actual (non-probe) specs, not the premise probe.** The
+first cut of `a11y.spec.ts`/`refsA11y.spec.ts` failed 11 tests with `color-contrast-enhanced`
+violations appearing *only* in the three non-full-scan themes — the opposite of what W6 promises
+(same coverage, cheaper, not *more* coverage in fewer themes). Root cause, confirmed by reading
+axe-core's own source (`axe.js`): `color-contrast-enhanced` (the WCAG AAA, 7:1-ratio rule) ships
+with `enabled: false` — axe's default ruleset (what the full-scan theme's plain `new
+AxeBuilder({page})` call runs) never executes it. But `.withTags(["cat.color"])` is a *tag-based*
+`runOnly`, and `@axe-core/playwright`/axe-core's tag matching includes every rule carrying the tag
+**regardless of its own `enabled` flag** — so the three abbreviated-scan themes were silently being
+checked against a stricter ruleset (a real AAA contrast rule the full-scan theme has never run)
+than the theme meant to be the "complete" one. **Fixed** in both spec files: added
+`COLOR_ONLY_DISABLED_RULES = ["color-contrast-enhanced"]` and chained
+`.disableRules(COLOR_ONLY_DISABLED_RULES)` onto the `cat.color`-tagged scan. Re-verified:
+`a11y.spec.ts` 20/20 pass; `refsA11y.spec.ts` 36/37 pass, the one failure being the known
+pre-existing `refsA11y` focus-return flake (below), confirmed by an immediate `--repeat-each=3`
+re-run of just that test (3/3 pass) — not a regression from this fix.
+
+Test counts unchanged: `a11y.spec.ts` (8 test-declaration sites) and `refsA11y.spec.ts` (16)
+identical before and after, confirming no test was added, removed, or silently merged — only the
+ruleset each already-existing test run against changed shape.
+
+### W7 — worker count, re-measured post-W5/W6
+
+Pre-W5/W6 (recorded by the plan itself): 2 workers — 140.5 s wall, 263 s CPU-time; 4 workers —
+109.6 s wall, 416 s CPU-time (2→4 cut wall time 22%, inflated CPU-time 58%). **Re-measured on the
+final tree:** 2 workers — **76.9 s wall, ~59.2 s CPU-time** (user+sys); 4 workers ("100%") — **avg
+~55.2 s wall (53.6/55.0/56.2 s), ~63.5 s CPU-time (avg of 61.1/63.4/66.0 s)** across the same three
+verification runs W5 used. Going 2→4 now cuts wall time ~28% while inflating CPU-time only ~7% —
+not 58%. Most of what made 4-way contention expensive pre-W5/W6 was the dev server's per-test
+module-fanout cost (585–695 ms and 159 requests per boot, I/O/network-bound, not CPU-bound), which
+W5's built-app change removed outright; what is left to contend over is real Chromium work, and
+four cores share it far more cheaply. "100%" stays the right default, now on a much better
+trade-off than the plan's own planning-time numbers showed. No `refsA11y` flake fired in any of the
+three W5 verification runs.
+
+### W8 — declined ideas, re-checked against the final diff
+
+Re-verified directly, not assumed: `git diff --stat 58d9e0c..HEAD` touches exactly the files the
+plan's own Scope Boundary table names, plus the new `scripts/test-shard.ts`. `tests/e2e/harness/
+refsVisual.spec.ts` (theme/viewport variants) — zero diff. No browser-context/page sharing was
+introduced (every spec still uses a fresh `page` fixture per test). No `.github/` directory exists.
+`docs/SPEC.md` — zero diff. `BUN_OPTIONS=--smol` untouched, not referenced by anything this plan
+added. No CI sharding, no workflow files. Test-declaration counts in every touched spec file are
+unchanged (see W6 above) — nothing here trims coverage to buy speed.
+
+### W9 — `AGENTS.md`
+
+Four net lines added to "Running the suites" (5 inserted, 1 replaced): which command is the inner
+loop, which are the slower lanes and that the existing cadence already covers them, that `test`
+still means everything, and the cold-cache-after-a-`generateRepo.ts`-change note W3's fix makes
+concrete. Mechanism and measurements stay in this document, per `AGENTS.md`'s own instruction to
+stay lean.
+
+### W10 — Verification, run in full
+
+1. `bun run check` — green; steady state 6.16–6.26 s (one 6.56 s first-invocation blip, not
+   representative — see W1).
+2. W1's three deliberate-failure probes — all three re-verified fresh, see W1 above.
+3. `bun run test:unit` — 868 pass/70 files/4.73–4.84 s. `bun run test:integration` (warm) — 201
+   pass/20 files/~20.2–20.7 s. `bun run test` — **1,069 pass across 90 files**, 25.0–25.6 s. Counts
+   match the exit criteria exactly; wall time is marginally over the <25 s target, attributed to
+   container variance, not a lane losing files (see W2/W3 above).
+4. Cold-cache `bun run test:integration` — green, **38.47 s** (see W3).
+5. W4 concurrency probe/shard runner re-run post-everything — reproduced live during this exact
+   verification pass; see W4 above for the full account (163 s hang, killed, no self-heal).
+6. `bunx playwright test --project=harness` — three consecutive fresh runs (port 5173 confirmed
+   free beforehand, so each genuinely re-ran `build && preview`, not a reused stray server — see
+   W5): **53.6 s / 55.0 s / 56.2 s**, all 182/182 green. Comfortably under the 140.5 s→80 s target.
+7. `git status --short` clean under both `*-snapshots/` directories after all three runs above — no
+   baseline regenerated, no `-u`/`--update-snapshots` anywhere in this work.
+8. W6's premise probe — 44/44 pass, all 11 surfaces, all 4 themes, non-`cat.color` violation sets
+   identical; see W6 above for the real bug this exercise also turned up.
+9. `bun run test:e2e:vscode` — first attempt failed for an unrelated reason: this worktree had never
+   run `bun run build`, and this spec's own doc comment says `bun run build && bun run
+   test:e2e:vscode` is the expected sequence. After `bun run build`, all **3/3 pass, 40.1 s** — green
+   and unchanged, confirming W5 did not reach further than intended into the `vscode` project (it
+   never loads `localhost:5173`).
+10. `bun run build` — green, **1.6 s**. `scripts/build.ts`'s `dist/ui` output and `apps/harness`'s
+    now-relocated `dist/harness` output do not collide (see W5); neither broke the other.
+11. `bun run test:perf` — reproduced the exact ambient-noise pattern P4c's own Findings already
+    document (word-for-word the same metrics: `kira:first-paint`/`kira:layout-complete` in
+    `run.ts`) at 45–48% over budget on wall-clock metrics only, with `heap` and every other
+    non-wall-clock metric within tolerance. P4c's own Findings confirmed this same variance
+    reproduces even against an untouched, `git stash`-ed tree — not attributable to this plan's
+    changes, and not re-litigated per this plan's own W10 instruction. (Required starting a
+    `bun run dev:harness` server first — `run.ts` has never self-started one, unlike
+    `tests/perf/graphUi.ts`; a pre-existing, P0-era convention this plan did not touch.)
+12. No `.github/` directory — confirmed.
+
+---
+
+## Exit criteria — checked
+
+- [x] `bun run test:unit` exists, 868 tests, **4.73–4.84 s** — under 8 s.
+- [x] `bun run test` runs **1,069 tests across 90 files**, green, **25.0–25.6 s** — marginally over
+      the <25 s target (by up to ~0.6 s), attributed to shared-container variance and recorded
+      honestly rather than rounded down; still roughly half the pre-plan 50.9 s.
+- [x] `bun run check` green, **6.16–6.26 s** steady state — under 6.5 s; incremental `tsc --build`,
+      `check:types:clean` escape hatch exists, all three W1 probes pass.
+- [x] `bunx playwright test --project=harness` green across three consecutive runs,
+      **53.6 s / 55.0 s / 56.2 s** — under 80 s, every run's time recorded.
+- [x] Not one assertion, test, theme variant, viewport variant or baseline deleted, skipped, or
+      relaxed — verified directly (W8); the only count-affecting change is W6's ruleset scoping,
+      and per-file test counts are unchanged.
+- [x] `generateRepo.ts` builds each cacheable shape once, copies per call, keys on the generator's
+      own content hash; `withRemote()`/`withWorktree()`/`inProgressRevert()` excluded with a
+      recorded reason; fixture self-tests pass.
+- [x] Cold-cache `bun run test:integration` green, **38.47 s**, recorded here and in `AGENTS.md`.
+- [x] W4 hazard settled: **not** starvation — reproduced live during this plan's own verification,
+      diagnosed as a real gap in `catFile.ts`'s `PersistentBatchProcess` (no per-request timeout),
+      reported in `scripts/test-shard.ts`'s own doc comment rather than papered over with a longer
+      timeout.
+- [x] `playwright.config.ts` sets `workers: "100%"` with the wall-time/CPU-time trade-off recorded
+      in a comment (re-measured post-W5/W6); serves built harness output; `reuseExistingServer`
+      intact.
+- [x] `AGENTS.md` names the lanes in four net lines.
+- [x] No `.github/` directory; D28 unchanged.
+- [x] `docs/SPEC.md` untouched — zero diff.
+- [x] `refsA11y`'s focus-return flake still recorded as open, not claimed fixed — fired once during
+      W6 verification, confirmed as the known flake via an immediate repeat-run, and did not fire
+      in any of the three W5/W7 verification runs.
