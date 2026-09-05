@@ -177,12 +177,63 @@ export async function stashList(driver: GitDriver): Promise<StashEntry[]> {
   return records.filter((r) => r.length > 0).map(parseStashRecord);
 }
 
+/** Shared by `countCommits` and `countRange` (P7 W2) — `rev-list --count`'s only possible
+ *  successful output is one line, one integer. */
+function parseCount(bytes: Uint8Array): number {
+  return Number(decoder.decode(bytes).trim());
+}
+
 export async function countCommits(driver: GitDriver, scope: "all" | "head"): Promise<number> {
   // `rev-list`, unlike `log`, requires an explicit revision — "head" scope names HEAD directly
   // rather than relying on git's argument-less default the way `logArgs`'s "head" scope does.
   const argv = ["rev-list", "--count", ...(scope === "all" ? revSetArgs("all") : ["HEAD"])];
   const bytes = await collectOneShot(driver.read(argv));
-  return Number(decoder.decode(bytes).trim());
+  return parseCount(bytes);
+}
+
+/** `docs/plans/P7.md` W2/§6.8: `rev-list --count <base>..<branch>` — the range-count half of
+ *  base resolution's `ready`/`empty` distinction. A bad `base`/`branch` throws (a real `GitError`,
+ *  never silently `0`) — `resolveReviewBase` (W4) is what decides that is a genuine failure
+ *  rather than "unrelated" or "empty" (V6). */
+export async function countRange(driver: GitDriver, base: string, branch: string): Promise<number> {
+  const bytes = await collectOneShot(driver.read(["rev-list", "--count", `${base}..${branch}`]));
+  return parseCount(bytes);
+}
+
+/** `docs/plans/P7.md` W2/§6.8: `git merge-base <a> <b>`, returning the sha or `null` when the two
+ *  share no common ancestor — `merge-base` exits 1 with no output in that case (V4), which is
+ *  cleanly distinguishable from a bad-ref error (exit 128, real stderr): only exit 1 is caught
+ *  here, everything else rethrows as a genuine `GitError`. */
+export async function mergeBase(driver: GitDriver, a: string, b: string): Promise<string | null> {
+  const read = driver.read(["merge-base", a, b]);
+  const bytes = await collectBytes(read.bytes);
+  try {
+    await read.done;
+  } catch (err) {
+    if (err instanceof GitError && err.exitCode === 1) return null;
+    throw err;
+  }
+  return decoder.decode(bytes).trim();
+}
+
+/** `docs/plans/P7.md` W2/§6.8 step 2: `git symbolic-ref --short refs/remotes/origin/HEAD`,
+ *  returning its short name or `undefined` when unset — no remote at all, `origin/HEAD`
+ *  explicitly unset, or (V1) a dangling target all throw a `GitError` here and are folded into
+ *  "not detected" rather than surfaced as an error the UI would otherwise have to render. A
+ *  successful-but-nonexistent answer (`origin/HEAD` points at a branch since deleted) is *not*
+ *  this function's problem to catch — `resolveBase` (core, W1) checks existence against the ref
+ *  snapshot and falls through on its own when this returns a name nothing matches. */
+export async function detectDefaultBranch(driver: GitDriver): Promise<string | undefined> {
+  try {
+    const bytes = await collectOneShot(
+      driver.read(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]),
+    );
+    const value = decoder.decode(bytes).trim();
+    return value.length > 0 ? value : undefined;
+  } catch (err) {
+    if (err instanceof GitError) return undefined;
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------------------

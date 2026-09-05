@@ -69,7 +69,7 @@ async function measure(): Promise<Measurement> {
 
   const store = new CommitStore();
   const session = openLogSession(resolution.git, runner, dir, {
-    scope: "all",
+    walk: { kind: "scope", scope: "all" },
     pageSize: PAGE_SIZE,
   });
   for (;;) {

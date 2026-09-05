@@ -484,7 +484,7 @@ describe("RepoService", () => {
       if (identityResolution.kind !== "ok") throw new Error("expected a real repository");
 
       const session = openLogSession(gitResolution.git, runner, identityResolution.identity.root, {
-        scope: "all",
+        walk: { kind: "scope", scope: "all" },
       });
       const records: CommitRecord[] = [];
       try {

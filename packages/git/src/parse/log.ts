@@ -30,6 +30,22 @@ export function revSetArgs(scope: "all" | "head"): string[] {
   return scope === "all" ? ["--all", "--glob=refs/stash"] : [];
 }
 
+/**
+ * `docs/plans/P7.md` W2: what a walk covers, in one two-member union — the graph panel's own
+ * `scope` (unchanged), or Branch review's `<base>..<branch>` range (§6.8/D30). A range walk is
+ * *the same walk* with different argv, which is what keeps the chunk shape identical between the
+ * two (`packSlice`/`appendPacked` know nothing about either variant).
+ */
+export type WalkSpec =
+  | { readonly kind: "scope"; readonly scope: "all" | "head" }
+  | { readonly kind: "range"; readonly base: string; readonly branch: string };
+
+/** Two-dot, never three-dot (D30) — built here, once, so no call site can accidentally write
+ *  `${base}...${branch}`. */
+export function walkArgs(walk: WalkSpec): string[] {
+  return walk.kind === "scope" ? revSetArgs(walk.scope) : [`${walk.base}..${walk.branch}`];
+}
+
 export interface LogArgsOptions {
   readonly scope: "all" | "head";
   readonly maxCount: number;
@@ -44,17 +60,18 @@ export function logArgs(opts: LogArgsOptions): string[] {
   return args;
 }
 
-/** The unpaged walk `logSession.ts` (W11) spawns: same format and rev set as `logArgs`, minus
- *  `--max-count` — the pause is the page limit, not a git-side one. */
-export function logSessionArgs(scope: "all" | "head"): string[] {
+/** The unpaged walk `logSession.ts` (W11/P7 W3) spawns: same format as `logArgs`, minus
+ *  `--max-count` — the pause is the page limit, not a git-side one — and `walkArgs(walk)` in
+ *  place of a bare scope, so a range walk and a scoped walk are the same code path. */
+export function logSessionArgs(walk: WalkSpec): string[] {
   const args = ["log", "--decorate=full", "--topo-order", "-z", `--format=${LOG_FORMAT}`];
-  args.push(...revSetArgs(scope));
+  args.push(...walkArgs(walk));
   return args;
 }
 
 /** The `--skip` fallback (§5.1.1) after a reclaimed session: same walk, resumed by count. */
-export function logSessionSkipArgs(scope: "all" | "head", skip: number): string[] {
-  return [...logSessionArgs(scope), `--skip=${skip}`];
+export function logSessionSkipArgs(walk: WalkSpec, skip: number): string[] {
+  return [...logSessionArgs(walk), `--skip=${skip}`];
 }
 
 /** Same format, for a single commit (`git show -s`) — reused rather than duplicated. */
