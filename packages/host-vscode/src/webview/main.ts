@@ -10,7 +10,7 @@
  * JSON island is this file's only input, read below.
  */
 import type { MessageChannelLike } from "@kira-version/ipc";
-import { createRpcClient } from "@kira-version/ipc";
+import { createRpcClient, VSCODE_WEBVIEW_BUFFER_ENCODING } from "@kira-version/ipc";
 import type { ViewStateStore } from "@kira-version/ui";
 import {
   DEFAULT_COLUMN_WIDTHS,
@@ -57,10 +57,14 @@ class VsCodeApiViewStateStore implements ViewStateStore {
   }
 }
 
+/** The webview's own half of the channel `host-vscode/src/transport.ts` opens — see that file's
+ *  doc comment for why this declares `"base64"` (P15's W1 finding) and why the two sides share
+ *  `VSCODE_WEBVIEW_BUFFER_ENCODING` rather than each spelling out the same literal. */
 function createVsCodeChannel(
   api: ReturnType<typeof acquireVsCodeApi<unknown>>,
 ): MessageChannelLike {
   return {
+    bufferEncoding: VSCODE_WEBVIEW_BUFFER_ENCODING,
     post(message): void {
       api.postMessage(message);
     },

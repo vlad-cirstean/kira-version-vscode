@@ -1,5 +1,5 @@
-export type { EncodedMessage } from "./codec.ts";
-export { decode, dedupeTransferList, encode } from "./codec.ts";
+export type { BufferEncoding, EncodedMessage } from "./codec.ts";
+export { decode, dedupeTransferList, encode, VSCODE_WEBVIEW_BUFFER_ENCODING } from "./codec.ts";
 export type {
   CheckoutBlocker,
   CheckoutPreflight,

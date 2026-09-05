@@ -6,53 +6,32 @@
  * every buffer structured-clones rather than transfers — the design does not change, W17
  * measures the cost rather than assuming it away.
  *
- * **Neither a bare `ArrayBuffer` nor a `Uint8Array` survives that clone intact (P4c, confirmed
- * live).** `@types/vscode` documents ArrayBuffers as "correctly recreated inside of the webview"
- * for any extension targeting 1.57+ (this one targets 1.134.0) — true for a `WebviewPanel`, but
- * this extension's view is a `WebviewView` (`contributes.views[].type: "webview"`), whose own
- * equivalent support shipped separately and, empirically, neither recreates the type it started
- * as: a bare `ArrayBuffer` (no own enumerable properties) arrives as `{}`, and a `Uint8Array`
- * fares only a little better, arriving as a plain object keyed by stringified index
- * (`{"0":123,"1":185,...}`, no `length`) rather than a real typed array — both confirmed by
- * logging the message actually received in a real, downloaded VS Code build; the mock bridges
- * every other host and test uses never exercise this real boundary at all. A genuine `Array`
- * *does* survive as a genuine `Array`, so `toWireSafe` below converts every `ArrayBuffer` it
- * finds into a plain `number[]` immediately before the one real `postMessage` call — nothing
- * downstream changes, since every consumer already does `new Uint8Array(chunk.field)`, and that
- * constructor accepts a plain array of numbers exactly as it does an `ArrayBuffer`. Scoped to
- * this one host rather than to `PackedCommitChunk`'s own field types
- * (`packages/ipc/src/contract.ts`) or to `packages/ipc/src/codec.ts` generally: every other
- * transport (the harness's mock bridge, the layout worker's real `MessageChannel`) already
- * carries a bare `ArrayBuffer` correctly, and nothing about their contract needed to change to
- * fix a bug specific to this one real transport.
+ * **Neither a bare `ArrayBuffer` nor a `Uint8Array` survives that clone intact** — confirmed live
+ * against a real, downloaded VS Code build (P15's W1 probe, `docs/plans/P15.md` Findings): a
+ * bare `ArrayBuffer` arrives as `{}`. `@types/vscode` documents ArrayBuffers as "correctly
+ * recreated inside of the webview" for any extension targeting 1.57+ (this one targets 1.134.0)
+ * — true for a `WebviewPanel`, but this extension's view is a `WebviewView`
+ * (`contributes.views[].type: "webview"`), whose own equivalent support shipped separately and,
+ * empirically, does not recreate the type it started as. `createWebviewChannel` below therefore
+ * declares `bufferEncoding: VSCODE_WEBVIEW_BUFFER_ENCODING` (`"base64"`) rather than `"native"` —
+ * `rpc.ts`'s `post`/`receive` do the actual buffer<->base64 conversion (`packages/ipc/src/
+ * codec.ts`), so this file has nothing bespoke left to do about it.
  *
  * The webview's own half (running inside the iframe, never importing `vscode`) is
  * `src/webview/main.ts` — a separate, browser-only entry point built and loaded like any other
  * host's UI bootstrap (`apps/harness/src/main.ts`'s precedent), implementing this same
  * `MessageChannelLike` shape against `window.addEventListener("message")` /
- * `acquireVsCodeApi().postMessage`.
+ * `acquireVsCodeApi().postMessage`, declaring the exact same constant — a mismatch between the
+ * two is not a type error, it is a webview that silently renders an empty graph (P15's W5).
  */
-import type { MessageChannelLike } from "@kira-version/ipc";
+import { type MessageChannelLike, VSCODE_WEBVIEW_BUFFER_ENCODING } from "@kira-version/ipc";
 import type * as vscode from "vscode";
-
-/** Walks `value`, replacing every `ArrayBuffer` with a plain `number[]` of its bytes — see this
- *  file's own doc comment for why a real `Array` is the one shape that actually survives.
- *  Mirrors `packages/ipc/src/codec.ts`'s `collectTransferables` traversal
- *  (array/plain-object/typed-array-or-buffer), but rebuilds rather than collects: an
- *  already-typed-array view is returned as-is (nothing on this contract sends one today — see
- *  `packages/ipc/src/contract.ts` — so there is nothing real to convert it against), so this
- *  only ever touches the exact values that would otherwise arrive empty. */
-function toWireSafe(value: unknown): unknown {
-  if (value instanceof ArrayBuffer) return Array.from(new Uint8Array(value));
-  if (ArrayBuffer.isView(value) || value === null || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map(toWireSafe);
-  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, toWireSafe(item)]));
-}
 
 export function createWebviewChannel(webview: vscode.Webview): MessageChannelLike {
   return {
+    bufferEncoding: VSCODE_WEBVIEW_BUFFER_ENCODING,
     post(message): void {
-      void webview.postMessage(toWireSafe(message));
+      void webview.postMessage(message);
     },
     onMessage(handler): () => void {
       const subscription = webview.onDidReceiveMessage((message) => handler(message));
