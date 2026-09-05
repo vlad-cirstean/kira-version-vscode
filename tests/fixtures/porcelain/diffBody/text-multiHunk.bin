@@ -1,0 +1,10 @@
+diff --git a/multi.txt b/multi.txt
+index 56fca59..9be2256 100644
+--- a/multi.txt
++++ b/multi.txt
+@@ -2 +2 @@ function foo() {
+-  return 1;
++  return 100;
+@@ -6 +6 @@ function bar() {
+-  return 2;
++  return 200;

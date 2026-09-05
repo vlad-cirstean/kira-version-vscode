@@ -256,7 +256,7 @@ kira-version-vscode/
 │   │       ├── rpcHandlers.ts      binds the ipc contract's keys to RepoService + W5's ports
 │   │       ├── errors.ts           exit code + stderr → typed error union
 │   │       ├── queries.ts          §4.4 read surface: argv + parser bound to typed queries
-│   │       ├── parse/              log.ts refs.ts status.ts diffTree.ts stash.ts mergeTree.ts
+│   │       ├── parse/              log.ts refs.ts status.ts diffTree.ts diff.ts stash.ts mergeTree.ts
 │   │       └── ops/                fetch.ts pull.ts push.ts stash.ts branch.ts tag.ts
 │   │                               checkout.ts reset.ts revert.ts cherryPick.ts conflict.ts
 │   │
