@@ -1459,14 +1459,16 @@ which is also how we tell the two apart in one pass.
 
 Pre-flight: creating a tag whose name already exists is detected before spawning and offers
 "move it" (`-f`) as an explicit, separately-confirmed choice rather than failing with git's
-error. Deleting a tag that exists on a remote warns that a `fetch` will not bring it back
-unless the remote copy is also deleted — the asymmetry that makes tag deletion confusing.
+error. Deleting a tag that exists on a remote warns that the local delete does **not** touch
+the remote copy, so the next `fetch` brings the tag straight back — only
+`git push <remote> --delete <name>` removes it for good. That is the asymmetry that makes tag
+deletion confusing, and it is what the warning must say.
 Sorting the tag list is version-aware (`--sort=-v:refname`) so `v10` follows `v9`.
 
 ### 7.10 Revert
 
-A **Revert commit** button in the commit detail pane's action row (§6.4) and in the row
-context menu.
+A **Revert commit** entry on the commit's row context menu (§6.4), which is where every commit
+action lives — the detail pane deliberately carries no action row.
 
 ```
 git revert --no-edit <sha>                       # single parent
@@ -1799,7 +1801,7 @@ Phases are sequential; each ends at a checkpoint.
 | **P10** | Reset | Soft/mixed/hard with per-mode consequence copy, pre-flight counts, typed confirmation for hard-with-dirty, reflog-backed undo completing the undo slot (7.12). | Integration tests assert repository state per mode; undo restores; guarded during in-progress operations. |
 | **P11** | Search | Input with case/whole-word/regex toggles, commit/refs(branches+tags)/both scope, hybrid client-side + git-backed matching, next/prev navigation, live regex validation, abort-on-supersede. | Semantics table fully covered by tests (each toggle × scope); ≤120 ms budget met; malformed regex never throws. |
 | **P12** | GitHub PR links | Branch → pull request resolution (§6.7): GitHub-remote detection from `origin`, the `GitHubAuth` port over VS Code's built-in GitHub authentication provider (D31), the REST lookup, the per-branch cache invalidated by the watcher, `branch.resolvePr` (§3.5), the `#123` badge on branch-picker rows and message-column ref badges opening the PR via `ExternalOpener` (D32), `kiraVersion.github.enabled`, and PR number/title matching added to §7.8's `Refs` scope. | A branch with a pull request shows its badge in both places, distinguishes open/merged/closed, and opens the PR URL externally; search finds that branch by PR number and title within the ≤120 ms budget with no per-keystroke network call; no GitHub remote, no matching PR, the setting off, or a declined session each produce no badge, no request and no repeat prompt, with the rest of the app unaffected; the session is requested on first use only, never at activation, verified by an activation-time assertion. |
-| **P13** | Ship | `.vsix` packaging without `vscode:prepublish`, `extensionKind`/no-browser manifest declarations (2.1.1), **`engines.vscode` floor confirmed (D7)**, **SCM title button and status bar item (6.5)**, marketplace + OpenVSX metadata, docs, settings surface, telemetry-free release checklist. | Installable `.vsix`; full Playwright suite green on macOS. |
+| **P13** | Ship | `.vsix` packaging without `vscode:prepublish`, `extensionKind`/no-browser manifest declarations (2.1.1), **`engines.vscode` floor confirmed (D7)**, **SCM title button and status bar item (6.5)**, the **`kiraVersion.*` command-palette audit** wiring a command for every mutating operation introduced across P6–P10 (6.5/6.6's "every action is palette-reachable", which no earlier row owns), marketplace + OpenVSX metadata, docs, settings surface, telemetry-free release checklist. | Installable `.vsix`; every mutating operation reachable from the palette; full Playwright suite green on macOS. |
 
 **A note on P3's row, for anyone reconciling it against `docs/plans/P3.md`.** P3 originally also
 built and shipped a second, standalone desktop host booting the identical UI bundle, plus the
