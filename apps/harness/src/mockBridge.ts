@@ -350,12 +350,15 @@ function createHandlers(scenario: Scenario): MockHandlers {
     const record = scenario.commits.find((c) => c.sha === sha);
     if (!record) throw new Error(`mock bridge: commit.detail: unknown sha '${sha}'`);
     const index = parentIndex ?? 0;
+    // Unlike `requireFileChange`/`blobExistsAtRev` (whose whole point is a *specific* file's
+    // content, which cannot be honestly guessed), a commit's own metadata already has a true
+    // empty default: "this scenario doesn't model this commit's body/trailers/signature/files"
+    // is not invented data, it's an accurate statement about scenarios (`clean`, `hugeRepo`,
+    // `badges`, …) authored before P5 existed, for which every commit must still be selectable
+    // without a hand-written `CommitDetailFixture` per sha — `hugeRepo`'s 20,000 commits chief
+    // among them. Scenarios that exist to test detail content itself (`detail`, `merge`,
+    // `goToFile`, `noCapabilities`) supply real fixtures and never hit this fallback.
     const fixture = scenario.details?.[sha]?.[index];
-    if (!fixture) {
-      throw new Error(
-        `mock bridge: commit.detail: no CommitDetailFixture for sha '${sha}' parentIndex ${index}`,
-      );
-    }
     return {
       sha: record.sha,
       parents: record.parents,
@@ -363,11 +366,11 @@ function createHandlers(scenario: Scenario): MockHandlers {
       committer: record.committer,
       subject: record.subject,
       decoration: record.decoration,
-      body: fixture.body,
-      trailers: fixture.trailers,
-      signature: fixture.signature,
+      body: fixture?.body ?? "",
+      trailers: fixture?.trailers ?? [],
+      signature: fixture?.signature ?? { status: "N", signer: "" },
       parentIndex: index,
-      files: fixture.files,
+      files: fixture?.files ?? [],
     };
   };
 
