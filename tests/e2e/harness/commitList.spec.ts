@@ -146,7 +146,7 @@ test.describe("selection and keyboard", () => {
     await firstRow.click();
     await expect(firstRow).toHaveClass(/kv-row-selected/);
     await expect(detail).toBeVisible();
-    await expect(detail.locator(".kv-detail-subject")).toHaveText("tip");
+    await expect(detail.locator(".kv-meta-subject")).toHaveText("tip");
 
     await firstRow.click();
     await expect(detail).toBeHidden();
@@ -163,35 +163,35 @@ test.describe("selection and keyboard", () => {
     const detail = page.getByTestId("detail-region");
     const firstRow = rowByIndex(page, 0);
     await firstRow.click();
-    await expect(detail.locator(".kv-detail-subject")).toHaveText("huge-19999");
+    await expect(detail.locator(".kv-meta-subject")).toHaveText("huge-19999");
 
     await page.keyboard.press("ArrowDown");
-    await expect(detail.locator(".kv-detail-subject")).toHaveText("huge-19998");
+    await expect(detail.locator(".kv-meta-subject")).toHaveText("huge-19998");
 
     await page.keyboard.press("ArrowUp");
-    await expect(detail.locator(".kv-detail-subject")).toHaveText("huge-19999");
+    await expect(detail.locator(".kv-meta-subject")).toHaveText("huge-19999");
 
     // §5.1.1: "explicit load more, never infinite scroll" — only the first page (pageSize=5000
     // rows, hugeRepo's own comment) is loaded yet, so End clamps to row 4999 ("huge-15000"), not
     // all the way to the repo's actual root ("huge-0"); reaching that needs Load more/all first.
     await page.keyboard.press("End");
-    await expect(detail.locator(".kv-detail-subject")).toHaveText("huge-15000");
+    await expect(detail.locator(".kv-meta-subject")).toHaveText("huge-15000");
     // "keeps it in view": the newly selected row must actually be visible, not merely selected.
     await expect(page.locator(".slick-row.kv-row-selected")).toBeVisible();
 
     await page.keyboard.press("Home");
-    await expect(detail.locator(".kv-detail-subject")).toHaveText("huge-19999");
+    await expect(detail.locator(".kv-meta-subject")).toHaveText("huge-19999");
     await expect(page.locator(".slick-row.kv-row-selected")).toBeVisible();
 
     await page.keyboard.press("PageDown");
     // A direct, non-retrying textContent() read here would race the watch-driven re-render (the
     // same one-tick gap `toHaveClass`/`toHaveText` below exist to absorb) — assert through an
     // auto-retrying matcher instead of reading the text out first.
-    await expect(detail.locator(".kv-detail-subject")).not.toHaveText("huge-19999");
+    await expect(detail.locator(".kv-meta-subject")).not.toHaveText("huge-19999");
     await expect(page.locator(".slick-row.kv-row-selected")).toBeVisible();
 
     await page.keyboard.press("PageUp");
-    await expect(detail.locator(".kv-detail-subject")).toHaveText("huge-19999");
+    await expect(detail.locator(".kv-meta-subject")).toHaveText("huge-19999");
   });
 
   test("Esc closes the detail pane", async ({ page }) => {
@@ -271,9 +271,11 @@ test.describe("selection and keyboard", () => {
     await page.keyboard.press("Escape");
     await expect(detail).toBeHidden();
 
-    // Resize a column: Tab from the row on to the next real tab stop after it — the
-    // message|author resize handle, its own template's own DOM order in `CommitGrid.vue` — and
-    // nudge it with the arrow keys (`handleHandleKeydown`).
+    // Resize a column: Tab from the row on to the next real tab stop after it — the selected
+    // row's own sha copy button (P5 W10 enables it; `CommitGrid.vue`'s `applyAccessibility`
+    // keeps it a roving tab stop, `tabIndex 0` only on the tabbable row, exactly like the row
+    // itself, so this is still exactly one hop away, not one per loaded row) — then the
+    // message|author resize handle right after it.
     await tabUntil(page, (info) => info.classList.includes("kv-resize-handle"));
     const widthBefore = await page.locator(":focus").getAttribute("aria-valuenow");
     await page.keyboard.press("ArrowRight");
@@ -311,7 +313,7 @@ test.describe("loading more", () => {
     await firstRow.click();
     const selectedSubject = await page
       .getByTestId("detail-region")
-      .locator(".kv-detail-subject")
+      .locator(".kv-meta-subject")
       .textContent();
     const topSubjectBefore = await firstRow.locator(".kv-message-subject").textContent();
 
@@ -325,7 +327,7 @@ test.describe("loading more", () => {
 
     // Unchanged: the top visible row and the selection, per §5.1.1's own "Done when".
     await expect(firstRow.locator(".kv-message-subject")).toHaveText(topSubjectBefore ?? "");
-    await expect(page.getByTestId("detail-region").locator(".kv-detail-subject")).toHaveText(
+    await expect(page.getByTestId("detail-region").locator(".kv-meta-subject")).toHaveText(
       selectedSubject ?? "",
     );
 
@@ -342,7 +344,7 @@ test.describe("refresh", () => {
     await page.goto("/?scenario=clean");
     await ready(page);
     await rowByIndex(page, 0).click();
-    await expect(page.getByTestId("detail-region").locator(".kv-detail-subject")).toHaveText("tip");
+    await expect(page.getByTestId("detail-region").locator(".kv-meta-subject")).toHaveText("tip");
 
     const dot = page.locator(".kv-refresh-dot");
     await expect(dot).toBeHidden();
@@ -353,7 +355,7 @@ test.describe("refresh", () => {
     await expect(dot).toBeHidden();
     await expect(page.getByTestId("chunk-source")).toHaveText("git");
     // Selection survives the re-walk (App.vue's pendingSelectionSha mechanism, W11).
-    await expect(page.getByTestId("detail-region").locator(".kv-detail-subject")).toHaveText("tip");
+    await expect(page.getByTestId("detail-region").locator(".kv-meta-subject")).toHaveText("tip");
     await expect(page.locator(".slick-row.kv-row-selected")).toBeVisible();
   });
 });
