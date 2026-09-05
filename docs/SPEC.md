@@ -277,6 +277,10 @@ kira-version-vscode/
 │   │       ├── bridge/             client.ts   typed client over the ipc contract
 │   │       ├── state/              repo.ts graphView.ts selection.ts search.ts settings.ts
 │   │       │                       detail.ts       P5's commit-detail pane state machine (§6.4)
+│   │       │                       refs.ts         P6 W12: branch/remote-branch/tag lists + head (§7.9)
+│   │       │                       ops.ts          P6 W12: the four-step op executor (§7's pre-flight →
+│   │       │                                       confirm → execute → reconcile), undo slot, busy state
+│   │       │                       liveAnnouncements.ts  composed live-region text shared across features
 │   │       │                       viewState.ts    persisted view state (§2.1, §5.4)
 │   │       │                       review.ts       branch-review session state (§6.8)
 │   │       │                       pullRequests.ts branch → PR records for the session (§6.7)
@@ -297,11 +301,26 @@ kira-version-vscode/
 │   │       │   ├── fileTreeModel.ts P5's pure fold of FileChange[] into a directory tree (§6.4)
 │   │       │   ├── SearchBox.vue SearchResults.vue ConflictBanner.vue
 │   │       │   ├── StashList.vue TagList.vue
+│   │       │   ├── refListModel.ts P6 W13: pure fold — sort/filter/section-cap for
+│   │       │   │                   BranchPicker.vue/TagList.vue, plus the remote-branch →
+│   │       │   │                   local-branch checkout-target resolution (§7.5's DWIM case)
+│   │       │   ├── rowMenuModel.ts P6 W14: pure builder for the per-commit and per-ref context
+│   │       │   │                   menus — gates each item against `canRunOp`/`describeInProgress`
+│   │       │   ├── RowContextMenu.vue P6 W14: real `menu`/`menuitem`, opens on right-click,
+│   │       │   │                   Shift+F10 or the Menu key (§6.6)
+│   │       │   ├── UndoButton.vue  P6 W17: the one-slot undo affordance (§7.12)
 │   │       │   ├── review/         ReviewView.vue       the sidebar view's root (§6.8)
 │   │       │   │                   ReviewCommitRow.vue  one commit, expanding to FileTree.vue
 │   │       │   │                   BaseSelector.vue     comparison-base display + override
 │   │       │   └── dialogs/        CheckoutDialog.vue ResetDialog.vue ForcePushDialog.vue
 │   │       │                       StashDialog.vue TagDialog.vue RevertDialog.vue
+│   │       │                       BranchDialog.vue   P6 W15: "create branch here" (no comparable
+│   │       │                                          hazard, so not named in §7 — added alongside
+│   │       │                                          the other three for the row menu's own entry)
+│   │       │                       modalFocus.ts      P6 W15: shared focus-trap-plus-return-focus
+│   │       │                                          composable, used by all four dialogs above
+│   │       │                       tagDialogModel.ts  P6 W15: pure tag-name classifier against a
+│   │       │                                          wire RefRow (no preflight.tagCreate endpoint)
 │   │       ├── theme/              vscode-tokens.css  the token layer (§3.4)
 │   │       │                       density.css        row heights, spacing scale
 │   │       │                       readTokens.ts      getComputedStyle bridge for numeric metrics
@@ -322,8 +341,13 @@ kira-version-vscode/
 │       ├── index.html
 │       ├── vite.config.ts
 │       └── src/
-│           ├── mockBridge.ts       implements the ipc contract from fixtures
+│           ├── mockBridge.ts       implements the ipc contract from fixtures, incl. P6 W18's
+│           │                       refs.list/status.get/preflight.*/op.run/undo.run over an
+│           │                       in-memory session (real mutation, not step-3 stubs)
 │           ├── scenarios/          clean.ts dirty.ts conflicted.ts hugeRepo.ts authFailure.ts
+│           │                       rebasing.ts worktrees.ts tags.ts   P6 W18: the three
+│           │                       remaining §7.5/§7.11 hazard shapes dirty/conflicted don't
+│           │                       already cover (canContinue-false, worktree conflict, tags)
 │           └── themeSwitcher.ts    force light/dark/high-contrast for visual tests
 │
 └── tests/
