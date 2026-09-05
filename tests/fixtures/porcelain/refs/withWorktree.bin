@@ -1,0 +1,5 @@
+refs/heads/main13ae8a2b82cb281a3aa90a344d83e249df476d14commitrefs/remotes/origin/main[ahead 1]1700003600*/tmp/kv-fixture/repo
+refs/heads/side13ae8a2b82cb281a3aa90a344d83e249df476d14commit1700003600 /tmp/kv-fixture/repo-wt
+refs/remotes/origin/main8ad41db9b5c981a1bc5efe14806dda691c99d63ecommit1700000000 
+refs/tags/ann9ff9c6e05ae8010ec85a9ab041d15972e285dd15tag 13ae8a2b82cb281a3aa90a344d83e249df476d14Test Committer1700006400
+refs/tags/lw13ae8a2b82cb281a3aa90a344d83e249df476d14commit1700003600 

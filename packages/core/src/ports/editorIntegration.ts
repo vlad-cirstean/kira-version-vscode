@@ -28,6 +28,10 @@ export interface VirtualDocumentSource {
 export interface EditorCapabilities {
   readonly openInEditor: boolean;
   readonly goToFile: boolean;
+  /** P6/W10, §7.11. `true` under VS Code; `false` in the harness's default posture. A host with
+   *  this `false` need not implement `resolveConflict` and is never called — see that method's
+   *  own doc comment. */
+  readonly resolveConflict: boolean;
 }
 
 export interface EditorIntegration {
@@ -37,4 +41,8 @@ export interface EditorIntegration {
   openDiff(req: { left: DocumentRef; right: DocumentRef; title: string }): Promise<void>;
   /** Opens `ref` and puts the cursor on `line` (1-based). */
   reveal(ref: DocumentRef, line: number): Promise<void>;
+  /** P6/W10, §7.11's "Resolve in VS Code": reveal the host's own SCM surface and open `path` in
+   *  whatever conflict resolver it has — D15's whole point is that this app never reimplements
+   *  one. Never called when `capabilities.resolveConflict` is `false`. */
+  resolveConflict(req: { readonly path: string }): Promise<void>;
 }

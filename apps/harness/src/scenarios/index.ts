@@ -3,6 +3,7 @@ import { badges } from "./badges.ts";
 import { ceiling } from "./ceiling.ts";
 import { clean } from "./clean.ts";
 import { conflicted } from "./conflicted.ts";
+import { conflictedNoResolve } from "./conflictedNoResolve.ts";
 import { detail } from "./detail.ts";
 import { dirty } from "./dirty.ts";
 import { goToFile } from "./goToFile.ts";
@@ -10,7 +11,10 @@ import { hugeRepo } from "./hugeRepo.ts";
 import { merge } from "./merge.ts";
 import { noCapabilities } from "./noCapabilities.ts";
 import { pagedBranch } from "./pagedBranch.ts";
+import { rebasing } from "./rebasing.ts";
+import { tags } from "./tags.ts";
 import { tooOld } from "./tooOld.ts";
+import { worktrees } from "./worktrees.ts";
 import type { Scenario } from "./types.ts";
 
 const SCENARIOS: Readonly<Record<string, Scenario>> = {
@@ -25,6 +29,9 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
   merge,
   goToFile,
   noCapabilities,
+  rebasing,
+  worktrees,
+  tags,
 };
 
 /** Loadable by exact name via `?scenario=<name>` but deliberately left out of `SCENARIOS` above
@@ -38,6 +45,7 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
 const HIDDEN_SCENARIOS: Readonly<Record<string, () => Scenario>> = {
   ceiling,
   pagedBranch,
+  conflictedNoResolve: () => conflictedNoResolve,
 };
 
 export function loadScenario(name: string): Scenario {

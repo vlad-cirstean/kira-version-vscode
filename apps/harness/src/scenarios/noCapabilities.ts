@@ -17,5 +17,5 @@ export const noCapabilities: Scenario = {
           repo: { ...detail.repoOpen.repo, repoId: "/repos/noCapabilities" },
         }
       : detail.repoOpen,
-  capabilities: { openInEditor: false, goToFile: false, clipboard: false },
+  capabilities: { openInEditor: false, goToFile: false, clipboard: false, resolveConflict: false },
 };

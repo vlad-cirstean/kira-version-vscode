@@ -1,9 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import type {
+  CheckoutPreflight,
   CommitDetail,
   DiffHunk,
   FileDiff,
+  OpRequest,
+  OpResult,
+  RevertPreflight,
   Settings,
+  StatusSummary,
+  UndoSlotSnapshot,
 } from "../../../packages/core/src/index.ts";
 import { defaultSettings } from "../../../packages/core/src/index.ts";
 import {
@@ -14,7 +20,7 @@ import {
   FakeWorkspaceRoots,
 } from "../../../packages/core/src/ports/testFakes.ts";
 import { GitError } from "../../../packages/git/src/errors.ts";
-import type { BlobResult, GitStatus } from "../../../packages/git/src/repoService.ts";
+import type { BlobResult, GitStatus, RefsResult } from "../../../packages/git/src/repoService.ts";
 import type { RepoServicePort } from "../../../packages/git/src/rpcHandlers.ts";
 import { createRepoHandlers } from "../../../packages/git/src/rpcHandlers.ts";
 import type {
@@ -110,6 +116,39 @@ class FakeRepoService implements RepoServicePort {
   worktreeDiffResult: readonly DiffHunk[] | null = null;
   checkoutPaths = new Set<string>();
 
+  // P6 W11
+  refsResult: RefsResult = {
+    branches: [],
+    remoteBranches: [],
+    tags: [],
+    head: { kind: "unborn", name: "main" },
+  };
+  statusSummaryResult: StatusSummary = {
+    head: { kind: "unborn", name: "main" },
+    upstream: undefined,
+    counts: { staged: 0, unstaged: 0, untracked: 0, unmerged: 0 },
+    isClean: true,
+    dirtyPaths: [],
+    dirtyTruncated: false,
+    inProgress: null,
+  };
+  checkoutPreflightResult: CheckoutPreflight | undefined;
+  readonly preflightCheckoutCalls: Array<{
+    repoId: string;
+    target: string;
+    mode: "switch" | "detach";
+  }> = [];
+  revertPreflightResult: RevertPreflight | undefined;
+  readonly preflightRevertCalls: Array<{
+    repoId: string;
+    shas: readonly string[];
+    mainline: number | undefined;
+  }> = [];
+  opResult: OpResult | undefined;
+  readonly runOpCalls: Array<{ repoId: string; op: OpRequest }> = [];
+  undoPeekResult: UndoSlotSnapshot | null = null;
+  readonly undoRunCalls: Array<{ repoId: string; id: string }> = [];
+
   constructor(git: GitStatus) {
     this.git = git;
   }
@@ -185,6 +224,54 @@ class FakeRepoService implements RepoServicePort {
     }
     if (this.streamError) throw this.streamError;
   }
+
+  async refs(_repoId: string): Promise<RefsResult> {
+    return this.refsResult;
+  }
+
+  async statusSummary(_repoId: string): Promise<StatusSummary> {
+    return this.statusSummaryResult;
+  }
+
+  async preflightCheckout(
+    repoId: string,
+    target: string,
+    mode: "switch" | "detach",
+  ): Promise<CheckoutPreflight> {
+    this.preflightCheckoutCalls.push({ repoId, target, mode });
+    if (!this.checkoutPreflightResult) {
+      throw new Error("FakeRepoService.checkoutPreflightResult not set");
+    }
+    return this.checkoutPreflightResult;
+  }
+
+  async preflightRevert(
+    repoId: string,
+    shas: readonly string[],
+    mainline?: number,
+  ): Promise<RevertPreflight> {
+    this.preflightRevertCalls.push({ repoId, shas, mainline });
+    if (!this.revertPreflightResult) {
+      throw new Error("FakeRepoService.revertPreflightResult not set");
+    }
+    return this.revertPreflightResult;
+  }
+
+  async runOp(repoId: string, op: OpRequest): Promise<OpResult> {
+    this.runOpCalls.push({ repoId, op });
+    if (!this.opResult) throw new Error("FakeRepoService.opResult not set");
+    return this.opResult;
+  }
+
+  undoPeek(_repoId: string): UndoSlotSnapshot | null {
+    return this.undoPeekResult;
+  }
+
+  async undoRun(repoId: string, id: string): Promise<OpResult> {
+    this.undoRunCalls.push({ repoId, id });
+    if (!this.opResult) throw new Error("FakeRepoService.opResult not set");
+    return this.opResult;
+  }
 }
 
 function settingsFn(overrides: Partial<Settings> = {}): () => Settings {
@@ -254,13 +341,14 @@ describe("createRepoHandlers", () => {
     try {
       const result = await client.request("app.init", {});
       expect(result.host).toBe("harness");
-      expect(result.contractVersion).toBe(4);
+      expect(result.contractVersion).toBe(5);
       expect(result.settings).toEqual(defaultSettings());
       expect(result.git).toEqual({ kind: "ok", path: "/usr/bin/git", version: "2.40.0" });
       expect(result.capabilities).toEqual({
         openInEditor: true,
         goToFile: true,
         clipboard: true,
+        resolveConflict: true,
       });
     } finally {
       client.dispose();
@@ -588,7 +676,11 @@ describe("createRepoHandlers", () => {
     const service = new FakeRepoService({ kind: "ok", path: "git", version: "2.40.0" });
     const roots = new FakeWorkspaceRoots();
     const dialogs = new FakeDialogs();
-    const editor = new FakeEditorIntegration({ openInEditor: false, goToFile: false });
+    const editor = new FakeEditorIntegration({
+      openInEditor: false,
+      goToFile: false,
+      resolveConflict: false,
+    });
     const handlers = createRepoHandlers({
       service,
       roots,
@@ -608,6 +700,7 @@ describe("createRepoHandlers", () => {
         openInEditor: false,
         goToFile: false,
         clipboard: true,
+        resolveConflict: false,
       });
     } finally {
       client.dispose();

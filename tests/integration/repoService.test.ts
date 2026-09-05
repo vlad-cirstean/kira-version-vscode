@@ -18,7 +18,14 @@ import { NodeFileWatcher } from "../../packages/git/src/nodeFileWatcher.ts";
 import { NodeProcessRunner } from "../../packages/git/src/nodeProcessRunner.ts";
 import type { GraphChunkPayload } from "../../packages/git/src/repoService.ts";
 import { RepoService } from "../../packages/git/src/repoService.ts";
-import { baseEnv, branchy, linear, withStash } from "../fixtures/generateRepo.ts";
+import {
+  baseEnv,
+  branchy,
+  conflicting,
+  linear,
+  withRemote,
+  withStash,
+} from "../fixtures/generateRepo.ts";
 
 /**
  * W7's own coverage of its "Done when" criteria (open/stream/loadMore/close; a resumed stream
@@ -103,6 +110,20 @@ class MidPageAbortRunner implements ProcessRunner {
       write: (chunk) => proc.write(chunk),
       kill: (signal) => proc.kill(signal),
     };
+  }
+}
+
+/** Records every argv this session's driver spawns, in order — real git underneath (delegates to
+ *  `NodeProcessRunner`), used by the W8 "capture-before-write" ordering test below: a fake driver
+ *  would only prove the executor calls the right *methods* in order, not that the read actually
+ *  resolves before the write mutates the ref it reads — this proves the real thing. */
+class ArgvRecordingRunner implements ProcessRunner {
+  readonly argvs: string[][] = [];
+  readonly #inner = new NodeProcessRunner();
+
+  spawn(executable: string, request: SpawnRequest): SpawnedProcess {
+    this.argvs.push([...request.argv]);
+    return this.#inner.spawn(executable, request);
   }
 }
 
@@ -1084,6 +1105,746 @@ describe("RepoService — worktreeDiff() and pathExistsInCheckout() (P5 W3)", ()
       expect(service.pathExistsInCheckout(repoId, "nonexistent.txt")).toBe(false);
       expect(service.pathExistsInCheckout(repoId, "../../etc/passwd")).toBe(false);
       expect(service.pathExistsInCheckout(repoId, "/etc/passwd")).toBe(false);
+    } finally {
+      service.dispose();
+    }
+  });
+});
+
+/**
+ * P6/W8's own coverage, against real repositories and real git: `refs()`'s cache and its
+ * invalidation, `statusSummary()`'s fold and its display cap, both pre-flights' orchestration
+ * (including the two hard cases — a bare remote-tracking target and a linked-worktree conflict),
+ * the executor's ordering/failure/undo behaviour, and the undo slot round trip.
+ */
+describe("RepoService — refs() (P6 W8)", () => {
+  test("branches/remoteBranches/tags and head from a real repo; cache drops on the next write", async () => {
+    const repo = branchy();
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const first = await service.refs(repoId);
+      expect(first.branches.map((b) => b.shortName).sort()).toEqual(["feature/a", "main"]);
+      expect(first.head).toEqual({ kind: "branch", name: "main" });
+      expect(first.branches.find((b) => b.shortName === "topic")).toBeUndefined();
+
+      // Same object back on a second call with no write in between — the cache, not a re-fetch.
+      const cached = await service.refs(repoId);
+      expect(cached).toBe(first);
+
+      const created = await service.runOp(repoId, {
+        kind: "branchCreate",
+        name: "topic",
+        startPoint: "main",
+        checkout: false,
+        track: undefined,
+      });
+      expect(created.ok).toBe(true);
+
+      const second = await service.refs(repoId);
+      expect(second).not.toBe(first);
+      expect(second.branches.some((b) => b.shortName === "topic")).toBe(true);
+    } finally {
+      service.dispose();
+    }
+  });
+});
+
+describe("RepoService — statusSummary() (P6 W8)", () => {
+  test("a clean repo reports isClean with zero counts and no dirty paths", async () => {
+    const repo = linear(1);
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const summary = await service.statusSummary(opened.repoId);
+      expect(summary.isClean).toBe(true);
+      expect(summary.dirtyPaths).toEqual([]);
+      expect(summary.dirtyTruncated).toBe(false);
+      expect(summary.counts).toEqual({ staged: 0, unstaged: 0, untracked: 0, unmerged: 0 });
+      expect(summary.head).toEqual({ kind: "branch", name: "main" });
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("a dirty tracked file is counted and named", async () => {
+    const repo = linear(1);
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      writeFileSync(join(opened.identity.root, "file.txt"), "changed\n");
+      const summary = await service.statusSummary(opened.repoId);
+      expect(summary.isClean).toBe(false);
+      expect(summary.counts.unstaged).toBe(1);
+      expect(summary.dirtyPaths).toEqual(["file.txt"]);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("dirtyPaths truncates at 200 for display while counts report the true total", async () => {
+    const repo = linear(1);
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const total = 250;
+      for (let i = 0; i < total; i++) {
+        writeFileSync(
+          join(opened.identity.root, `untracked-${String(i).padStart(4, "0")}.txt`),
+          "x\n",
+        );
+      }
+      const summary = await service.statusSummary(opened.repoId);
+      expect(summary.dirtyPaths.length).toBe(200);
+      expect(summary.dirtyTruncated).toBe(true);
+      expect(summary.counts.untracked).toBe(total); // the verdict-relevant count is never capped
+    } finally {
+      service.dispose();
+    }
+  });
+});
+
+describe("RepoService — preflightCheckout() (P6 W8)", () => {
+  test("a plain switch on a clean tree is verdict clean with no blockers", async () => {
+    const repo = branchy();
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const preflight = await service.preflightCheckout(opened.repoId, "feature/a", "switch");
+      expect(preflight.verdict).toBe("clean");
+      expect(preflight.blockers).toEqual([]);
+      expect(preflight.detaches).toBe(false);
+      expect(preflight.target).toEqual({ kind: "branch", name: "feature/a" });
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("a dirty tracked file the target would rewrite blocks with blockedByTracked", async () => {
+    const repo = conflicting(); // main and branch-theirs both touch conflict.txt
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      writeFileSync(join(opened.identity.root, "conflict.txt"), "dirty local edit\n");
+      const preflight = await service.preflightCheckout(opened.repoId, "branch-theirs", "switch");
+      expect(preflight.verdict).toBe("blocked");
+      expect(preflight.blockers).toEqual([{ kind: "blockedByTracked", paths: ["conflict.txt"] }]);
+      expect(preflight.routes).toEqual(["discard"]);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("detach mode on a tag always detaches, regardless of the requested mode", async () => {
+    const repo = branchy();
+    execFileSync("git", ["tag", "v1.0.0", "main"], { cwd: repo.dir, env: baseEnv(repo.dir) });
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const preflight = await service.preflightCheckout(opened.repoId, "v1.0.0", "switch");
+      expect(preflight.detaches).toBe(true);
+      expect(preflight.target.kind).toBe("tag");
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("a bare remote-tracking target (no local counterpart) offers createsTracking in switch mode, and plain detach in detach mode", async () => {
+    const repo = withRemote();
+    // Push a branch to the remote, then remove the local copy but keep the fetched remote-tracking ref —
+    // the exact DWIM case probe P7 describes (a `origin/topic` with no local `topic`).
+    const env = baseEnv(repo.dir);
+    execFileSync("git", ["branch", "topic", "main"], { cwd: repo.dir, env });
+    execFileSync("git", ["push", "--quiet", "origin", "topic"], { cwd: repo.dir, env });
+    execFileSync("git", ["branch", "-D", "topic"], { cwd: repo.dir, env });
+    execFileSync("git", ["fetch", "--quiet", "origin"], { cwd: repo.dir, env });
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const switchPreflight = await service.preflightCheckout(repoId, "origin/topic", "switch");
+      expect(switchPreflight.target).toEqual({ kind: "remoteBranch", name: "origin/topic" });
+      expect(switchPreflight.detaches).toBe(false);
+      expect(switchPreflight.createsTracking).toEqual({
+        branch: "topic",
+        upstream: "origin/topic",
+      });
+
+      const detachPreflight = await service.preflightCheckout(repoId, "origin/topic", "detach");
+      expect(detachPreflight.detaches).toBe(true);
+      expect(detachPreflight.createsTracking).toBeUndefined();
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("a target checked out in another linked worktree reports worktreeConflict, not for this session's own checkout", async () => {
+    const repo = branchy();
+    const env = baseEnv(repo.dir);
+    const worktreeDir = mkdtempSync(join(tmpdir(), "kira-worktree-"));
+    execFileSync("git", ["worktree", "add", "--quiet", worktreeDir, "feature/a"], {
+      cwd: repo.dir,
+      env,
+    });
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      // feature/a is checked out ELSEWHERE (the linked worktree) — blocked.
+      const otherBranch = await service.preflightCheckout(repoId, "feature/a", "switch");
+      expect(otherBranch.blockers.some((b) => b.kind === "worktreeConflict")).toBe(true);
+
+      // main is checked out in THIS session's own worktree — never reported as a conflict
+      // against itself (D12's own-worktree subtraction).
+      const ownBranch = await service.preflightCheckout(repoId, "main", "switch");
+      expect(ownBranch.blockers.some((b) => b.kind === "worktreeConflict")).toBe(false);
+    } finally {
+      service.dispose();
+    }
+  });
+});
+
+describe("RepoService — preflightRevert() (P6 W8)", () => {
+  test("reverting a plain (non-merge) commit needs no mainline and predicts clean", async () => {
+    const repo = branchy({ mergeBack: false });
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const lastMainCommit = repo.commits[repo.commits.length - 1];
+      if (!lastMainCommit) throw new Error("unreachable");
+
+      const preflight = await service.preflightRevert(opened.repoId, [lastMainCommit]);
+      expect(preflight.mainlineRequired).toEqual([]);
+      expect(preflight.verdict).toBe("clean");
+      expect(preflight.prediction.kind).toBe("clean");
+      expect(preflight.predictedFor).toBe(lastMainCommit);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("reverting a merge commit with no mainline chosen blocks on mainlineRequired, with real parent data", async () => {
+    const repo = branchy({ mergeBack: true });
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const mergeSha = repo.refs.main;
+      if (!mergeSha) throw new Error("unreachable");
+
+      const preflight = await service.preflightRevert(opened.repoId, [mergeSha]);
+      expect(preflight.blockers).toContain("mainlineRequired");
+      expect(preflight.verdict).toBe("blocked");
+      expect(preflight.mainlineRequired).toHaveLength(1);
+      expect(preflight.mainlineRequired[0]?.sha).toBe(mergeSha);
+      expect(preflight.mainlineRequired[0]?.parents.length).toBe(2); // branchy's merge has 2 parents
+      expect(preflight.prediction.kind).toBe("unknown"); // no mainline yet ⇒ nothing to predict
+
+      // Once a mainline is supplied, prediction proceeds and the blocker clears.
+      const withMainline = await service.preflightRevert(opened.repoId, [mergeSha], 1);
+      expect(withMainline.blockers).not.toContain("mainlineRequired");
+      expect(
+        withMainline.prediction.kind === "clean" || withMainline.prediction.kind === "conflicts",
+      ).toBe(true);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("a dirty worktree blocks a revert regardless of the prediction", async () => {
+    const repo = branchy({ mergeBack: false });
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      writeFileSync(join(opened.identity.root, "main.txt"), "dirty\n");
+      const lastCommit = repo.commits[repo.commits.length - 1];
+      if (!lastCommit) throw new Error("unreachable");
+
+      const preflight = await service.preflightRevert(opened.repoId, [lastCommit]);
+      expect(preflight.blockers).toContain("dirtyWorktree");
+      expect(preflight.verdict).toBe("blocked");
+    } finally {
+      service.dispose();
+    }
+  });
+});
+
+describe("RepoService — runOp() executor (P6 W8)", () => {
+  test("branchCreate then branchDelete: undo captures the tip and config, and restores it exactly", async () => {
+    const repo = branchy();
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+      const featureSha = repo.refs["feature/a"];
+
+      const del = await service.runOp(repoId, {
+        kind: "branchDelete",
+        name: "feature/a",
+        force: true,
+      });
+      expect(del.ok).toBe(true);
+      expect(del.undo).not.toBeNull();
+      expect(del.undo?.recoverySha).toBe(featureSha);
+      expect(del.undo?.label).toBe("Deleted branch feature/a");
+
+      const refsAfterDelete = await service.refs(repoId);
+      expect(refsAfterDelete.branches.some((b) => b.shortName === "feature/a")).toBe(false);
+
+      const undoId = del.undo?.id;
+      if (undoId === undefined) throw new Error("unreachable");
+      const undone = await service.undoRun(repoId, undoId);
+      expect(undone.ok).toBe(true);
+      expect(undone.undo).toBeNull(); // undo.run's own OpResult never carries a new slot
+
+      const refsAfterUndo = await service.refs(repoId);
+      const restored = refsAfterUndo.branches.find((b) => b.shortName === "feature/a");
+      expect(restored?.objectId).toBe(featureSha);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("branchDelete undo restores upstream tracking config, not just the ref (P6 W22 exit criteria)", async () => {
+    const repo = branchy();
+    const env = baseEnv(repo.dir);
+    // Arbitrary tracking config directly on the branch-to-be-deleted — undo's capture reads
+    // back whatever `branch.<name>.*` keys exist via `--get-regexp`, so this exercises the same
+    // path a real `--track`'d branch would, without needing a real remote wired up.
+    execFileSync("git", ["config", "branch.feature/a.remote", "origin"], {
+      cwd: repo.dir,
+      env,
+    });
+    execFileSync("git", ["config", "branch.feature/a.merge", "refs/heads/main"], {
+      cwd: repo.dir,
+      env,
+    });
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const del = await service.runOp(repoId, {
+        kind: "branchDelete",
+        name: "feature/a",
+        force: true,
+      });
+      expect(del.ok).toBe(true);
+
+      // Deleting the branch also deletes its config in real git — confirms the "before" state
+      // this test is actually exercising, not just asserting the replay blindly.
+      let configSurvivedDelete = true;
+      try {
+        execFileSync("git", ["config", "--get", "branch.feature/a.remote"], {
+          cwd: repo.dir,
+          env,
+          encoding: "utf8",
+        });
+      } catch {
+        configSurvivedDelete = false;
+      }
+      expect(configSurvivedDelete).toBe(false);
+
+      const undoId = del.undo?.id;
+      if (undoId === undefined) throw new Error("unreachable");
+      const undone = await service.undoRun(repoId, undoId);
+      expect(undone.ok).toBe(true);
+
+      const remote = execFileSync("git", ["config", "--get", "branch.feature/a.remote"], {
+        cwd: repo.dir,
+        env,
+        encoding: "utf8",
+      }).trim();
+      const merge = execFileSync("git", ["config", "--get", "branch.feature/a.merge"], {
+        cwd: repo.dir,
+        env,
+        encoding: "utf8",
+      }).trim();
+      expect(remote).toBe("origin");
+      expect(merge).toBe("refs/heads/main");
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("tagDelete undo round-trips an annotated tag back to the same object", async () => {
+    const repo = branchy();
+    const env = {
+      ...baseEnv(repo.dir),
+      GIT_AUTHOR_NAME: "Kira Fixture",
+      GIT_AUTHOR_EMAIL: "fixture@kira-version.test",
+      GIT_COMMITTER_NAME: "Kira Fixture",
+      GIT_COMMITTER_EMAIL: "fixture@kira-version.test",
+    };
+    execFileSync("git", ["tag", "-a", "v1.0.0", "-m", "release", "main"], { cwd: repo.dir, env });
+    // The tag OBJECT's own sha (`rev-parse`), not the commit it peels to (`rev-list`) — undo's
+    // `recoverySha` for an annotated tag is `RefRecord.objectId`, which is the tag object itself
+    // (its own doc comment: "P6's undo depends on that staying true").
+    const tagSha = execFileSync("git", ["rev-parse", "v1.0.0"], { cwd: repo.dir, env })
+      .toString()
+      .trim();
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const del = await service.runOp(repoId, { kind: "tagDelete", name: "v1.0.0" });
+      expect(del.ok).toBe(true);
+      expect(del.undo?.recoverySha).toBe(tagSha);
+
+      const afterDelete = await service.refs(repoId);
+      expect(afterDelete.tags.some((t) => t.shortName === "v1.0.0")).toBe(false);
+
+      const undoId = del.undo?.id;
+      if (undoId === undefined) throw new Error("unreachable");
+      const undone = await service.undoRun(repoId, undoId);
+      expect(undone.ok).toBe(true);
+
+      const afterUndo = await service.refs(repoId);
+      const restored = afterUndo.tags.find((t) => t.shortName === "v1.0.0");
+      expect(restored).toBeDefined();
+      expect(restored?.objectType).toBe("tag"); // annotated, not downgraded to lightweight
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("a non-undoable op (tagCreate) clears a previously-set undo slot", async () => {
+    const repo = branchy();
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const del = await service.runOp(repoId, {
+        kind: "branchDelete",
+        name: "feature/a",
+        force: true,
+      });
+      expect(del.undo).not.toBeNull();
+      expect(service.undoPeek(repoId)).not.toBeNull();
+
+      const create = await service.runOp(repoId, {
+        kind: "tagCreate",
+        name: "v2.0.0",
+        target: "main",
+        message: undefined,
+        force: false,
+      });
+      expect(create.ok).toBe(true);
+      expect(create.undo).toBeNull();
+      expect(service.undoPeek(repoId)).toBeNull(); // the slot the branchDelete set is now gone
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("a failing write still returns a populated head and inProgress", async () => {
+    const repo = branchy();
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const result = await service.runOp(repoId, {
+        kind: "branchDelete",
+        name: "does-not-exist",
+        force: true,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.error?.kind).toBe("NotFound");
+      expect(result.head).toEqual({ kind: "branch", name: "main" });
+      expect(result.inProgress).toBeNull();
+      expect(result.undo).toBeNull();
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("opContinue/opAbort report an earlyError when nothing is in progress, without spawning a write", async () => {
+    const repo = branchy();
+    const runner = new CountingRunner();
+    const service = await RepoService.create({
+      runner,
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const before = runner.totalSpawnCount;
+      const result = await service.runOp(repoId, { kind: "opContinue" });
+      expect(result.ok).toBe(false);
+      expect(result.error?.message).toMatch(/no operation is currently in progress/i);
+      // Only reads (status, in-progress state files) ran — never a write for a nonexistent op.
+      expect(
+        runner.calls
+          .slice(before)
+          .every((c) => !c.argv.includes("rebase") && !c.argv.includes("merge")),
+      ).toBe(true);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("a conflicting revert fails with Conflict and its own OpResult already reports the in-progress revert", async () => {
+    const repo = conflicting();
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+      const theirsSha = repo.refs["branch-theirs"];
+      if (!theirsSha) throw new Error("unreachable");
+
+      // On main: reverting branch-theirs's own commit re-applies main's conflicting change
+      // backwards against a tree that already diverged — guaranteed to conflict.
+      const result = await service.runOp(repoId, {
+        kind: "revert",
+        shas: [theirsSha],
+        mainline: undefined,
+        noCommit: false,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.error?.kind).toBe("Conflict");
+      expect(result.inProgress?.kind).toBe("revert");
+
+      // Clean up so the fixture's tmp dir doesn't linger mid-revert (hygiene, not an assertion).
+      await service.runOp(repoId, { kind: "opAbort" });
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("capture-before-write: branchDelete's undo reads run before the delete itself", async () => {
+    const repo = branchy();
+    const runner = new ArgvRecordingRunner();
+    const service = await RepoService.create({
+      runner,
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const before = runner.argvs.length;
+      const result = await service.runOp(repoId, {
+        kind: "branchDelete",
+        name: "feature/a",
+        force: true,
+      });
+      expect(result.ok).toBe(true);
+
+      const relevant = runner.argvs.slice(before);
+      const revParseIndex = relevant.findIndex(
+        (argv) => argv.includes("rev-parse") && argv.includes("refs/heads/feature/a"),
+      );
+      const deleteIndex = relevant.findIndex(
+        (argv) => argv.includes("branch") && argv.includes("-D") && argv.includes("feature/a"),
+      );
+      expect(revParseIndex).toBeGreaterThanOrEqual(0);
+      expect(deleteIndex).toBeGreaterThan(revParseIndex); // capture happened strictly first
+    } finally {
+      service.dispose();
+    }
+  });
+});
+
+describe("RepoService — undo slot (P6 W8)", () => {
+  test("undoRun() with a stale/unknown id reports NotFound without replaying anything", async () => {
+    const repo = branchy();
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const result = await service.undoRun(repoId, "not-a-real-id");
+      expect(result.ok).toBe(false);
+      expect(result.error?.kind).toBe("NotFound");
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("undoPeek() never mutates the slot: peeking twice, then running, still succeeds once", async () => {
+    const repo = branchy();
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const del = await service.runOp(repoId, {
+        kind: "branchDelete",
+        name: "feature/a",
+        force: true,
+      });
+      const id = del.undo?.id;
+      if (id === undefined) throw new Error("unreachable");
+
+      expect(service.undoPeek(repoId)?.id).toBe(id);
+      expect(service.undoPeek(repoId)?.id).toBe(id); // still there — peek does not take it
+
+      const first = await service.undoRun(repoId, id);
+      expect(first.ok).toBe(true);
+      expect(service.undoPeek(repoId)).toBeNull(); // taken
+
+      const second = await service.undoRun(repoId, id);
+      expect(second.ok).toBe(false); // cannot be replayed twice
+      expect(second.error?.kind).toBe("NotFound");
     } finally {
       service.dispose();
     }

@@ -28,8 +28,8 @@ export interface WatchRepoOptions {
 
 const DEFAULT_DEBOUNCE_MS = 200;
 
-// Flat files living directly in the common dir; anything under `refs/` is matched by path
-// prefix instead (see #classify).
+// Flat files living directly in the common dir (or, per #classify, the git dir of a linked
+// worktree); anything under `refs/` is matched by path prefix instead (see #classify).
 const REF_ISH_NAMES = new Set([
   "HEAD",
   "packed-refs",
@@ -37,6 +37,12 @@ const REF_ISH_NAMES = new Set([
   "MERGE_HEAD",
   "rebase-merge",
   "rebase-apply",
+  // P6/W7: without these, starting or aborting a cherry-pick/revert/bisect produces no signal
+  // at all — the banner only appears once something else happens to touch a ref.
+  "CHERRY_PICK_HEAD",
+  "REVERT_HEAD",
+  "BISECT_LOG",
+  "sequencer",
 ]);
 
 /** Git writes every one of these files atomically: `<name>.lock` is written, then renamed onto
@@ -60,6 +66,13 @@ function classify(identity: RepoIdentity, path: string): WatchSignal | undefined
   // still routes `index` to worktreeChanged rather than falling into this branch.
   if (path === identity.commonDir) return "refsChanged";
   if (dir === identity.commonDir && REF_ISH_NAMES.has(base)) return "refsChanged";
+  // P6/W7: in a *linked* worktree (D12), `commonDir !== gitDir` and every one of
+  // CHERRY_PICK_HEAD/REVERT_HEAD/BISECT_LOG/sequencer/MERGE_HEAD/rebase-merge/rebase-apply lives
+  // in that worktree's own gitDir, not the common dir — so the same name set must be consulted
+  // there too, or none of them are ever noticed in exactly the configuration D12 exists to
+  // support. In a non-linked worktree gitDir === commonDir and this is a no-op duplicate of the
+  // check above.
+  if (dir === identity.gitDir && REF_ISH_NAMES.has(base)) return "refsChanged";
   return undefined;
 }
 

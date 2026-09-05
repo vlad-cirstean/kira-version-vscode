@@ -164,12 +164,13 @@ export class FakeClipboard implements Clipboard {
 }
 
 export interface FakeEditorAction {
-  readonly kind: "openDiff" | "reveal";
+  readonly kind: "openDiff" | "reveal" | "resolveConflict";
   readonly left?: DocumentRef;
   readonly right?: DocumentRef;
   readonly title?: string;
   readonly ref?: DocumentRef;
   readonly line?: number;
+  readonly path?: string;
 }
 
 export class FakeEditorIntegration implements EditorIntegration {
@@ -177,7 +178,13 @@ export class FakeEditorIntegration implements EditorIntegration {
   readonly actions: FakeEditorAction[] = [];
   #source: VirtualDocumentSource | undefined;
 
-  constructor(capabilities: EditorCapabilities = { openInEditor: true, goToFile: true }) {
+  constructor(
+    capabilities: EditorCapabilities = {
+      openInEditor: true,
+      goToFile: true,
+      resolveConflict: true,
+    },
+  ) {
     this.capabilities = capabilities;
   }
 
@@ -192,6 +199,10 @@ export class FakeEditorIntegration implements EditorIntegration {
 
   async reveal(ref: DocumentRef, line: number): Promise<void> {
     this.actions.push({ kind: "reveal", ref, line });
+  }
+
+  async resolveConflict(req: { readonly path: string }): Promise<void> {
+    this.actions.push({ kind: "resolveConflict", path: req.path });
   }
 
   /** Drives the registered `VirtualDocumentSource` directly, for a test asserting on what the

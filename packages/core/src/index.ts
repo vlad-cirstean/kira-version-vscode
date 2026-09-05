@@ -58,9 +58,20 @@ export {
   mapLineAcrossDiff,
   splitTrailerBlock,
 } from "./model/diff.ts";
-export type { RefKind, RefRecord, RefTrack } from "./model/ref.ts";
+export type {
+  InProgressKind,
+  InProgressOperation,
+  InProgressStateFiles,
+  OpErrorKind,
+  OpRequest,
+  OpResult,
+  UndoSlotSnapshot,
+} from "./model/operation.ts";
+export { canRunOp, classifyInProgress, describeInProgress } from "./model/operation.ts";
+export type { RefKind, RefRecord, RefTrack, TagAnnotation } from "./model/ref.ts";
 export type { HeadState, RepoIdentity } from "./model/repo.ts";
 export type { StashEntry } from "./model/stash.ts";
+export { isAnnotated, tagTargetCommit } from "./model/tag.ts";
 export type {
   FileStatusCode,
   IgnoredStatusEntry,
@@ -69,8 +80,22 @@ export type {
   StatusBranchInfo,
   StatusEntry,
   StatusResult,
+  StatusSummary,
   UntrackedStatusEntry,
 } from "./model/status.ts";
+export { dirtyPathsFrom, summarizeStatus } from "./model/status.ts";
+export { classifyCheckout } from "./preflight/checkout.ts";
+export { classifyRevert } from "./preflight/revert.ts";
+export { classifyTagCreate, validateRefName } from "./preflight/tag.ts";
+export type {
+  CheckoutBlocker,
+  CheckoutPreflight,
+  DirtyPath,
+  RevertParentChoice,
+  RevertPreflight,
+  RevertPrediction,
+  TagCreatePreflight,
+} from "./preflight/types.ts";
 export type { Clipboard } from "./ports/clipboard.ts";
 export type { Dialogs, PickFolderOptions } from "./ports/dialogs.ts";
 export type { Disposable } from "./ports/disposable.ts";
@@ -121,3 +146,5 @@ export {
   splitLimitedFields,
   splitRecords,
 } from "./util/nulSplit.ts";
+export type { UndoPolicy, UndoRecord } from "./undo/slot.ts";
+export { UNDO_POLICY, UndoSlot } from "./undo/slot.ts";

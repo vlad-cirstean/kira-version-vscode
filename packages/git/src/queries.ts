@@ -15,6 +15,7 @@ import type {
   FileChange,
   MergePrediction,
   RefRecord,
+  RevertParentChoice,
   SignatureStatus,
   StashEntry,
   StatusResult,
@@ -114,7 +115,7 @@ export async function refs(driver: GitDriver): Promise<RefRecord[]> {
   const records: Uint8Array[] = [];
   for await (const record of read.records(REFS_RECORD_DELIMITER)) records.push(record);
   await read.done;
-  return records.filter((r) => r.length > 0).map(parseRefRecord);
+  return records.filter((r) => r.length > 0).map((r) => parseRefRecord(r));
 }
 
 export async function status(
@@ -126,6 +127,46 @@ export async function status(
   for await (const record of read.records(0x00)) records.push(record);
   await read.done;
   return parseStatus(records);
+}
+
+// ---------------------------------------------------------------------------------------
+// refsSnapshot — P6/W8's two-spawn scoped fetch behind `refs.list`: heads+remotes sorted by
+// `-committerdate`, tags sorted by `-v:refname`, split by `kind` here rather than by a third
+// spawn (`for-each-ref` cannot filter `refs/heads` from `refs/remotes` within one `--format`
+// pass, but both are already discriminated per-record by `parseRefRecord`'s `kind`, so the
+// split is a free `Array.filter`, not another round-trip). Distinct from the plain `refs()`
+// above, which P1's own integration tests still call with `scope: "all"` — this is additive,
+// not a replacement.
+// ---------------------------------------------------------------------------------------
+
+export interface RefsSnapshot {
+  readonly branches: RefRecord[];
+  readonly remoteBranches: RefRecord[];
+  readonly tags: RefRecord[];
+}
+
+async function collectRefRecords(
+  driver: GitDriver,
+  argv: string[],
+  withSubject: boolean,
+): Promise<RefRecord[]> {
+  const read = driver.read(argv);
+  const records: Uint8Array[] = [];
+  for await (const record of read.records(REFS_RECORD_DELIMITER)) records.push(record);
+  await read.done;
+  return records.filter((r) => r.length > 0).map((r) => parseRefRecord(r, withSubject));
+}
+
+export async function refsSnapshot(driver: GitDriver): Promise<RefsSnapshot> {
+  const [headsAndRemotes, tags] = await Promise.all([
+    collectRefRecords(driver, refsArgs("heads"), false),
+    collectRefRecords(driver, refsArgs("tags"), true),
+  ]);
+  return {
+    branches: headsAndRemotes.filter((r) => r.kind === "branch"),
+    remoteBranches: headsAndRemotes.filter((r) => r.kind === "remoteBranch"),
+    tags,
+  };
 }
 
 export async function stashList(driver: GitDriver): Promise<StashEntry[]> {
@@ -155,8 +196,9 @@ export async function predictMerge(
   driver: GitDriver,
   base: string,
   other: string,
+  opts?: { readonly mergeBase?: string },
 ): Promise<MergePrediction> {
-  const read = driver.read(mergeTreeArgs(base, other));
+  const read = driver.read(mergeTreeArgs(base, other, opts));
   const bytes = await collectBytes(read.bytes);
   let exitCode = 0;
   try {
@@ -293,6 +335,53 @@ export async function commitDetail(
   );
 
   return { ...metadata, body, trailers, signature, parentIndex, files };
+}
+
+// ---------------------------------------------------------------------------------------
+// revertMergeParents — §7.10's mainline picker data. `preflight.revert`'s wire request carries
+// only `shas` (plus an optional already-chosen `mainline`), never the parent lists themselves —
+// those are looked up here, one `show -s` per requested sha to learn its parent count and shas,
+// then one more per DISTINCT parent sha across every merge found (deduplicated: an octopus base
+// shared by two requested shas costs one spawn, not two) to learn that parent's subject for the
+// picker's label. Bounded by how many commits a user selects for revert at once — never a hot
+// path the way `log`'s walk is.
+// ---------------------------------------------------------------------------------------
+
+export async function revertMergeParents(
+  driver: GitDriver,
+  shas: readonly string[],
+): Promise<Map<string, RevertParentChoice[]>> {
+  const metas = await Promise.all(
+    shas.map(async (sha) => {
+      const bytes = stripTrailingNul(await collectOneShot(driver.read(showMetadataArgs(sha))));
+      return { sha, record: parseLogRecord(bytes) };
+    }),
+  );
+  const merges = metas.filter((m) => m.record.parents.length > 1);
+
+  const parentShas = [...new Set(merges.flatMap((m) => m.record.parents))];
+  const subjectEntries = await Promise.all(
+    parentShas.map(async (parentSha) => {
+      const bytes = stripTrailingNul(
+        await collectOneShot(driver.read(showMetadataArgs(parentSha))),
+      );
+      return [parentSha, parseLogRecord(bytes).subject] as const;
+    }),
+  );
+  const parentSubjects = new Map(subjectEntries);
+
+  const result = new Map<string, RevertParentChoice[]>();
+  for (const m of merges) {
+    result.set(
+      m.sha,
+      m.record.parents.map((parentSha, i) => ({
+        parentNumber: i + 1,
+        sha: parentSha,
+        subject: parentSubjects.get(parentSha) ?? "",
+      })),
+    );
+  }
+  return result;
 }
 
 /** Splits a fully-collected `-z` invocation's output into its NUL-delimited records — used

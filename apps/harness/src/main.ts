@@ -7,7 +7,12 @@ import {
   type TokenMap,
   TokenReader,
 } from "@kira-version/ui";
-import { createMockBridge, type HarnessEditorAction } from "./mockBridge.ts";
+import {
+  createMockBridge,
+  type HarnessEditorAction,
+  type RecordedOp,
+  type RecordedUndo,
+} from "./mockBridge.ts";
 import { loadScenario } from "./scenarios/index.ts";
 import { EPOCH_SECONDS, STEP_SECONDS, topology } from "./scenarios/topology.ts";
 import { SessionStorageViewStateStore } from "./sessionViewStateStore.ts";
@@ -24,6 +29,14 @@ declare global {
        *  bridge recorded — a plain property, not a method, so a Playwright spec reads it with a
        *  bare `page.evaluate(() => window.__kiraHarness.lastEditorAction)`. */
       readonly lastEditorAction: HarnessEditorAction | undefined;
+      /** P6 W19: the most recent `op.run` call the mock bridge recorded — see
+       *  `mockBridge.ts`'s own `RecordedOp` doc comment. */
+      readonly lastOp: RecordedOp | undefined;
+      /** P6 W19: the most recent `undo.run` call the mock bridge recorded — see
+       *  `mockBridge.ts`'s own `RecordedUndo` doc comment. */
+      readonly lastUndo: RecordedUndo | undefined;
+      /** P6 W19: see `mockBridge.ts`'s own `MockHandlers.resolveOneConflictedPath` doc comment. */
+      resolveOneConflictedPath(): boolean;
     };
   }
 }
@@ -152,6 +165,15 @@ window.__kiraHarness = {
   },
   get lastEditorAction(): HarnessEditorAction | undefined {
     return transport.getLastEditorAction();
+  },
+  get lastOp(): RecordedOp | undefined {
+    return transport.getLastOp();
+  },
+  get lastUndo(): RecordedUndo | undefined {
+    return transport.getLastUndo();
+  },
+  resolveOneConflictedPath(): boolean {
+    return transport.resolveOneConflictedPath();
   },
 };
 

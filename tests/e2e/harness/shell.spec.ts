@@ -28,6 +28,51 @@ type HarnessEditorAction =
     }
   | { readonly kind: "reveal"; readonly ref: HarnessDocumentRef; readonly line: number };
 
+/** Mirrors `apps/harness/src/mockBridge.ts`'s own `OpRequest`/`OpResult` re-export shapes
+ *  (`RecordedOp`/`RecordedUndo`) — reproduced structurally for the same reason
+ *  `HarnessEditorAction` is above (P6 W19). Only the handful of `OpRequest` variants the new
+ *  specs actually assert on are spelled out; the rest fall through the trailing member so this
+ *  type never needs to track every field `contract.ts` adds to kinds no P6 spec touches. */
+type HarnessOpRequest =
+  | { readonly kind: "checkout"; readonly target: string; readonly mode: "switch" | "detach" }
+  | {
+      readonly kind: "branchCreate";
+      readonly name: string;
+      readonly startPoint: string;
+      readonly checkout: boolean;
+      readonly track: string | undefined;
+    }
+  | { readonly kind: "branchDelete"; readonly name: string; readonly force: boolean }
+  | { readonly kind: "branchRename"; readonly from: string; readonly to: string }
+  | {
+      readonly kind: "tagCreate";
+      readonly name: string;
+      readonly target: string;
+      readonly message: string | undefined;
+      readonly force: boolean;
+    }
+  | { readonly kind: "tagDelete"; readonly name: string }
+  | { readonly kind: "tagPush"; readonly remote: string; readonly names: readonly string[] | "all" }
+  | { readonly kind: "tagDeleteRemote"; readonly remote: string; readonly name: string }
+  | {
+      readonly kind: "revert";
+      readonly shas: readonly string[];
+      readonly mainline: number | undefined;
+      readonly noCommit: boolean;
+    }
+  | { readonly kind: "opContinue" }
+  | { readonly kind: "opAbort" };
+
+interface HarnessOpResult {
+  readonly ok: boolean;
+  readonly error: { readonly kind: string; readonly message: string } | undefined;
+  readonly undo: {
+    readonly id: string;
+    readonly label: string;
+    readonly recoverySha: string;
+  } | null;
+}
+
 declare global {
   interface Window {
     __kiraHarness: {
@@ -39,6 +84,16 @@ declare global {
        *  without repeating the declaration, the same convention `commitList.spec.ts`'s own doc
        *  comment already states for this interface as a whole. */
       readonly lastEditorAction: HarnessEditorAction | undefined;
+      /** P6 W19: declared once, project-wide, here — `refOps.spec.ts`/`undo.spec.ts` read this
+       *  without repeating the declaration. */
+      readonly lastOp:
+        | { readonly request: HarnessOpRequest; readonly result: HarnessOpResult }
+        | undefined;
+      /** P6 W19: ditto, for `undo.run`. */
+      readonly lastUndo: { readonly id: string; readonly result: HarnessOpResult } | undefined;
+      /** P6 W19: `conflictBanner.spec.ts`'s own hook — see `mockBridge.ts`'s
+       *  `MockHandlers.resolveOneConflictedPath` doc comment. */
+      resolveOneConflictedPath(): boolean;
     };
   }
 }

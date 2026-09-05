@@ -59,16 +59,48 @@ export {
   showMetadataArgs,
 } from "./parse/log.ts";
 export { mergeTreeArgs, parseMergeTreeOutput } from "./parse/mergeTree.ts";
-export { parseRefRecord, REFS_FORMAT, REFS_RECORD_DELIMITER, refsArgs } from "./parse/refs.ts";
+export {
+  branchConfigRegexpArgs,
+  branchCreateAndSwitchArgs,
+  branchCreateArgs,
+  branchDeleteArgs,
+  branchRenameArgs,
+  branchRevParseArgs,
+} from "./ops/branch.ts";
+export {
+  rewrittenPathsArgs,
+  switchArgs,
+  switchCreateTrackingArgs,
+  switchDetachArgs,
+} from "./ops/checkout.ts";
+export { abortArgs, continueArgs, readInProgressStateFiles } from "./ops/conflict.ts";
+export { revertArgs } from "./ops/revert.ts";
+export {
+  tagCreateArgs,
+  tagDeleteArgs,
+  tagDeleteRemoteArgs,
+  tagPushArgs,
+  undoAnnotatedTagArgs,
+  undoLightweightTagArgs,
+} from "./ops/tag.ts";
+export {
+  parseRefRecord,
+  REFS_FORMAT,
+  REFS_RECORD_DELIMITER,
+  refsArgs,
+  TAG_REFS_FORMAT,
+} from "./parse/refs.ts";
 export { parseStashRecord, STASH_FORMAT, stashListArgs } from "./parse/stash.ts";
 export { parseStatus, statusArgs } from "./parse/status.ts";
-export type { CommitDetailOptions, LogQueryOptions } from "./queries.ts";
+export type { CommitDetailOptions, LogQueryOptions, RefsSnapshot } from "./queries.ts";
 export {
   commitDetail,
   countCommits,
   log,
   predictMerge,
   refs,
+  refsSnapshot,
+  revertMergeParents,
   stashList,
   status,
 } from "./queries.ts";

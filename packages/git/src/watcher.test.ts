@@ -159,6 +159,68 @@ describe("watchRepo", () => {
     expect(fw.listenerCount).toBe(0);
   });
 
+  test("each of the four P6/W7 state files produces refsChanged", async () => {
+    for (const name of ["CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG", "sequencer"]) {
+      const fw = new FakeFileWatcher();
+      let clock = 0;
+      const rw = watchRepo(fw, identity, { debounceMs: 200, now: () => clock });
+      const seen: WatchSignal[] = [];
+      rw.onSignal((s) => seen.push(s));
+
+      fw.emit({ path: join(identity.commonDir, name), kind: "changed" });
+      clock = 1000;
+      await tick();
+
+      expect(seen).toEqual(["refsChanged"]);
+      rw.dispose();
+    }
+  });
+
+  test("a REVERT_HEAD write inside a linked worktree's own gitDir produces refsChanged (D12 regression)", async () => {
+    const fw = new FakeFileWatcher();
+    const linked: RepoIdentity = {
+      ...identity,
+      gitDir: "/repo/.git/worktrees/feature",
+      isLinkedWorktree: true,
+    };
+    let clock = 0;
+    const rw = watchRepo(fw, linked, { debounceMs: 200, now: () => clock });
+    const seen: WatchSignal[] = [];
+    rw.onSignal((s) => seen.push(s));
+
+    // The revert state lives under the linked worktree's *own* gitDir, not the common dir it
+    // shares with the main worktree — previously unnoticed entirely (only `index` was
+    // classified under gitDir).
+    fw.emit({ path: join(linked.gitDir, "REVERT_HEAD"), kind: "created" });
+    clock = 1000;
+    await tick();
+
+    expect(seen).toEqual(["refsChanged"]);
+    rw.dispose();
+  });
+
+  test("MERGE_HEAD/rebase-merge/rebase-apply also fire under a linked worktree's own gitDir", async () => {
+    for (const name of ["MERGE_HEAD", "rebase-merge", "rebase-apply"]) {
+      const fw = new FakeFileWatcher();
+      const linked: RepoIdentity = {
+        ...identity,
+        gitDir: "/repo/.git/worktrees/feature",
+        isLinkedWorktree: true,
+      };
+      let clock = 0;
+      const rw = watchRepo(fw, linked, { debounceMs: 200, now: () => clock });
+      const seen: WatchSignal[] = [];
+      rw.onSignal((s) => seen.push(s));
+
+      fw.emit({ path: join(linked.gitDir, name), kind: "created" });
+      clock = 1000;
+      await tick();
+
+      expect(seen).toEqual(["refsChanged"]);
+      rw.dispose();
+    }
+  });
+
   test("onSignal's Disposable unsubscribes only that listener", async () => {
     const fw = new FakeFileWatcher();
     let clock = 0;

@@ -11,6 +11,8 @@ import {
   log,
   predictMerge,
   refs,
+  refsSnapshot,
+  revertMergeParents,
   stashList,
   status,
 } from "../../packages/git/src/queries.ts";
@@ -121,6 +123,64 @@ describe("refs", () => {
     expect(tag?.objectType).toBe("tag");
     expect(tag?.objectId).not.toBe(sha); // the tag object itself, not the commit it points at
     expect(tag?.peeledObjectId).toBe(sha);
+  });
+});
+
+describe("refsSnapshot — P6/W8's two-spawn scoped fetch", () => {
+  test("splits heads from remote-tracking branches by kind, both from the heads+remotes spawn", async () => {
+    const { dir } = withRemote({ localOnlyCommits: 1 });
+    const driver = await driverFor(dir);
+    const snapshot = await refsSnapshot(driver);
+    expect(snapshot.branches.some((r) => r.shortName === "main")).toBe(true);
+    expect(snapshot.branches.every((r) => r.kind === "branch")).toBe(true);
+    expect(snapshot.remoteBranches.some((r) => r.shortName === "origin/main")).toBe(true);
+    expect(snapshot.remoteBranches.every((r) => r.kind === "remoteBranch")).toBe(true);
+  });
+
+  test("tags come from the separate tags spawn and carry their annotation subject", async () => {
+    const { dir, commits } = linear(1);
+    const sha = commits[0];
+    if (sha === undefined) throw new Error("expected a commit");
+    execFileSync("git", ["config", "user.name", "T"], { cwd: dir });
+    execFileSync("git", ["config", "user.email", "t@t.com"], { cwd: dir });
+    execFileSync("git", ["tag", "-a", "v1.0", "-m", "release", sha], { cwd: dir });
+    const driver = await driverFor(dir);
+    const snapshot = await refsSnapshot(driver);
+    const tag = snapshot.tags.find((r) => r.shortName === "v1.0");
+    expect(tag?.annotation?.subject).toBe("release");
+    expect(snapshot.tags.every((r) => r.kind === "tag")).toBe(true);
+  });
+});
+
+describe("revertMergeParents — §7.10's mainline picker data", () => {
+  test("a non-merge sha yields no map entry at all", async () => {
+    const { dir, commits } = linear(2);
+    const last = commits[commits.length - 1];
+    if (last === undefined) throw new Error("expected a commit");
+    const driver = await driverFor(dir);
+    const map = await revertMergeParents(driver, [last]);
+    expect(map.size).toBe(0);
+  });
+
+  test("a two-parent merge reports both parents, numbered from 1, with real subjects", async () => {
+    const { dir, commits } = branchy();
+    const mergeSha = commits[commits.length - 1];
+    if (mergeSha === undefined) throw new Error("expected a merge commit");
+    const driver = await driverFor(dir);
+    const map = await revertMergeParents(driver, [mergeSha]);
+    const parents = map.get(mergeSha);
+    expect(parents).toHaveLength(2);
+    expect(parents?.map((p) => p.parentNumber)).toEqual([1, 2]);
+    expect(parents?.every((p) => p.subject.length > 0)).toBe(true);
+  });
+
+  test("an octopus merge reports all four parents", async () => {
+    const { dir, commits } = octopus();
+    const mergeSha = commits[commits.length - 1];
+    if (mergeSha === undefined) throw new Error("expected a merge commit");
+    const driver = await driverFor(dir);
+    const map = await revertMergeParents(driver, [mergeSha]);
+    expect(map.get(mergeSha)).toHaveLength(4);
   });
 });
 
