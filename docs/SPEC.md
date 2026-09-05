@@ -1772,7 +1772,8 @@ Deferred to v2, listed so the v1 architecture does not preclude them:
 - Commit creation, staging/unstaging (this is a history tool, not a replacement for VS Code's
   SCM view — v1 reads the working tree, it does not edit it, except via the documented
   operations here).
-- Submodules, worktree switching, sparse-checkout management.
+- Submodules, sparse-checkout management. (Worktree create/list/switch/remove is **not**
+  a permanent non-goal — it is deferred to P14, §10; not designed yet.)
 - Pickaxe/file-content search (`-S`/`-G`), file history / blame views.
 - Forge integration (PR overlays for GitHub/GitLab).
 - Graph filtering by ref/author/path as a persistent view mode (v1 has search, not filtered
@@ -1802,6 +1803,7 @@ Phases are sequential; each ends at a checkpoint.
 | **P11** | Search | Input with case/whole-word/regex toggles, commit/refs(branches+tags)/both scope, hybrid client-side + git-backed matching, next/prev navigation, live regex validation, abort-on-supersede. | Semantics table fully covered by tests (each toggle × scope); ≤120 ms budget met; malformed regex never throws. |
 | **P12** | GitHub PR links | Branch → pull request resolution (§6.7): GitHub-remote detection from `origin`, the `GitHubAuth` port over VS Code's built-in GitHub authentication provider (D31), the REST lookup, the per-branch cache invalidated by the watcher, `branch.resolvePr` (§3.5), the `#123` badge on branch-picker rows and message-column ref badges opening the PR via `ExternalOpener` (D32), `kiraVersion.github.enabled`, and PR number/title matching added to §7.8's `Refs` scope. | A branch with a pull request shows its badge in both places, distinguishes open/merged/closed, and opens the PR URL externally; search finds that branch by PR number and title within the ≤120 ms budget with no per-keystroke network call; no GitHub remote, no matching PR, the setting off, or a declined session each produce no badge, no request and no repeat prompt, with the rest of the app unaffected; the session is requested on first use only, never at activation, verified by an activation-time assertion. |
 | **P13** | Ship | `.vsix` packaging without `vscode:prepublish`, `extensionKind`/no-browser manifest declarations (2.1.1), **`engines.vscode` floor confirmed (D7)**, **SCM title button and status bar item (6.5)**, the **`kiraVersion.*` command-palette audit** wiring a command for every mutating operation introduced across P6–P10 (6.5/6.6's "every action is palette-reachable", which no earlier row owns), marketplace + OpenVSX metadata, docs, settings surface, telemetry-free release checklist. | Installable `.vsix`; every mutating operation reachable from the palette; full Playwright suite green on macOS. |
+| **P14** | Worktree support | *Not designed yet — planned in full only when this phase's turn comes up, after P13.* Placeholder so the request is not lost: git worktree create/list/switch/remove (building on D12's existing linked-worktree detection from P6), and a user-configurable "prepare script" run after creating a worktree, with visible progress feedback while it runs (it can take a while). | *To be defined at design time.* |
 
 **A note on P3's row, for anyone reconciling it against `docs/plans/P3.md`.** P3 originally also
 built and shipped a second, standalone desktop host booting the identical UI bundle, plus the
