@@ -143,4 +143,13 @@ design was chosen — live in `docs/SPEC.md` and each phase plan's own Findings 
 phases fill it in rather than reorganising it. If a phase needs a file the tree does not
 anticipate, add it to the tree in the same commit — the spec stays the map.
 
+## Running the suites
+
+- `bun run check`, `bun run test`, `bun run test:e2e` (the `harness` project) and `bun run
+  test:perf` all run here as-is; `PLAYWRIGHT_BROWSERS_PATH` is preset.
+- The VS Code tier is `bun run test:e2e:vscode` — it starts Xvfb itself on Linux and is a
+  passthrough on macOS.
+- macOS stays the authoritative platform for results (D27); the visual baselines already in the
+  tree are Linux baselines (`docs/plans/P4c-linux-test-infra.md`).
+
 Full spec: `docs/SPEC.md`.

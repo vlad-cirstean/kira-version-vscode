@@ -137,7 +137,21 @@ export function watchRepo(
     identity.gitDir === identity.commonDir
       ? [identity.commonDir]
       : [identity.commonDir, identity.gitDir];
-  const flatSubscription = fileWatcher.watch(flatDirs, { recursive: false }, onFsEvent);
+  // Also watch the shallow, known set of directories where refs actually live,
+  // non-recursively, alongside the recursive `refs/` subscription above: on Linux, Node's
+  // userland recursive watcher (nodeFileWatcher.ts's doc comment) can go stale on a given ref
+  // file after its first rename-over, missing subsequent updates to the same path. A
+  // non-recursive directory watch doesn't have that failure mode (it's the same mechanism
+  // `flatDirs` already relies on for HEAD et al.), so this closes the gap. A duplicate event
+  // costs nothing — this layer already debounces and coalesces by design (P4c W2).
+  const flatRefDirs = ["heads", "tags", "remotes"].map((name) =>
+    join(identity.commonDir, "refs", name),
+  );
+  const flatSubscription = fileWatcher.watch(
+    [...flatDirs, ...flatRefDirs],
+    { recursive: false },
+    onFsEvent,
+  );
 
   return {
     onSignal(fn: (signal: WatchSignal) => void): Disposable {

@@ -230,10 +230,18 @@ async function platformFallbackCandidates(
     if (await xcodeCommandLineToolsInstalled(runner)) candidates.push("/usr/bin/git");
     return candidates;
   }
-  // Named, unimplemented cases (D27) — adding a platform later is a new branch here, not a
-  // refactor of everything that calls this.
+  if (platform === "linux") {
+    // Not a support claim (D27 stays macOS-only for v1): this branch exists so discovery
+    // fails with `notFound` rather than throwing past `RepoService.create()`'s unguarded
+    // `await` (see docs/plans/P4c-linux-test-infra.md, W1) when PATH doesn't already have
+    // git. No `xcode-select`-style gate here — unlike macOS's CLT shim, Linux's
+    // `/usr/bin/git` is a real binary, not something that pops an install dialog when run.
+    return ["/usr/bin/git", "/usr/local/bin/git", "/home/linuxbrew/.linuxbrew/bin/git"];
+  }
+  // win32 (and any other platform) is a named, unimplemented case (D27) — adding a platform
+  // later is a new branch here, not a refactor of everything that calls this.
   throw new Error(
-    `git discovery: platform '${platform}' is not supported yet (v1 is macOS-only, D27)`,
+    `git discovery: platform '${platform}' is not supported yet (v1 is macOS-only, D27; Windows is not implemented)`,
   );
 }
 

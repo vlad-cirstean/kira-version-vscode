@@ -43,9 +43,10 @@ describe("NodeFileWatcher", () => {
       // instant" caveat as macOS's FSEvents coalescing, just at setup time instead of delivery
       // time. Writing immediately can race that enumeration, so give it a beat first.
       await new Promise((resolve) => setTimeout(resolve, 300));
-      writeFileSync(join(dir, "nested", "b.txt"), "hi");
-      await waitFor(() => events.some((event) => event.path.includes("nested")));
-      expect(events.some((event) => event.path.includes("nested"))).toBe(true);
+      const nestedFile = join(dir, "nested", "b.txt");
+      writeFileSync(nestedFile, "hi");
+      await waitFor(() => events.some((event) => event.path === nestedFile));
+      expect(events.some((event) => event.path === nestedFile)).toBe(true);
     } finally {
       sub.dispose();
       rmSync(dir, { recursive: true, force: true });

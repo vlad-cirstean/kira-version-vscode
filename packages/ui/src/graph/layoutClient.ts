@@ -24,14 +24,19 @@
  * - The worker's own store-side view is stale by construction between pages, which is fine:
  *   `layoutAppend`'s contract is that the input carries everything the pass reads.
  *
- * **The fallback, which V1 decides.** A module worker inside a VS Code webview must satisfy a
- * CSP `worker-src` directive (`packages/host-vscode/src/html.ts`) — confirmed on a real webview
- * by V1. If a module worker cannot load there at all, the fix is `submit` running
- * `layoutAppend` on the main thread instead, chunked so it never holds a frame — a real
- * degradation to record in Findings, not a reason to restructure anything above this file: every
- * consumer is already written against a promise. `createLayoutClient`'s `workerFactory`
- * parameter is what makes that a one-file change.
+ * **The fallback, which V1 decided (docs/plans/P4c-linux-test-infra.md's Findings).** A module
+ * `Worker` cannot be constructed at all from a `--extensionDevelopmentPath` webview: its script
+ * lives on the `vscode-resource.vscode-cdn.net` virtual host, a different origin than the
+ * webview document's own `vscode-webview://` origin, and `new Worker()` across origins throws a
+ * synchronous `SecurityError` — confirmed live, first time this ever ran a real webview (P4c).
+ * Uncaught, that throw happens inside `createLayoutClient`'s default parameter, i.e. inside
+ * `GraphViewModel`'s constructor, i.e. inside Vue's `setup()` — it aborted the whole app's mount,
+ * not just layout. The fix: `submit` runs `layoutAppend` on the main thread instead, deferred one
+ * macrotask per call so it never blocks the same turn that requested it. `createLayoutClient`'s
+ * `workerFactory` parameter is what makes that a one-file change — every consumer above this file
+ * is already written against a promise, unaffected either way.
  */
+import { layoutAppend } from "@kira-version/core";
 import type {
   LayoutChunk,
   LayoutFrontier,
@@ -61,13 +66,48 @@ export interface WorkerLike {
 
 /** Vite's own documented module-worker form: a literal `new URL(..., import.meta.url)`
  *  expression its static analysis recognizes and bundles as its own chunk. Kept in its own
- *  function so `createLayoutClient`'s `workerFactory` parameter can default to it while a test
- *  injects a `WorkerLike` stub instead — the literal form has to stay exactly this shape for
- *  Vite to find it, so it may not be built up from a variable or wrapped in another call. */
+ *  function, separate from the try/catch that calls it (`createWorker`, below) — the literal
+ *  form has to stay exactly this shape for Vite to find it, so it may not be built up from a
+ *  variable or wrapped in another call. */
 function createRealWorker(): WorkerLike {
   return new Worker(new URL("./layout.worker.ts", import.meta.url), {
     type: "module",
   }) as unknown as WorkerLike;
+}
+
+/** The documented fallback above: runs `layoutAppend` on the main thread behind the same
+ *  `WorkerLike` message-passing shape `layoutClient.ts` already drives everything through, so
+ *  nothing above this file needs to know which one it got. `setTimeout` (not a microtask) is the
+ *  deferral — matching a real worker's response, which always lands after at least one
+ *  event-loop turn, and giving the browser a chance to paint a frame in between calls (this is
+ *  what "never holds a frame" means for a fallback with no separate thread to hold it). */
+function createMainThreadWorker(): WorkerLike {
+  const worker: WorkerLike = {
+    onmessage: null,
+    onerror: null,
+    postMessage(message) {
+      const request = message as LayoutRequest;
+      setTimeout(() => {
+        const { chunk, frontier } = layoutAppend(request.input, request.frontier);
+        const response: LayoutResponse = { sequence: request.sequence, chunk, frontier };
+        worker.onmessage?.({ data: response } as MessageEvent<LayoutResponse>);
+      }, 0);
+    },
+    terminate() {
+      // Nothing to tear down — no thread, no pending browser-level handle.
+    },
+  };
+  return worker;
+}
+
+/** `createLayoutClient`'s actual default: real worker when the webview will allow one,
+ *  the main-thread fallback when it throws constructing it. */
+function createWorker(): WorkerLike {
+  try {
+    return createRealWorker();
+  } catch {
+    return createMainThreadWorker();
+  }
 }
 
 interface PendingSubmit {
@@ -86,9 +126,7 @@ export class LayoutClientStaleError extends Error {
   }
 }
 
-export function createLayoutClient(
-  workerFactory: () => WorkerLike = createRealWorker,
-): LayoutClient {
+export function createLayoutClient(workerFactory: () => WorkerLike = createWorker): LayoutClient {
   const worker = workerFactory();
   const pending = new Map<number, PendingSubmit>();
   let nextSequence = 0;
