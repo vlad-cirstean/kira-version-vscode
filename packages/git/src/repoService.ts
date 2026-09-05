@@ -606,9 +606,12 @@ export class RepoService {
 
   /** For the virtual document source (W5/W6): `<rev>:<path>`'s content, or why there is none.
    *  Not cached — `catFile.ts`'s own persistent `--batch`/`--batch-check` processes already
-   *  make a repeat read of the same blob free. */
+   *  make a repeat read of the same blob free. A `path` containing a newline (legal in git, W2)
+   *  cannot be expressed in `cat-file --batch`'s one-request-per-line protocol at all, so it is
+   *  routed to the one-shot fallback below instead of the persistent session. */
   async blob(repoId: string, rev: string, path: string): Promise<BlobResult> {
     const session = this.#requireSession(repoId);
+    if (path.includes("\n")) return this.#blobViaOneShotShow(session, rev, path);
     const result = await session.driver.catFile.read(`${rev}:${path}`);
     switch (result.kind) {
       case "missing":
@@ -618,6 +621,28 @@ export class RepoService {
       case "found":
         if (looksBinary(result.content)) return { kind: "binary" };
         return { kind: "found", content: decoder.decode(result.content) };
+    }
+  }
+
+  /**
+   * §4.4/W2's "vanishingly rare path with a `\n` in it" fallback: a plain `git show <rev>:<path>`
+   * spawn, argv only, no line-oriented request framing to break. No `--batch-check` probe first
+   * — reading the whole blob before judging its size is the right tradeoff for a path this rare;
+   * `blob()`'s normal, common-case route still probes size before ever reading content. A failed
+   * spawn (the path does not resolve at `rev`, among other reasons `git show` can exit non-zero)
+   * is reported as `missing` — the same "no skipped validation, but no wrong-shaped answer either"
+   * choice `worktreeDiff` above makes for a refinement that cannot run.
+   */
+  async #blobViaOneShotShow(session: RepoSession, rev: string, path: string): Promise<BlobResult> {
+    try {
+      const read = session.driver.read(["show", `${rev}:${path}`]);
+      const { bytes, total, overCap } = await collectWithCap(read.bytes, DEFAULT_MAX_BLOB_BYTES);
+      await read.done;
+      if (overCap) return { kind: "tooLarge", bytes: total, limitBytes: DEFAULT_MAX_BLOB_BYTES };
+      if (looksBinary(bytes)) return { kind: "binary" };
+      return { kind: "found", content: decoder.decode(bytes) };
+    } catch {
+      return { kind: "missing" };
     }
   }
 
