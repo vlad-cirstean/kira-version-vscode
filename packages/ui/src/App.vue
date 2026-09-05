@@ -29,6 +29,8 @@ import {
   composeLoadMoreAnnouncement,
   composeRefreshAnnouncement,
 } from "./state/liveAnnouncements.ts";
+import { OpsState } from "./state/ops.ts";
+import { RefsState } from "./state/refs.ts";
 import { RepoState } from "./state/repo.ts";
 import { SelectionState } from "./state/selection.ts";
 import { SettingsState } from "./state/settings.ts";
@@ -62,6 +64,12 @@ const selection = new SelectionState(graphView.store);
 // which cannot happen before that same `bootstrap()` call has already resolved `capabilities`.
 const detailState = new DetailState(bridge);
 const actions = shallowRef<DetailActions | undefined>(undefined);
+
+// `docs/plans/P6.md` W12: one `RefsState`/`OpsState` for the life of this component, exactly like
+// `graphView`/`selection`/`detailState` above — `handleRepoOpened`/the active-repo watch below
+// reset them via `setRepoId` rather than replacing either instance.
+const refsState = new RefsState(bridge);
+const opsState = new OpsState(bridge, refsState);
 
 const repoState = shallowRef<RepoState | undefined>(undefined);
 const settingsState = shallowRef<SettingsState | undefined>(undefined);
@@ -151,7 +159,11 @@ watch(
 
 watch(
   () => repoState.value?.activeRepo.value?.repoId,
-  (repoId) => detailState.setRepoId(repoId),
+  (repoId) => {
+    detailState.setRepoId(repoId);
+    refsState.setRepoId(repoId);
+    opsState.setRepoId(repoId);
+  },
   { immediate: true },
 );
 
@@ -481,6 +493,8 @@ onBeforeUnmount(() => {
   breakpointObserver?.disconnect();
   if (breakpointRaf !== 0) cancelAnimationFrame(breakpointRaf);
   graphView.dispose();
+  refsState.dispose();
+  opsState.dispose();
   repoState.value?.dispose();
   settingsState.value?.dispose();
   bridge.dispose();
@@ -520,6 +534,9 @@ onBeforeUnmount(() => {
           ref="toolbarRef"
           :graph-view="graphView"
           :repo-state="repoState"
+          :refs-state="refsState"
+          :ops-state="opsState"
+          :actions="actions"
           @repo-opened="handleRepoOpened"
         />
         <EmptyRepositoryPanel :branch-name="repoState.activeRepo.value.head.name" />
@@ -530,6 +547,9 @@ onBeforeUnmount(() => {
           ref="toolbarRef"
           :graph-view="graphView"
           :repo-state="repoState"
+          :refs-state="refsState"
+          :ops-state="opsState"
+          :actions="actions"
           @repo-opened="handleRepoOpened"
         />
         <main class="kv-body">
