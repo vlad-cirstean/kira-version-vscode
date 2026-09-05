@@ -11,6 +11,7 @@
 import type {
   CommitDetail,
   CommitRecord,
+  CommitTrailer,
   FileChange,
   MergePrediction,
   RefRecord,
@@ -18,7 +19,7 @@ import type {
   StashEntry,
   StatusResult,
 } from "@kira-version/core";
-import { splitLimitedFields } from "@kira-version/core";
+import { splitLimitedFields, splitTrailerBlock } from "@kira-version/core";
 import type { GitDriver, GitRead } from "./driver.ts";
 import { GitError } from "./errors.ts";
 import type { NameStatusEntry, NumstatEntry } from "./parse/diffTree.ts";
@@ -165,55 +166,71 @@ export async function predictMerge(
 // two diff-tree runs merged into one per-file change list.
 // ---------------------------------------------------------------------------------------
 
-const BODY_AND_SIGNATURE_FORMAT = "%G?%x1f%b";
+// `%GS` (signer) and `%(trailers:only=true,unfold=true)` (structured trailers — git's own
+// trailer-detection rules, not worth reimplementing, per probe P5) are inserted ahead of `%b`,
+// which stays the *last* field: a stray 0x1f inside a commit message can then only ever corrupt
+// the body, never a field parsed before it.
+const BODY_AND_SIGNATURE_FORMAT = "%G?%x1f%GS%x1f%(trailers:only=true,unfold=true)%x1f%b";
 
 function showBodyAndSignatureArgs(sha: string): string[] {
   return ["show", "-s", "-z", `--format=${BODY_AND_SIGNATURE_FORMAT}`, sha];
 }
 
+/** `%(trailers:...)`'s own text, one already-unfolded trailer per line, `Token: Value` — a
+ *  trailing blank line only appears when this placeholder is the last thing `--format` prints,
+ *  which it never is here, so no trailing-blank-line handling is needed. */
+function parseTrailerBlock(raw: string): CommitTrailer[] {
+  return raw
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const sep = line.indexOf(": ");
+      return sep === -1
+        ? { token: line, value: "" }
+        : { token: line.slice(0, sep), value: line.slice(sep + 2) };
+    });
+}
+
 async function fetchBodyAndSignature(
   driver: GitDriver,
   sha: string,
-): Promise<{ signatureStatus: SignatureStatus; body: string }> {
+): Promise<{
+  signature: { status: SignatureStatus; signer: string };
+  trailers: CommitTrailer[];
+  body: string;
+}> {
   const bytes = await collectOneShot(driver.read(showBodyAndSignatureArgs(sha)));
-  const [signatureRaw, bodyRaw] = splitLimitedFields(bytes, 0x1f, 2).map((field) =>
-    decoder.decode(field),
+  const [statusRaw, signerRaw, trailersRaw, bodyRaw] = splitLimitedFields(bytes, 0x1f, 4).map(
+    (field) => decoder.decode(field),
   );
+  const trailers = parseTrailerBlock(trailersRaw ?? "");
+  const body = splitTrailerBlock(bodyRaw ?? "", trailers);
   return {
-    signatureStatus: (signatureRaw as SignatureStatus | undefined) ?? "N",
-    body: bodyRaw ?? "",
+    signature: { status: (statusRaw as SignatureStatus | undefined) ?? "N", signer: signerRaw ?? "" },
+    trailers,
+    body,
   };
 }
 
+/**
+ * Joins the two `diff-tree` invocations' records on `path` alone — both now run with `-M -C`
+ * (P5 fixed a P1 bug: numstat used to run without them, so a rename's true line delta had to be
+ * approximated from two unrelated full delete/add records). With both invocations agreeing on
+ * `-M -C`, a rename's `path` is the same join key in each, and its numstat record already
+ * carries the correct post-rename delta — no rename-specific branch is needed here.
+ */
 export function combineFileChanges(
   numstat: readonly NumstatEntry[],
   nameStatus: readonly NameStatusEntry[],
 ): FileChange[] {
   const byPath = new Map(numstat.map((entry) => [entry.path, entry]));
   return nameStatus.map((entry) => {
-    if (entry.kind === "renamed" || entry.kind === "copied") {
-      // numstat ran without -M/-C (parse/diffTree.ts), so a rename appears there as an
-      // independent full delete of the old path and a full add of the new one — this is the
-      // best available approximation of "lines changed", not a true diff between the two.
-      const newSide = byPath.get(entry.path);
-      const oldSide = entry.originalPath ? byPath.get(entry.originalPath) : undefined;
-      const isBinary = newSide?.isBinary ?? oldSide?.isBinary ?? false;
-      return {
-        kind: entry.kind,
-        path: entry.path,
-        originalPath: entry.originalPath,
-        similarity: entry.similarity,
-        additions: isBinary ? undefined : (newSide?.additions ?? 0),
-        deletions: isBinary ? undefined : (oldSide?.deletions ?? 0),
-        isBinary,
-      };
-    }
     const stat = byPath.get(entry.path);
     return {
       kind: entry.kind,
       path: entry.path,
-      originalPath: undefined,
-      similarity: undefined,
+      originalPath: entry.originalPath,
+      similarity: entry.similarity,
       additions: stat?.additions,
       deletions: stat?.deletions,
       isBinary: stat?.isBinary ?? false,
@@ -231,13 +248,14 @@ export async function commitDetail(
   sha: string,
   opts: CommitDetailOptions = {},
 ): Promise<CommitDetail> {
+  const parentIndex = opts.parentIndex ?? 0;
   const metadataBytes = await collectOneShot(driver.read(showMetadataArgs(sha)));
   const metadata = parseLogRecord(metadataBytes);
 
-  const parentSha = metadata.parents[opts.parentIndex ?? 0];
+  const parentSha = metadata.parents[parentIndex];
   const from = parentSha; // undefined for a root commit — triggers --root below
 
-  const [numstatBytes, nameStatusBytes, { signatureStatus, body }] = await Promise.all([
+  const [numstatBytes, nameStatusBytes, { signature, trailers, body }] = await Promise.all([
     collectOneShot(driver.read(numstatArgs(from, sha))),
     collectOneShot(driver.read(nameStatusArgs(from, sha))),
     fetchBodyAndSignature(driver, sha),
@@ -250,7 +268,7 @@ export async function commitDetail(
     parseNameStatusRecords(nameStatusRecords),
   );
 
-  return { ...metadata, body, signatureStatus, files };
+  return { ...metadata, body, trailers, signature, parentIndex, files };
 }
 
 /** Splits a fully-collected `-z` invocation's output into its NUL-delimited records — used

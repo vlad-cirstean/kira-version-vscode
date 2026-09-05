@@ -165,10 +165,18 @@ class BatchStreamReader {
     if (lfIndex === -1) return undefined;
     const line = decoder.decode(this.#buffer.take(lfIndex));
     this.#buffer.take(1); // the header's own terminating LF
-    const parts = line.split(" ");
-    if (parts.length === 2 && parts[1] === "missing" && parts[0]) {
-      return { kind: "missing", oid: parts[0] };
+    // The `missing` reply echoes the *input string* verbatim, which for P5's `<rev>:<path>`
+    // requests can itself contain spaces (`HEAD:my file.txt missing`) — splitting on space and
+    // counting fields breaks on exactly that input. Recognise the reply by its fixed suffix
+    // instead, and treat everything before it as the echoed request, however many spaces it has.
+    const MISSING_SUFFIX = " missing";
+    if (line.endsWith(MISSING_SUFFIX)) {
+      const oid = line.slice(0, -MISSING_SUFFIX.length);
+      if (oid) return { kind: "missing", oid };
     }
+    // The found reply's first field is always a clean, resolved 40-hex oid — never the raw
+    // request string — so splitting on space is safe here regardless of what `path` contained.
+    const parts = line.split(" ");
     if (parts.length === 3 && parts[0] && parts[1]) {
       const size = Number(parts[2]);
       if (Number.isFinite(size)) return { kind: "found", oid: parts[0], type: parts[1], size };

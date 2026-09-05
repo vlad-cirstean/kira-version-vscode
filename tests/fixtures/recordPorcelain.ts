@@ -218,6 +218,22 @@ function recordDiffTree(): void {
     git(dir, ["commit", "--quiet", "--no-gpg-sign", "-m", "c2 pure rename"]);
     const c2 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
     save("diffTree/nameStatus-rename.bin", git(dir, nameStatusArgs(c1, c2)));
+    save("diffTree/numstat-rename.bin", git(dir, numstatArgs(c1, c2)));
+  }
+  {
+    // A rename with an edit in the same commit (P1 fix's whole point): numstat with -M -C must
+    // report the true post-rename delta (+1/-1), not an independent full delete + full add.
+    const dir = tempRepo("rename-with-edit");
+    writeFileSync(join(dir, "old.txt"), "line1\nline2\nline3\nline4\nline5\n");
+    git(dir, ["add", "old.txt"]);
+    git(dir, ["commit", "--quiet", "--no-gpg-sign", "-m", "c1"]);
+    const c1 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
+    git(dir, ["mv", "old.txt", "new.txt"]);
+    writeFileSync(join(dir, "new.txt"), "line1\nline2\nline3\nline4\nline5\nline6\n");
+    git(dir, ["commit", "--quiet", "--no-gpg-sign", "-am", "c2 rename with edit"]);
+    const c2 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
+    save("diffTree/nameStatus-renameWithEdit.bin", git(dir, nameStatusArgs(c1, c2)));
+    save("diffTree/numstat-renameWithEdit.bin", git(dir, numstatArgs(c1, c2)));
   }
   {
     const dir = tempRepo("copy");

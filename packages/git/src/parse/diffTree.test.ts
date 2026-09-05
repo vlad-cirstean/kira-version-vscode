@@ -16,18 +16,31 @@ function loadRecords(dir: string, name: string): Uint8Array[] {
 }
 
 describe("parseNumstatRecords", () => {
-  test("plain additions/deletions, no rename linkage (numstat runs without -M)", () => {
+  test("plain additions/deletions, no rename involved", () => {
     const entries = parseNumstatRecords(loadRecords(FIXTURES, "numstat-simple"));
     const a = entries.find((e) => e.path === "a.txt");
     const b = entries.find((e) => e.path === "b.txt");
-    expect(a).toEqual({ path: "a.txt", additions: 1, deletions: 0, isBinary: false });
-    expect(b).toEqual({ path: "b.txt", additions: 1, deletions: 0, isBinary: false });
+    expect(a).toEqual({
+      path: "a.txt",
+      originalPath: undefined,
+      additions: 1,
+      deletions: 0,
+      isBinary: false,
+    });
+    expect(b).toEqual({
+      path: "b.txt",
+      originalPath: undefined,
+      additions: 1,
+      deletions: 0,
+      isBinary: false,
+    });
   });
 
   test("a binary file reports '-'/'-' as undefined additions/deletions", () => {
     const [entry] = parseNumstatRecords(loadRecords(FIXTURES, "numstat-binary"));
     expect(entry).toEqual({
       path: "blob.bin",
+      originalPath: undefined,
       additions: undefined,
       deletions: undefined,
       isBinary: true,
@@ -36,7 +49,35 @@ describe("parseNumstatRecords", () => {
 
   test("a root commit diffs against the empty tree", () => {
     const [entry] = parseNumstatRecords(loadRecords(FIXTURES, "root-numstat"));
-    expect(entry).toEqual({ path: "file.txt", additions: 1, deletions: 0, isBinary: false });
+    expect(entry).toEqual({
+      path: "file.txt",
+      originalPath: undefined,
+      additions: 1,
+      deletions: 0,
+      isBinary: false,
+    });
+  });
+
+  test("a pure rename (-M -C) consumes two path chunks and reports the true 0/0 delta", () => {
+    const [entry] = parseNumstatRecords(loadRecords(FIXTURES, "numstat-rename"));
+    expect(entry).toEqual({
+      path: "new.txt",
+      originalPath: "old.txt",
+      additions: 0,
+      deletions: 0,
+      isBinary: false,
+    });
+  });
+
+  test("a rename with an edit (P1 fix): true +1/-0 delta, not an independent delete+add", () => {
+    const [entry] = parseNumstatRecords(loadRecords(FIXTURES, "numstat-renameWithEdit"));
+    expect(entry).toEqual({
+      path: "new.txt",
+      originalPath: "old.txt",
+      additions: 1,
+      deletions: 0,
+      isBinary: false,
+    });
   });
 });
 
@@ -53,6 +94,13 @@ describe("parseNameStatusRecords", () => {
     const entries = parseNameStatusRecords(loadRecords(FIXTURES, "nameStatus-rename"));
     expect(entries).toEqual([
       { kind: "renamed", path: "new.txt", originalPath: "old.txt", similarity: 100 },
+    ]);
+  });
+
+  test("a rename with an edit in the same commit still reports rename linkage", () => {
+    const entries = parseNameStatusRecords(loadRecords(FIXTURES, "nameStatus-renameWithEdit"));
+    expect(entries).toEqual([
+      { kind: "renamed", path: "new.txt", originalPath: "old.txt", similarity: 83 },
     ]);
   });
 

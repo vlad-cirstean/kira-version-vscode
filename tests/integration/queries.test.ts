@@ -268,7 +268,7 @@ describe("commitDetail", () => {
     if (sha === undefined) throw new Error("expected a second commit");
     const detail = await commitDetail(driver, sha);
     expect(detail.sha).toBe(sha);
-    expect(detail.signatureStatus).toBe("N");
+    expect(detail.signature.status).toBe("N");
     expect(detail.files.map((f) => f.path)).toContain("file.txt");
   });
 
@@ -302,6 +302,50 @@ describe("commitDetail", () => {
     expect(renamed?.originalPath).toBe("file.txt");
     expect(renamed?.path).toBe("renamed.txt");
     expect(renamed?.similarity).toBeGreaterThan(0);
+    // P1 fix: a pure rename with no content edit reports a true 0/0 delta, not an approximated
+    // full delete of the old path plus a full add of the new one.
+    expect(renamed?.additions).toBe(0);
+    expect(renamed?.deletions).toBe(0);
+  });
+
+  test("a rename with an edit reports the true post-rename delta, not delete+add (P1 fix)", async () => {
+    const { dir } = linear(1);
+    // Enough shared content that git's default 50% rename-similarity threshold still classifies
+    // this as a rename once one more line is appended, not an unrelated delete + add.
+    writeFileSync(join(dir, "old.txt"), "line1\nline2\nline3\nline4\nline5\n");
+    execFileSync("git", ["add", "old.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "--quiet", "--no-gpg-sign", "-m", "seed old.txt"], {
+      cwd: dir,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "T",
+        GIT_AUTHOR_EMAIL: "t@t.com",
+        GIT_COMMITTER_NAME: "T",
+        GIT_COMMITTER_EMAIL: "t@t.com",
+      },
+    });
+    execFileSync("git", ["mv", "old.txt", "new.txt"], { cwd: dir });
+    writeFileSync(join(dir, "new.txt"), "line1\nline2\nline3\nline4\nline5\nline6\n");
+    execFileSync("git", ["commit", "--quiet", "--no-gpg-sign", "-am", "rename with edit"], {
+      cwd: dir,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "T",
+        GIT_AUTHOR_EMAIL: "t@t.com",
+        GIT_COMMITTER_NAME: "T",
+        GIT_COMMITTER_EMAIL: "t@t.com",
+      },
+    });
+    const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir }).toString("utf8").trim();
+    const driver = await driverFor(dir);
+    const detail = await commitDetail(driver, sha);
+    const renamed = detail.files.find((f) => f.kind === "renamed");
+    expect(renamed?.originalPath).toBe("old.txt");
+    expect(renamed?.path).toBe("new.txt");
+    // The rename carried its 5 original lines across untouched and added one more — the true
+    // delta is +1/-0, never the old +6/-5 a delete+add reconstruction would have reported.
+    expect(renamed?.additions).toBe(1);
+    expect(renamed?.deletions).toBe(0);
   });
 
   const testIdentityEnv = {
