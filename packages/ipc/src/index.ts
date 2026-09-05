@@ -1,11 +1,20 @@
 export type { EncodedMessage } from "./codec.ts";
 export { decode, dedupeTransferList, encode } from "./codec.ts";
 export type {
+  CommitIdentity,
+  CommitTrailer,
   Contract,
   DecorationRef,
+  DiffHunk,
+  DiffLine,
+  DiffLineKind,
   EventKey,
   EventPayload,
+  FileChange,
+  FileChangeKind,
+  FileDiffBody,
   GitStatus,
+  GoToFileOutcome,
   HeadState,
   HostKind,
   PackedCommitChunk,
@@ -16,6 +25,7 @@ export type {
   RequestKey,
   ResultOf,
   SettingsSnapshot,
+  SignatureStatus,
   StreamChunkOf,
   StreamKey,
   StreamParamsOf,

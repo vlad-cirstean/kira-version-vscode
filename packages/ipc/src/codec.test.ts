@@ -64,6 +64,7 @@ describe("ipc codec", () => {
         "kiraVersion.log.level": "info",
       },
       git: { kind: "ok", path: "/usr/bin/git", version: "2.43.0" },
+      capabilities: { openInEditor: true, goToFile: true, clipboard: true },
     };
     const encodedParams = encode(params);
     const encodedResult = encode(result);
