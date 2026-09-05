@@ -60,6 +60,25 @@ export {
 } from "./parse/log.ts";
 export { mergeTreeArgs, parseMergeTreeOutput } from "./parse/mergeTree.ts";
 export {
+  branchConfigRegexpArgs,
+  branchCreateAndSwitchArgs,
+  branchCreateArgs,
+  branchDeleteArgs,
+  branchRenameArgs,
+  branchRevParseArgs,
+} from "./ops/branch.ts";
+export { rewrittenPathsArgs, switchArgs, switchDetachArgs } from "./ops/checkout.ts";
+export { abortArgs, continueArgs, readInProgressStateFiles } from "./ops/conflict.ts";
+export { revertArgs } from "./ops/revert.ts";
+export {
+  tagCreateArgs,
+  tagDeleteArgs,
+  tagDeleteRemoteArgs,
+  tagPushArgs,
+  undoAnnotatedTagArgs,
+  undoLightweightTagArgs,
+} from "./ops/tag.ts";
+export {
   parseRefRecord,
   REFS_FORMAT,
   REFS_RECORD_DELIMITER,
