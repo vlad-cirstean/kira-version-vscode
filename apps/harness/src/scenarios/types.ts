@@ -6,7 +6,16 @@ import type {
   FileChange,
   FileDiffBody,
 } from "@kira-version/core";
-import type { GitStatus, RepoCandidate, RepoOpenResult } from "@kira-version/ipc";
+import type {
+  CheckoutPreflight,
+  GitStatus,
+  InProgressOperation,
+  RefRow,
+  RepoCandidate,
+  RepoOpenResult,
+  RevertPreflight,
+  StatusSummary,
+} from "@kira-version/ipc";
 
 /**
  * A named, deep-linkable state the harness can render (`?scenario=<name>`). P3 W14 grows this
@@ -75,5 +84,43 @@ export interface Scenario {
     readonly openInEditor: boolean;
     readonly goToFile: boolean;
     readonly clipboard: boolean;
+    readonly resolveConflict: boolean;
+  };
+  /** P6 W18: the initial ref list `refs.list` serves and `op.run` mutates in place. `undefined`
+   *  means no refs at all (empty of all three sections) — a scenario that predates P6 and never
+   *  opens the branch picker. */
+  readonly refs?: {
+    readonly branches: readonly RefRow[];
+    readonly remoteBranches: readonly RefRow[];
+    readonly tags: readonly RefRow[];
+  };
+  /** P6 W18: the initial working-tree/in-progress state `status.get` serves — `head` and
+   *  `inProgress` are tracked on the session instead (mutated by `op.run`), so this covers only
+   *  the parts a fixture states once and `op.run` does not model changing:
+   *  upstream/counts/dirtyPaths. `undefined` means a clean tree with no upstream. */
+  readonly status?: {
+    readonly upstream: StatusSummary["upstream"];
+    readonly counts: StatusSummary["counts"];
+    readonly isClean: boolean;
+    readonly dirtyPaths: readonly string[];
+    readonly dirtyTruncated: boolean;
+    /** The session's *initial* `inProgress` — a mid-revert or mid-rebase scenario states it
+     *  here; `op.run`'s `opContinue`/`opAbort` clear it, matching a real session's own session-
+     *  scoped in-progress state read back off disk. */
+    readonly inProgress: InProgressOperation | null;
+  };
+  /**
+   * P6 W18: canned `preflight.checkout`/`preflight.revert` answers, keyed by `target` (checkout)
+   * or `shas.join(",")` (revert) — the hazard-shaped ones (`dirty`'s four §7.5 verdicts,
+   * `worktrees`'s fifth blocker, a merge commit's mainline picker) are exact fixtures precisely
+   * because they are what each scenario exists to demonstrate, matching `details`/`diffs`'s own
+   * convention of stating fixtures rather than deriving them. A target/shas combination missing
+   * here falls back to `mockBridge.ts`'s own small default classifier (a plain, unblocked
+   * checkout or revert), which is what lets every scenario that predates P6 still answer a
+   * generic click in the picker or the row menu without listing every ref by hand.
+   */
+  readonly preflight?: {
+    readonly checkout?: Readonly<Record<string, CheckoutPreflight>>;
+    readonly revert?: Readonly<Record<string, RevertPreflight>>;
   };
 }
