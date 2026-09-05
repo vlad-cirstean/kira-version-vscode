@@ -28,6 +28,7 @@ import { BridgeClient } from "../../bridge/client.ts";
 import { RefsState } from "../../state/refs.ts";
 import { ReviewSessionState, type ReviewTarget } from "../../state/review.ts";
 import type { ViewStateStore } from "../../state/viewState.ts";
+import { useModalFocus } from "../dialogs/modalFocus.ts";
 import DiffView from "../DiffView.vue";
 import { buildRefListSections } from "../refListModel.ts";
 import BaseSelector from "./BaseSelector.vue";
@@ -231,6 +232,16 @@ const activeDiffExpansion = computed(() => {
   const sha = activeDiffSha.value;
   return sha ? review.value?.expansionFor(sha) : undefined;
 });
+
+// W17: focus returns to the row's disclosure control when the diff overlay closes —
+// `modalFocus.ts`'s own invoker-capture composable, reused. Whatever had focus the instant the
+// overlay opened (in practice, the file the user clicked to get here, which is still the row's
+// own disclosure element for a keyboard user who reached it via Enter on the row itself) is what
+// gets it back, the same guarantee `RevertDialog.vue`/`CheckoutDialog.vue` already give a
+// dialog's own invoking control.
+const diffOverlayActive = computed(() => activeDiffSha.value !== undefined);
+const diffOverlayEl = ref<HTMLDivElement | null>(null);
+const { onKeydown: onDiffOverlayKeydown } = useModalFocus(diffOverlayActive, diffOverlayEl);
 
 function onDocumentKeydown(event: KeyboardEvent): void {
   if (event.key !== "Escape") return;
@@ -448,7 +459,12 @@ watch(
       </div>
     </template>
 
-    <div v-if="activeDiffExpansion" class="kv-review-diff-overlay">
+    <div
+      v-if="activeDiffExpansion"
+      ref="diffOverlayEl"
+      class="kv-review-diff-overlay"
+      @keydown="onDiffOverlayKeydown"
+    >
       <DiffView
         class="kv-review-diff-overlay-view"
         :diff="activeDiffExpansion.detail.diff.value"

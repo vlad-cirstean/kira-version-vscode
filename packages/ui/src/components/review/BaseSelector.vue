@@ -13,6 +13,7 @@ import type { BaseCandidate, BaseResolution, BaseResolutionReason } from "@kira-
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import type { RefsState } from "../../state/refs.ts";
 import { STATE_ICONS } from "../../icons/index.ts";
+import { useModalFocus } from "../dialogs/modalFocus.ts";
 import { buildRefListSections } from "../refListModel.ts";
 
 const props = defineProps<{
@@ -49,6 +50,13 @@ const rootEl = ref<HTMLElement | null>(null);
 const triggerEl = ref<HTMLButtonElement | null>(null);
 const filter = ref("");
 
+// W17: focus returns to the header trigger when the panel closes, whichever way it closed
+// (Escape, an outside click, or picking a row) — `modalFocus.ts`'s own invoker-capture
+// composable, reused rather than hand-rolled (the plan's own wording for this bullet).
+// `rootEl` wraps the trigger button itself, so the invoker `useModalFocus` captures the instant
+// `isOpen` flips true is always the trigger — exactly what should get focus back on close.
+const { onKeydown: onModalKeydown } = useModalFocus(isOpen, rootEl);
+
 function close(): void {
   isOpen.value = false;
   filter.value = "";
@@ -83,7 +91,6 @@ function candidateReason(candidate: BaseCandidate): string {
 
 function pick(ref: string): void {
   close();
-  triggerEl.value?.focus();
   emit("select-base", ref);
 }
 
@@ -104,7 +111,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="rootEl" class="kv-base-selector" @keydown.escape="close">
+  <div ref="rootEl" class="kv-base-selector" @keydown="onModalKeydown" @keydown.escape="close">
     <button
       ref="triggerEl"
       type="button"
