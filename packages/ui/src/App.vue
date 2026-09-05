@@ -21,6 +21,9 @@ import EmptyRepositoryPanel from "./components/EmptyRepositoryPanel.vue";
 import GitBlockedPanel from "./components/GitBlockedPanel.vue";
 import LoadMoreButton from "./components/LoadMoreButton.vue";
 import NoRepositoryPanel from "./components/NoRepositoryPanel.vue";
+import DetailPane from "./components/DetailPane.vue";
+import { DetailState } from "./state/detail.ts";
+import { type DetailActions, createDetailActions } from "./state/detailActions.ts";
 import { GraphViewState } from "./state/graphView.ts";
 import {
   composeLoadMoreAnnouncement,
@@ -51,6 +54,14 @@ const graphView = new GraphViewState(bridge);
 // it — a repo switch resets the same GraphViewState instance rather than replacing it, matching
 // CommitGrid.vue's own documented assumption), so this can be constructed once, directly.
 const selection = new SelectionState(graphView.store);
+// `docs/plans/P5.md` W7/W11: one `DetailState` for the life of this component, exactly like
+// `graphView`/`selection` above — a repo switch resets it (via `setRepoId` below) rather than
+// replacing the instance. `actions` starts `undefined` and is built once, in `bootstrap()`, the
+// moment `capabilities` comes back from `app.init` — every template site that reads it is inside
+// the same `v-if="repoState"`/`v-else` branches that only render once a repo has actually opened,
+// which cannot happen before that same `bootstrap()` call has already resolved `capabilities`.
+const detailState = new DetailState(bridge);
+const actions = shallowRef<DetailActions | undefined>(undefined);
 
 const repoState = shallowRef<RepoState | undefined>(undefined);
 const settingsState = shallowRef<SettingsState | undefined>(undefined);
@@ -122,6 +133,59 @@ watch(graphView.loadedRows, () => {
 });
 
 // ---------------------------------------------------------------------------------------
+// P5 W11's "selection wiring": `DetailState` does not watch `SelectionState` itself (it is kept
+// decoupled from it, matching `SelectionState`'s own doc comment on staying decoupled from
+// `GraphViewState` — a component wires the two together, per that comment's own precedent), so
+// this is that wiring. `selection.sha` only actually *changes* value (Vue's ref setter is a
+// no-op on an unchanged primitive) on a genuine selection change — including to `null` on a
+// clear — which is exactly `DetailState.select`'s own precondition ("callers only invoke it on
+// an actual change"). A refresh that re-resolves the *same* sha via `selectBySha` above therefore
+// never re-triggers this watch at all, which is how W11's "a refresh must not flicker the pane"
+// requirement is satisfied — there is no special-case caching to write, the cache is simply never
+// invalidated because nothing here re-requests when nothing has actually changed.
+// ---------------------------------------------------------------------------------------
+watch(
+  () => selection.sha.value,
+  (sha) => detailState.select(sha),
+);
+
+watch(
+  () => repoState.value?.activeRepo.value?.repoId,
+  (repoId) => detailState.setRepoId(repoId),
+  { immediate: true },
+);
+
+watch(detailState.announcement, (text) => {
+  liveAnnouncement.value = text;
+});
+
+/**
+ * `CommitMeta.vue`'s "select this parent commit" affordance, bubbled up through
+ * `DetailPane.vue`'s own `selectParentCommit` emit. Mirrors a normal row click when the parent's
+ * row is already loaded (updates `SelectionState` and scrolls the grid to it — the same two
+ * calls a real click makes, so the grid's own highlight and the pane agree); when it is not
+ * loaded (a parent outside the currently streamed window), there is no row to select or scroll
+ * to, so only `detailState.select` runs — the pane still follows the parent commit, `selection`
+ * is deliberately left as it was rather than cleared, since clearing it here would race this
+ * same call's own `detailState.select` against the `selection.sha` watch above (a clear fires
+ * that watch asynchronously, and its `null` would land *after* this function's own direct
+ * `select(sha)` call, wiping the very detail this action just asked to show).
+ */
+function selectCommitFromDetail(sha: string): void {
+  const row = graphView.store.rowOfSha(sha);
+  if (row !== -1) {
+    selection.select(row);
+    commitGridRef.value?.scrollToRow(row);
+    return;
+  }
+  detailState.select(sha);
+}
+
+function handleCopySha(fullSha: string): void {
+  actions.value?.copy(fullSha, "full SHA");
+}
+
+// ---------------------------------------------------------------------------------------
 // W14's own live region: "the Load-more result and Refresh completion are announced through one
 // polite live region" — deferred here from W9 (`LoadMoreButton.vue`'s own doc comment: "a second
 // region [t]here would fight it"), since both events are really about `GraphViewState.loading`
@@ -173,7 +237,7 @@ onMounted(() => {
 });
 
 let lastPersisted: PersistedViewState = {
-  version: 2,
+  version: 3,
   repoId: null,
   loadedRows: 0,
   detailOpen: true,
@@ -182,6 +246,7 @@ let lastPersisted: PersistedViewState = {
   columnWidths: DEFAULT_COLUMN_WIDTHS,
   dateFormat: "relative",
   detailWidth: DEFAULT_DETAIL_WIDTH,
+  fileListMode: "tree",
 };
 
 async function bootstrap(): Promise<void> {
@@ -189,6 +254,14 @@ async function bootstrap(): Promise<void> {
   settingsState.value = new SettingsState(bridge, init.settings);
   const repo = new RepoState(bridge, init.git);
   repoState.value = repo;
+  // W10/W11: `capabilities` never changes after `app.init` resolves (see `DetailActions`'s own
+  // doc comment), so `actions` is built exactly once, here, rather than reactively re-derived.
+  actions.value = createDetailActions(
+    bridge,
+    detailState,
+    init.capabilities,
+    () => repoState.value?.activeRepo.value?.repoId,
+  );
 
   const persisted = props.viewState.read();
   if (persisted) {
@@ -198,6 +271,7 @@ async function bootstrap(): Promise<void> {
     dateFormat.value = persisted.dateFormat;
     detailWidth.value = persisted.detailWidth;
     initialScrollRow.value = persisted.scrollRow;
+    detailState.setListMode(persisted.fileListMode);
 
     // §6.3's "collapsed by default" below `wide`: a persisted `detailOpen: true` from an earlier,
     // wider session must not reopen the pane/drawer over a mount that starts narrower — without
@@ -233,8 +307,9 @@ async function bootstrap(): Promise<void> {
       columnWidths,
       dateFormat,
       detailWidth,
+      detailState.listMode,
     ],
-    ([repoId, loadedRows, isDetailOpen, row, selectedSha, widths, format, dWidth]) => {
+    ([repoId, loadedRows, isDetailOpen, row, selectedSha, widths, format, dWidth, listMode]) => {
       lastPersisted = {
         ...lastPersisted,
         repoId,
@@ -245,6 +320,7 @@ async function bootstrap(): Promise<void> {
         columnWidths: widths,
         dateFormat: format,
         detailWidth: dWidth,
+        fileListMode: listMode,
       };
       props.viewState.write(lastPersisted);
     },
@@ -298,14 +374,17 @@ function toggleDetail(): void {
   detailOpen.value = !detailOpen.value;
 }
 
-/** §6.6's Esc ordering: the diff view (P5) first, then the detail pane/drawer. P4 has no diff
- *  view yet, so this is the whole chain today — a later phase inserts a step above this one
- *  rather than reimplementing the tail. Kept as the one handler both `CommitGrid.vue`'s own
- *  `closeDetail` emit (when the grid has focus) and this file's own document-level listener
- *  (when focus is inside the detail pane/drawer itself, which is outside the grid's host and so
- *  outside its own keydown listener's reach) call — "the ordering lives in one handler in
- *  App.vue" (§6.6's own words), not duplicated per input source. */
+/** §6.6's Esc ordering: the diff view (P5 W9) first, then the detail pane/drawer. Kept as the
+ *  one handler both `CommitGrid.vue`'s own `closeDetail` emit (when the grid has focus) and this
+ *  file's own document-level listener (when focus is inside the detail pane/drawer itself, which
+ *  is outside the grid's host and so outside its own keydown listener's reach) call — "the
+ *  ordering lives in one handler in App.vue" (§6.6's own words), not duplicated per input
+ *  source. */
 function closeDetail(): void {
+  if (detailState.mode.value === "diff") {
+    detailState.showTree();
+    return;
+  }
   detailOpen.value = false;
 }
 
@@ -385,12 +464,6 @@ const initialScrollRowProp = computed(() =>
 );
 
 const hasSelection = computed(() => selection.row.value >= 0);
-const selectedSubject = computed(() =>
-  hasSelection.value ? graphView.store.subjectAt(selection.row.value) : "",
-);
-const selectedShortSha = computed(() =>
-  hasSelection.value ? graphView.store.shortShaAt(selection.row.value) : "",
-);
 
 onMounted(() => {
   document.addEventListener("keydown", onDocumentKeydown);
@@ -467,6 +540,7 @@ onBeforeUnmount(() => {
               :selection="selection"
               :column-widths="columnWidths"
               :date-format="dateFormat"
+              :clipboard-enabled="actions?.capabilities.clipboard ?? false"
               v-bind="initialScrollRowProp"
               @update:column-widths="columnWidths = $event"
               @update:date-format="dateFormat = $event"
@@ -474,6 +548,7 @@ onBeforeUnmount(() => {
               @toggle-detail="toggleDetail"
               @close-detail="closeDetail"
               @refresh="triggerRefresh"
+              @copy-sha="handleCopySha"
             />
             <LoadMoreButton :graph-view="graphView" :page-size="pageSize" />
             <span class="kv-visually-hidden" data-testid="chunk-source">{{
@@ -501,27 +576,31 @@ onBeforeUnmount(() => {
               @mousedown="startDetailResize"
               @keydown="handleDetailHandleKeydown"
             ></div>
-            <div class="kv-detail-placeholder">
-              <template v-if="hasSelection">
-                <p class="kv-detail-subject">{{ selectedSubject }}</p>
-                <p class="kv-detail-sha">{{ selectedShortSha }}</p>
-              </template>
-              <p v-else class="kv-detail-empty">Select a commit to see its details.</p>
-              <p class="kv-detail-note">The detail view itself arrives in P5.</p>
-            </div>
+            <p v-if="!hasSelection" class="kv-detail-empty">Select a commit to see its details.</p>
+            <DetailPane
+              v-else-if="actions"
+              :detail-state="detailState"
+              :store="graphView.store"
+              :actions="actions"
+              @select-parent-commit="selectCommitFromDetail"
+            />
           </aside>
         </main>
 
-        <div v-if="detailOpen && breakpoint === 'overlay'" class="kv-detail-drawer">
+        <div
+          v-if="detailOpen && breakpoint === 'overlay'"
+          class="kv-detail-drawer"
+          :class="{ 'kv-detail-drawer--diff': detailState.mode.value === 'diff' }"
+        >
           <aside class="kv-detail-region" data-testid="detail-region" aria-label="Commit detail">
-            <div class="kv-detail-placeholder">
-              <template v-if="hasSelection">
-                <p class="kv-detail-subject">{{ selectedSubject }}</p>
-                <p class="kv-detail-sha">{{ selectedShortSha }}</p>
-              </template>
-              <p v-else class="kv-detail-empty">Select a commit to see its details.</p>
-              <p class="kv-detail-note">The detail view itself arrives in P5.</p>
-            </div>
+            <p v-if="!hasSelection" class="kv-detail-empty">Select a commit to see its details.</p>
+            <DetailPane
+              v-else-if="actions"
+              :detail-state="detailState"
+              :store="graphView.store"
+              :actions="actions"
+              @select-parent-commit="selectCommitFromDetail"
+            />
           </aside>
         </div>
       </template>
@@ -602,30 +681,9 @@ onBeforeUnmount(() => {
   outline: none;
 }
 
-.kv-detail-placeholder {
-  padding: var(--kv-space-4);
-}
-
-.kv-detail-subject {
-  margin: 0 0 var(--kv-space-2);
-  font-weight: 600;
-}
-
-.kv-detail-sha {
-  margin: 0 0 var(--kv-space-4);
-  font-family: var(--kv-mono-font-family);
-  font-size: var(--kv-mono-font-size);
-  color: var(--kv-description-fg);
-}
-
 .kv-detail-empty {
-  margin: 0 0 var(--kv-space-4);
-  color: var(--kv-description-fg);
-}
-
-.kv-detail-note {
   margin: 0;
-  font-style: italic;
+  padding: var(--kv-space-4);
   color: var(--kv-description-fg);
 }
 
@@ -642,5 +700,14 @@ onBeforeUnmount(() => {
 .kv-detail-drawer .kv-detail-region {
   width: min(320px, 90vw);
   box-shadow: -2px 0 8px var(--kv-widget-shadow);
+}
+
+/* W9's breakpoint table: at the overlay breakpoint the diff is a *full*-width overlay over the
+ * graph, wider than the tree/meta drawer beside it — the docked/overlay difference stays "a
+ * class on the wrapper, not a second copy of the subtree" (W11's own words) by widening this one
+ * rule rather than `DetailPane.vue` (or anything inside it) needing to know the breakpoint at
+ * all. */
+.kv-detail-drawer--diff .kv-detail-region {
+  width: 100vw;
 }
 </style>

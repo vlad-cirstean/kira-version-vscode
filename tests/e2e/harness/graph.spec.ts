@@ -22,6 +22,11 @@ import { expect, type Page, test } from "@playwright/test";
  *     re-render touched it), which a screenshot diff could not tell apart from a repaint.
  *  6. A lane's colour read off computed style — confirms the class→CSS-variable→rendered-colour
  *     pipeline actually resolves to the palette's own token value, not just "some colour".
+ *
+ * P5 W13 adds a seventh scenario, the commit-detail pane (`detail.ts`'s eight-file-kind `tip`
+ * commit): the populated pane and the open diff view in all four theme kinds, the overlay
+ * breakpoint's diff at one kind, and the binary/LFS rows (where a "labelled rather than rendered
+ * as garbage" regression would actually show) at one kind.
  */
 
 const THEME_KINDS = [
@@ -240,5 +245,65 @@ test.describe("lane colour resolves through the cascade", () => {
       getComputedStyle(document.body).getPropertyValue("--kv-graph-node-outline"),
     );
     expect(hcStroke).toBe(await resolveColor(page, hcOutlineToken));
+  });
+});
+
+test.describe("visual baseline: commit-detail pane across theme kinds", () => {
+  // `detail.ts`'s topology (P5 W12/W13): "tip" (row 1) is the eight-file-kind workhorse this
+  // whole scenario exists for — "manyFiles" (row 0) is the render-cap fixture, out of scope here.
+  for (const kind of THEME_KINDS) {
+    test(`detail pane: ${kind}`, async ({ page }) => {
+      await page.goto(`/?scenario=detail&theme=${kind}`);
+      await ready(page);
+      await page.locator('.slick-row[data-row="1"]').click();
+      await expect(page.getByTestId("detail-region")).toBeVisible();
+      await expect(page.getByTestId("file-tree")).toBeVisible();
+      await expect(page.getByTestId("detail-region")).toHaveScreenshot(`detail-pane-${kind}.png`);
+    });
+
+    test(`open diff view: ${kind}`, async ({ page }) => {
+      await page.goto(`/?scenario=detail&theme=${kind}`);
+      await ready(page);
+      await page.locator('.slick-row[data-row="1"]').click();
+      await page.locator(".kv-file-tree-row", { hasText: "modified.ts" }).click();
+      await expect(page.getByTestId("diff-view")).toBeVisible();
+      await expect(page.getByTestId("diff-view").locator(".kv-diff-body")).toBeVisible();
+      await expect(page.getByTestId("detail-region")).toHaveScreenshot(`detail-diff-${kind}.png`);
+    });
+  }
+});
+
+test.describe("visual baseline: commit-detail overlay breakpoint diff", () => {
+  test("the diff opens full-width at the overlay breakpoint", async ({ page }) => {
+    await page.setViewportSize({ width: 480, height: 600 });
+    await page.goto("/?scenario=detail&theme=vscode-dark");
+    await ready(page);
+    await page.locator('.slick-row[data-row="1"]').click();
+    await page.locator(".kv-file-tree-row", { hasText: "modified.ts" }).click();
+    await expect(page.getByTestId("diff-view")).toBeVisible();
+    await expect(page).toHaveScreenshot("detail-diff-overlay.png");
+  });
+});
+
+test.describe("visual baseline: binary and LFS diff rows", () => {
+  // §6.4/D14a: the risk this baseline exists to catch is a binary or LFS body rendering as raw
+  // (garbage) diff text instead of its own labelled message row — one kind is enough, matching
+  // the plan's own list for this scenario.
+  test("a binary file's diff shows its labelled message, not its bytes", async ({ page }) => {
+    await page.goto("/?scenario=detail&theme=vscode-dark");
+    await ready(page);
+    await page.locator('.slick-row[data-row="1"]').click();
+    await page.locator(".kv-file-tree-row", { hasText: "image.png" }).click();
+    await expect(page.getByTestId("diff-view").locator(".kv-diff-message")).toBeVisible();
+    await expect(page.getByTestId("diff-view")).toHaveScreenshot("detail-diff-binary.png");
+  });
+
+  test("an LFS pointer's diff shows its labelled message, not a pointer blob", async ({ page }) => {
+    await page.goto("/?scenario=detail&theme=vscode-dark");
+    await ready(page);
+    await page.locator('.slick-row[data-row="1"]').click();
+    await page.locator(".kv-file-tree-row", { hasText: "large-asset.bin" }).click();
+    await expect(page.getByTestId("diff-view").locator(".kv-diff-message")).toBeVisible();
+    await expect(page.getByTestId("diff-view")).toHaveScreenshot("detail-diff-lfs.png");
   });
 });

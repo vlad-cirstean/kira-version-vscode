@@ -224,7 +224,7 @@ kira-version-vscode/
 │   │   ├── tsconfig.json
 │   │   └── src/
 │   │       ├── index.ts
-│   │       ├── model/              commit.ts ref.ts tag.ts stash.ts status.ts repo.ts conflict.ts
+│   │       ├── model/              commit.ts diff.ts ref.ts tag.ts stash.ts status.ts repo.ts conflict.ts
 │   │       ├── store/              commitStore.ts   column-wise typed arrays (§5.5)
 │   │       │                       shaTable.ts      20-byte binary sha storage + hex formatting
 │   │       │                       intern.ts        string interning + concatenated subject buffer
@@ -256,7 +256,7 @@ kira-version-vscode/
 │   │       ├── rpcHandlers.ts      binds the ipc contract's keys to RepoService + W5's ports
 │   │       ├── errors.ts           exit code + stderr → typed error union
 │   │       ├── queries.ts          §4.4 read surface: argv + parser bound to typed queries
-│   │       ├── parse/              log.ts refs.ts status.ts diffTree.ts stash.ts mergeTree.ts
+│   │       ├── parse/              log.ts refs.ts status.ts diffTree.ts diff.ts stash.ts mergeTree.ts
 │   │       └── ops/                fetch.ts pull.ts push.ts stash.ts branch.ts tag.ts
 │   │                               checkout.ts reset.ts revert.ts cherryPick.ts conflict.ts
 │   │
@@ -276,6 +276,7 @@ kira-version-vscode/
 │   │       ├── App.vue
 │   │       ├── bridge/             client.ts   typed client over the ipc contract
 │   │       ├── state/              repo.ts graphView.ts selection.ts search.ts settings.ts
+│   │       │                       detail.ts       P5's commit-detail pane state machine (§6.4)
 │   │       │                       viewState.ts    persisted view state (§2.1, §5.4)
 │   │       │                       review.ts       branch-review session state (§6.8)
 │   │       │                       pullRequests.ts branch → PR records for the session (§6.7)
@@ -293,6 +294,7 @@ kira-version-vscode/
 │   │       │   ├── refBadges.ts    badge element builder used by the message formatter
 │   │       │   ├── LoadMoreButton.vue
 │   │       │   ├── DetailPane.vue CommitMeta.vue FileTree.vue DiffView.vue
+│   │       │   ├── fileTreeModel.ts P5's pure fold of FileChange[] into a directory tree (§6.4)
 │   │       │   ├── SearchBox.vue SearchResults.vue ConflictBanner.vue
 │   │       │   ├── StashList.vue TagList.vue
 │   │       │   ├── review/         ReviewView.vue       the sidebar view's root (§6.8)

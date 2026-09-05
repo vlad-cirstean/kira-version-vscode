@@ -86,13 +86,14 @@ describe("largeBranchy()", () => {
     const { openGitDriver } = await import("../../packages/git/src/driver.ts");
     const { NodeProcessRunner } = await import("../../packages/git/src/nodeProcessRunner.ts");
     const { log } = await import("../../packages/git/src/queries.ts");
+    const { noopCatFileSession } = await import("../../packages/git/src/testFakes.ts");
     const { CommitStore } = await import("../../packages/core/src/store/commitStore.ts");
     const { layoutAppend } = await import("../../packages/core/src/graph/layout.ts");
 
     const runner = new NodeProcessRunner();
     const resolution = await locateGit({ runner });
     if (resolution.kind !== "ok") throw new Error("no usable system git");
-    const driver = openGitDriver(resolution.git, runner, dir, { dispose: () => {} });
+    const driver = openGitDriver(resolution.git, runner, dir, noopCatFileSession());
     const store = new CommitStore();
     for await (const record of log(driver, { scope: "all", pageSize: 1000 })) {
       store.append(record);

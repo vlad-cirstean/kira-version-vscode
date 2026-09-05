@@ -19,8 +19,8 @@ import type { CommitRecord } from "@kira-version/core";
 import type { Column, OnRenderedEventArgs } from "slickgrid";
 import { SlickGrid } from "slickgrid";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { createGraphFormatter } from "../graph/graphColumn.ts";
 import { graphColumnWidth } from "../graph/geometry.ts";
+import { createGraphFormatter } from "../graph/graphColumn.ts";
 import type { GraphViewState, LayoutRange } from "../state/graphView.ts";
 import type { SelectionState } from "../state/selection.ts";
 import type { ColumnWidths, DateFormat } from "../state/viewState.ts";
@@ -37,6 +37,11 @@ const props = defineProps<{
   /** A previously persisted scroll target (`viewState.scrollRow`) — applied once, right after
    *  the first paint. Absent on a first-ever mount, where there is nothing to restore. */
   initialScrollRow?: number;
+  /** §3.3's feature detection for the sha column's copy button (P5 W10) — `app.init`'s
+   *  `capabilities.clipboard`, re-read on every render pass rather than captured once, since it
+   *  is not yet known at this component's own first paint (`bootstrap()`'s `await` resolves
+   *  after). */
+  clipboardEnabled: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -52,6 +57,10 @@ const emit = defineEmits<{
   (e: "closeDetail"): void;
   /** `F5` or `Ctrl/Cmd+R` while this grid has focus. W10 owns the Refresh action itself. */
   (e: "refresh"): void;
+  /** The sha column's copy button was clicked (P5 W10) — `App.vue` owns the actual
+   *  `clipboard.write` call and the shared live-region announcement; this component only ever
+   *  reports which sha, exactly as it reports scroll/toggle/close rather than acting on them. */
+  (e: "copySha", fullSha: string): void;
 }>();
 
 const MIN_COLUMN_WIDTH = 40;
@@ -113,13 +122,25 @@ let pendingFocusRow: number | null = null;
 // `focusin` at all. `applyAccessibility` re-focuses this row on *every* render that recreates it,
 // for as long as it remains the one the user is on, closing the race `pendingFocusRow` alone
 // leaves open.
+//
+// P5 W10 adds a second real tab stop inside the row's own subtree, its `kv-cell-sha` button, and
+// `focusedShaButton` remembers which of the row's two focusable elements the user was actually
+// on. Restoring unconditionally to the row div (as this used to) fought the user the moment they
+// tabbed onto that button on a `hugeRepo`-sized scenario: the layout worker's still-arriving
+// chunks recreate row DOM nodes well after the initial mount regardless of what currently holds
+// focus, and always recovering to the row rather than the button they had actually reached
+// turned every such background render into an involuntary step backwards — directly observed as
+// `Tab` from the button never making forward progress, since the very next render bounced focus
+// back to the row before the browser had advanced it anywhere.
 let focusedRowIndex: number | null = null;
+let focusedShaButton = false;
 
 function handleFocusIn(event: FocusEvent): void {
   const target = event.target;
   if (!(target instanceof HTMLElement)) return;
   const rowAttr = target.closest(".slick-row")?.getAttribute("data-row");
   focusedRowIndex = rowAttr != null ? Number(rowAttr) : null;
+  focusedShaButton = target.classList.contains("kv-cell-sha");
 }
 
 function computeMessageWidth(hostWidth: number, laneCount: number): number {
@@ -135,6 +156,7 @@ function currentColumns(): Column<CommitRecord>[] {
     { ...widths.value, laneCount, messageWidth: computeMessageWidth(hostWidth, laneCount) },
     { dateFormat: () => dateFormatRef.value, now: () => Date.now() },
     graphFormatter,
+    { enabled: () => props.clipboardEnabled, onCopy: (fullSha) => emit("copySha", fullSha) },
   );
 }
 
@@ -372,6 +394,18 @@ function applyAccessibility(range: { startRow: number; endRow: number }): void {
     const isSelected = row === selectedRow;
     rowNode.setAttribute("aria-selected", isSelected ? "true" : "false");
     rowNode.tabIndex = row === tabbableRow ? 0 : -1;
+    // P5 W10's sha column button is a real, natively-focusable `<button>` (enabling it is the
+    // whole point — a `disabled` one, per its own doc comment, is never a tab stop at all). Left
+    // alone, that turns virtualized `Tab` navigation into a keyboard trap no bound on `Tab`
+    // presses escapes: reaching an off-screen button scrolls it into view, which SlickGrid
+    // answers by virtualizing in yet more rows below, so a scenario with thousands of loaded
+    // commits never runs out of *new* buttons to reach before the grid's own last DOM sibling.
+    // The fix mirrors the row's own roving tabindex directly above: only the one row that is
+    // itself tabbable ever exposes its sha button to `Tab`; every other row's copy button is
+    // still there, still clickable by mouse, just not a stop `Tab` alone will find — reaching it
+    // needs arrow-key selection first, exactly as reaching that row's own detail does.
+    const shaButton = rowNode.querySelector<HTMLButtonElement>(".kv-cell-sha");
+    if (shaButton) shaButton.tabIndex = row === tabbableRow ? 0 : -1;
 
     const commit = props.graphView.store.commitAt(row);
     const dateText =
@@ -388,10 +422,13 @@ function applyAccessibility(range: { startRow: number; endRow: number }): void {
     // colour is decorative, and HEAD/stash/branch-vs-tag are all named in the label already.
     rowNode.querySelector(".kv-cell-graph")?.setAttribute("aria-hidden", "true");
 
-    // Either this row was just explicitly selected (`pendingFocusRow`) or it is the row the user
+    // Either this row was just explicitly selected (`pendingFocusRow` — always the row div itself,
+    // matching "selection scrolls it into view first, focuses second") or it is the row the user
     // was already on (`focusedRowIndex`) and this render just recreated its DOM node out from
-    // under it — both cases need the *new* node focused; `focusedRowIndex`'s own doc comment
-    // above explains why a one-shot `pendingFocusRow` check alone is not enough.
+    // under it — both cases need a *new* node focused; `focusedRowIndex`'s own doc comment above
+    // explains why a one-shot `pendingFocusRow` check alone is not enough, and why the recovery
+    // case restores the sha button specifically when that, not the row div, is what the user was
+    // last known to be on.
     //
     // `{ preventScroll: true }` is load-bearing, not a micro-optimisation: a freshly re-appended
     // row is added at the *end* of its DOM sibling list (its own doc comment on `handleClick`'s
@@ -410,7 +447,12 @@ function applyAccessibility(range: { startRow: number; endRow: number }): void {
     // the browser's own heuristic has nothing left to usefully do here, only harm to avoid.
     const wasPendingFocus = pendingFocusRow === row;
     if (wasPendingFocus) pendingFocusRow = null;
-    if (wasPendingFocus || row === focusedRowIndex) rowNode.focus({ preventScroll: true });
+    if (wasPendingFocus) {
+      rowNode.focus({ preventScroll: true });
+    } else if (row === focusedRowIndex) {
+      const target = focusedShaButton ? (shaButton ?? rowNode) : rowNode;
+      target.focus({ preventScroll: true });
+    }
   }
 }
 
@@ -547,6 +589,20 @@ watch(
   () => {
     grid?.invalidateAllRows();
     grid?.updateRowCount();
+    grid?.render();
+  },
+);
+// Unlike `columnWidths`/`dateFormat` above (captured once — this component is the only writer
+// of either), `clipboardEnabled` genuinely changes *after* this component's own first paint:
+// `App.vue`'s `bootstrap()` only learns the real capability once `bridge.init()`'s `await`
+// resolves, well after this grid has already built its first set of columns with the button
+// disabled. Rebuilding on the flip is what turns that into a live enable rather than one stuck
+// showing "not available" for the rest of the session.
+watch(
+  () => props.clipboardEnabled,
+  () => {
+    rebuildColumns();
+    grid?.invalidateAllRows();
     grid?.render();
   },
 );
@@ -698,6 +754,34 @@ defineExpose({ scrollToRow });
 .kv-commit-grid .slick-row.kv-row-selected {
   background-color: var(--kv-row-selected-bg);
   color: var(--kv-row-selected-fg);
+}
+
+/* `.kv-cell-sha`'s own rule below sets an explicit `color`, which wins over the inherited one
+   above regardless of selection — without this override a selected row's sha button keeps its
+   normal, unselected text colour against the row's now-blue background, an axe-flagged contrast
+   failure in `vscode-light` (P5 W10; `a11y.spec.ts`'s own "known false positive" allowance a few
+   lines up covers the message/author cells this same selection recolour affects, but a real
+   contrast regression on a *third* cell is not that same false positive and must not be masked
+   the same way — fixing the colour is the right answer here, not widening that filter). */
+.kv-commit-grid .slick-row.kv-row-selected .kv-cell-sha {
+  color: var(--kv-row-selected-fg);
+}
+
+/* Same class of bug, a fourth cell: a border-only ref badge (tag/remote/stash/overflow — every
+   `refBadges.ts` kind except `.kv-badge-local`, which already fills its own background and so
+   never depends on the row's) carries its own decoration colour as both `color` and
+   `border-color`, tuned against the row's *un*selected background. A selected row with, say, a
+   green `v1.0.0` tag badge fails contrast for real (P5 W14's own axe scan on the commit-detail
+   pane's populated state, the first scan to select a row carrying this particular badge kind) —
+   caught the same way `.kv-cell-sha` above already was, fixed the same way: the row's own
+   selected-foreground, already verified high-contrast against `--kv-row-selected-bg`, for both
+   properties so the badge's outline stays visible too. */
+.kv-commit-grid .slick-row.kv-row-selected .kv-badge-remote,
+.kv-commit-grid .slick-row.kv-row-selected .kv-badge-tag,
+.kv-commit-grid .slick-row.kv-row-selected .kv-badge-stash,
+.kv-commit-grid .slick-row.kv-row-selected .kv-badge-overflow {
+  color: var(--kv-row-selected-fg);
+  border-color: var(--kv-row-selected-fg);
 }
 
 /* W14's roving tabindex focuses a real row node (not a hidden sink) — it needs a visible
@@ -865,6 +949,15 @@ defineExpose({ scrollToRow });
   color: var(--kv-row-fg);
   opacity: 0.75;
   cursor: not-allowed;
+}
+
+.kv-cell-sha:not(:disabled) {
+  cursor: pointer;
+  opacity: 1;
+}
+
+.kv-cell-sha:not(:disabled):hover {
+  text-decoration: underline;
 }
 
 /* §6.1's own resize handles (showColumnHeader: false costs SlickGrid's built-in header resize

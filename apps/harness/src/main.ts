@@ -1,16 +1,16 @@
 import { CommitStore, layoutAppend } from "@kira-version/core";
 import {
+  createLayoutClient,
   DEFAULT_COLUMN_WIDTHS,
   DEFAULT_DETAIL_WIDTH,
-  createLayoutClient,
   mount,
   type TokenMap,
   TokenReader,
 } from "@kira-version/ui";
-import { createMockBridge } from "./mockBridge.ts";
+import { createMockBridge, type HarnessEditorAction } from "./mockBridge.ts";
 import { loadScenario } from "./scenarios/index.ts";
-import { SessionStorageViewStateStore } from "./sessionViewStateStore.ts";
 import { EPOCH_SECONDS, STEP_SECONDS, topology } from "./scenarios/topology.ts";
+import { SessionStorageViewStateStore } from "./sessionViewStateStore.ts";
 import { applyThemeKind, isThemeKind, type ThemeKind } from "./themeSwitcher.ts";
 
 declare global {
@@ -20,6 +20,10 @@ declare global {
       readTokens(): TokenMap;
       checkLayoutWorker(): Promise<boolean>;
       triggerRefsChanged(): void;
+      /** P5 W12/W13: the most recent `editor.openDiff`/`editor.goToFile` action the mock
+       *  bridge recorded — a plain property, not a method, so a Playwright spec reads it with a
+       *  bare `page.evaluate(() => window.__kiraHarness.lastEditorAction)`. */
+      readonly lastEditorAction: HarnessEditorAction | undefined;
     };
   }
 }
@@ -146,6 +150,9 @@ window.__kiraHarness = {
   triggerRefsChanged(): void {
     transport.triggerRefsChanged();
   },
+  get lastEditorAction(): HarnessEditorAction | undefined {
+    return transport.getLastEditorAction();
+  },
 };
 
 // `App.vue`'s own `bootstrap()` only opens a repo automatically when `viewState.read()` returns
@@ -169,7 +176,7 @@ if (viewState.read() === null) {
     // repo, rather than crash the page before the shell itself has a chance to render.
   }
   viewState.write({
-    version: 2,
+    version: 3,
     repoId,
     loadedRows: 0,
     detailOpen: true,
@@ -178,6 +185,7 @@ if (viewState.read() === null) {
     columnWidths: DEFAULT_COLUMN_WIDTHS,
     dateFormat: "relative",
     detailWidth: DEFAULT_DETAIL_WIDTH,
+    fileListMode: "tree",
   });
 }
 

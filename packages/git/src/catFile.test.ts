@@ -141,6 +141,50 @@ describe("openCatFileSession — missing and tooLarge", () => {
   });
 });
 
+describe("openCatFileSession — <rev>:<path> requests with spaces (P1 fix)", () => {
+  test("a missing <rev>:<path> whose path contains spaces is still recognised as missing", async () => {
+    // The missing reply echoes the raw request string verbatim — `#tryParseHeader` used to
+    // split on space and count fields, which broke as soon as the echoed request itself had
+    // more than one space in it (space in the ref, "HEAD:my file.txt" being just one example).
+    const runner = new FakeProcessRunner();
+    const git = await fakeResolvedGit();
+    const session = openCatFileSession(git, runner, "/repo");
+    const request = "HEAD:my file with several spaces.txt";
+
+    const resultPromise = session.read(request);
+    await flushUntil(() => runner.processes.length >= 1);
+    runner.processes[0]?.emitStdout(missingLine(request));
+
+    const result = await resultPromise;
+    expect(result).toEqual({ kind: "missing", oid: request });
+    expect(runner.processes).toHaveLength(1);
+  });
+
+  test("a found <rev>:<path> whose path contains spaces still resolves via the clean oid", async () => {
+    // The found reply's first field is always the resolved 40-hex oid, never the echoed
+    // request — so this direction was never actually broken, but it must stay that way.
+    const runner = new FakeProcessRunner();
+    const git = await fakeResolvedGit();
+    const session = openCatFileSession(git, runner, "/repo");
+    const request = "HEAD:my file with several spaces.txt";
+    const resolvedOid = "a".repeat(40);
+    const content = encoder.encode("hello\n");
+
+    const resultPromise = session.read(request);
+    await flushUntil(() => runner.processes.length >= 1);
+    runner.processes[0]?.emitStdout(checkHeader(resolvedOid, "blob", content.length));
+    await flushUntil(() => runner.processes.length >= 2);
+    runner.processes[1]?.emitStdout(headerAndContent(resolvedOid, "blob", content));
+
+    const result = await resultPromise;
+    expect(result.kind).toBe("found");
+    if (result.kind === "found") {
+      expect(result.type).toBe("blob");
+      expect(Buffer.from(result.content).equals(Buffer.from(content))).toBe(true);
+    }
+  });
+});
+
 describe("openCatFileSession — request serialization", () => {
   test("does not write the second oid until the first response has arrived", async () => {
     const runner = new FakeProcessRunner();

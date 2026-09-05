@@ -1,11 +1,14 @@
 {
-  "firstPageMs": 129.60602799999924,
-  "sessionMs": 125.04835000000003,
-  "layoutMs": 4.557677999999214,
-  "loadMoreMsWorst": 154.23143299999992,
-  "fullWalkMs": 2745.4276709999995,
+  "firstPageMs": 169.510177,
+  "sessionMs": 164.661741,
+  "layoutMs": 4.848435999999992,
+  "loadMoreMsWorst": 224.99725200000012,
+  "fullWalkMs": 3991.5089860000003,
   "storeBytes": 10485882,
   "layoutBytes": 3612452,
-  "heapUsedMB": 26.384828567504883,
-  "firstPageMsNoGraph": 514.7222069999989
+  "heapUsedMB": 27.871893882751465,
+  "firstPageMsNoGraph": 684.8131949999993,
+  "commitDetailMs": 8.660930000000008,
+  "commitDetailCachedMs": 0.013033000000177708,
+  "fileDiffMs": 3.1545649999998204
 }

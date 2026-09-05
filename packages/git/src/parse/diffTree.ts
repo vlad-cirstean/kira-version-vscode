@@ -1,14 +1,17 @@
 /**
- * `git diff-tree` (§4.4): two separate invocations, deliberately not merged into one, because
- * they need different flags. `numstat` runs *without* `-M`/`-C` — a rename shows up as an
- * independent full delete of the old path plus a full add of the new one — so its line counts
- * are always for a single path. `name-status` runs *with* `-M -C` and is the sole source of
- * rename/copy linkage; combining the two into a single per-file change list is queries.ts's
- * job (W10), once both results exist.
+ * `git diff-tree` (§4.4): two separate invocations, one for line counts (`--numstat`) and one
+ * for change kind + rename/copy linkage (`--name-status`) — numstat has no letter code and
+ * name-status has no counts, so both are needed and combining them is queries.ts's job
+ * (`combineFileChanges`). Both run with `-M -C` (P5 fixes a P1 bug: numstat used to run without
+ * them, so a rename showed up as an independent full delete of the old path plus a full add of
+ * the new one — e.g. +10/-10 for a one-line edit that also renamed the file — rather than the
+ * true, similarity-matched +1/-1 line delta git can actually compute once it knows the rename).
  *
- * A rename/copy `name-status` record carries two NUL-separated paths in one logical entry —
- * the same non-uniform-framing hazard as status.ts's `2` record, and for the same reason:
- * `-z` turns every field terminator into NUL, not just the record terminator.
+ * A rename/copy record — in *either* invocation now — carries two NUL-separated paths in one
+ * logical entry: the tab-delimited fields end with an empty path, and the real old/new paths
+ * follow as two more NUL-terminated records. Same non-uniform-framing hazard as status.ts's `2`
+ * record, and for the same reason: `-z` turns every field terminator into NUL, not just the
+ * record terminator.
  */
 import type { FileChangeKind } from "@kira-version/core";
 import { assert } from "@kira-version/core";
@@ -21,7 +24,7 @@ function diffTreeArgs(mode: string[], from: string | undefined, to: string): str
 }
 
 export function numstatArgs(from: string | undefined, to: string): string[] {
-  return diffTreeArgs(["--numstat"], from, to);
+  return diffTreeArgs(["--numstat", "-M", "-C"], from, to);
 }
 
 export function nameStatusArgs(from: string | undefined, to: string): string[] {
@@ -30,6 +33,9 @@ export function nameStatusArgs(from: string | undefined, to: string): string[] {
 
 export interface NumstatEntry {
   readonly path: string;
+  /** Set for a rename/copy only — mirrors `NameStatusEntry.originalPath`, and is what lets
+   *  `combineFileChanges` join the two invocations' records on `path` alone for every kind. */
+  readonly originalPath: string | undefined;
   readonly additions: number | undefined;
   readonly deletions: number | undefined;
   readonly isBinary: boolean;
@@ -59,16 +65,44 @@ function splitTabLimited(text: string, count: number): string[] {
 
 export function parseNumstatRecords(records: readonly Uint8Array[]): NumstatEntry[] {
   const entries: NumstatEntry[] = [];
-  for (const record of records) {
-    if (record.length === 0) continue;
+  let i = 0;
+  while (i < records.length) {
+    const record = records[i];
+    if (record === undefined || record.length === 0) {
+      i++;
+      continue;
+    }
     const [addRaw, delRaw, path] = splitTabLimited(decoder.decode(record), 3);
     const isBinary = addRaw === "-" || delRaw === "-";
-    entries.push({
-      path: path ?? "",
-      additions: isBinary ? undefined : Number(addRaw ?? 0),
-      deletions: isBinary ? undefined : Number(delRaw ?? 0),
-      isBinary,
-    });
+    const additions = isBinary ? undefined : Number(addRaw ?? 0);
+    const deletions = isBinary ? undefined : Number(delRaw ?? 0);
+    if (path === "") {
+      // Rename/copy: git left the tab-delimited path field empty and instead appended the
+      // old and new paths as two more `-z`-terminated records, same as name-status's R/C rows.
+      const originalPathRecord = records[i + 1];
+      const pathRecord = records[i + 2];
+      assert(
+        originalPathRecord !== undefined && pathRecord !== undefined,
+        "diff-tree --numstat rename/copy record missing its path chunks",
+      );
+      entries.push({
+        path: decoder.decode(pathRecord),
+        originalPath: decoder.decode(originalPathRecord),
+        additions,
+        deletions,
+        isBinary,
+      });
+      i += 3;
+    } else {
+      entries.push({
+        path: path ?? "",
+        originalPath: undefined,
+        additions,
+        deletions,
+        isBinary,
+      });
+      i += 1;
+    }
   }
   return entries;
 }

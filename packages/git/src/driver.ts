@@ -101,6 +101,25 @@ export interface Disposable {
   dispose(): void;
 }
 
+/** `catFile.ts`'s per-request result (P5 W3 widens this from a bare marker type). Declared
+ *  here, alongside `CatFileSession`, for the same reason that interface is declared here and
+ *  not in catFile.ts — see its own comment. */
+export type CatFileResult =
+  | {
+      readonly kind: "found";
+      readonly oid: string;
+      readonly type: string;
+      readonly size: number;
+      readonly content: Uint8Array;
+    }
+  | { readonly kind: "missing"; readonly oid: string }
+  | {
+      readonly kind: "tooLarge";
+      readonly oid: string;
+      readonly type: string;
+      readonly size: number;
+    };
+
 /**
  * The contract `catFile.ts` (W9) implements. Declared here, not there, so `GitDriver` can
  * carry a `catFile` property without driver.ts importing catFile.ts — W9 depends on W7, not
@@ -108,7 +127,16 @@ export interface Disposable {
  * assembled by a caller that already has both: `openGitDriver(git, runner, repoRoot,
  * openCatFileSession(git, runner, repoRoot))`.
  */
-export interface CatFileSession extends Disposable {}
+export interface CatFileSession extends Disposable {
+  /** The size-gated full read (P5 W3): `--batch-check` first, then `--batch` for content when
+   *  under the gate. Used to materialize a virtual document's actual bytes
+   *  (`RepoService.blob`). */
+  read(oid: string): Promise<CatFileResult>;
+  /** `--batch-check` only — no blob content ever crosses the pipe. Used to turn a binary
+   *  diff's two blob oids into byte sizes (`RepoService.fileDiff`) without paying for content
+   *  that is never displayed. */
+  check(oid: string): Promise<CatFileResult>;
+}
 
 export interface GitDriver {
   read(argv: readonly string[], opts?: ReadOptions): GitRead;

@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { locateGit } from "../../packages/git/src/discovery.ts";
 import { openGitDriver } from "../../packages/git/src/driver.ts";
 import { NodeProcessRunner } from "../../packages/git/src/nodeProcessRunner.ts";
+import { noopCatFileSession } from "../../packages/git/src/testFakes.ts";
 import { linear } from "../fixtures/generateRepo.ts";
 
 /**
@@ -11,7 +12,7 @@ import { linear } from "../fixtures/generateRepo.ts";
  * wrappers (P6-P9's job), so this is the write path's only real-git coverage.
  */
 const runner = new NodeProcessRunner();
-const noopCatFile = { dispose: () => {} };
+const noopCatFile = noopCatFileSession();
 
 async function driverFor(repoRoot: string) {
   const resolution = await locateGit({ runner });

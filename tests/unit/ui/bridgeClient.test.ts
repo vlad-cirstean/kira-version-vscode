@@ -25,6 +25,7 @@ const INIT_RESULT: ResultOf<"app.init"> = {
   contractVersion: 2,
   settings: defaultSettings(),
   git: { kind: "ok", path: "/usr/bin/git", version: "2.40.0" },
+  capabilities: { openInEditor: true, goToFile: true, clipboard: true },
 };
 
 class FakeTransport implements Transport {

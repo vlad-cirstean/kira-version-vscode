@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -673,4 +673,419 @@ describe("RepoService", () => {
       service.dispose();
     }
   }, 10_000);
+});
+
+// ---------------------------------------------------------------------------------------
+// P5 W3: detail, fileDiff, blob, worktreeDiff, pathExistsInCheckout — against real repositories.
+// `linear(n)`'s commits each fully replace file.txt's one line ("line 0\n" -> "line 1\n" -> …),
+// which is a genuine +1/-1 modification, not a whole-file add: exactly what exercises the P1
+// rename/numstat fix's sibling case (an ordinary one-line edit) end to end through this layer.
+// packages/git/src/repoService.test.ts covers the two LRU caches themselves directly; W16 adds
+// the full "Go to file" four-case matrix and drift re-map progression once rpcHandlers exists.
+// ---------------------------------------------------------------------------------------
+
+describe("RepoService — commit detail (P5 W3)", () => {
+  test("detail() returns metadata, body, files and parentIndex, and is cached until refsChanged", async () => {
+    const repo = linear(3);
+    const runner = new CountingRunner();
+    const service = await RepoService.create({
+      runner,
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+      const sha0 = repo.commits[0];
+      const sha1 = repo.commits[1];
+      if (!sha0 || !sha1) throw new Error("unreachable");
+
+      const detail = await service.detail(repoId, sha1);
+      expect(detail.sha).toBe(sha1);
+      expect(detail.parentIndex).toBe(0);
+      expect(detail.parents).toEqual([sha0]);
+      expect(detail.subject).toBe("commit 1");
+      expect(detail.files).toEqual([
+        {
+          kind: "modified",
+          path: "file.txt",
+          originalPath: undefined,
+          similarity: undefined,
+          additions: 1,
+          deletions: 1,
+          isBinary: false,
+        },
+      ]);
+
+      const spawnsAfterFirst = runner.totalSpawnCount;
+      const second = await service.detail(repoId, sha1);
+      expect(second).toEqual(detail);
+      expect(runner.totalSpawnCount).toBe(spawnsAfterFirst); // served from the cache, no new spawn
+
+      const seen: Array<{ repoId: string; kind: string }> = [];
+      service.onChanged((e) => seen.push(e));
+      execFileSync("git", ["tag", "v1"], { cwd: repo.dir, env: baseEnv(repo.dir) });
+      await waitFor(() => seen.some((e) => e.kind === "refsChanged"));
+
+      const third = await service.detail(repoId, sha1);
+      expect(third).toEqual(detail); // same content
+      expect(runner.totalSpawnCount).toBeGreaterThan(spawnsAfterFirst); // but re-fetched, not cached
+    } finally {
+      service.dispose();
+    }
+  }, 10_000);
+
+  test("detail() on a root commit reports an empty parents array and parentIndex 0", async () => {
+    const repo = linear(1);
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const sha0 = repo.commits[0];
+      if (!sha0) throw new Error("unreachable");
+
+      const detail = await service.detail(opened.repoId, sha0);
+      expect(detail.parents).toEqual([]);
+      expect(detail.parentIndex).toBe(0);
+      expect(detail.files).toEqual([
+        {
+          kind: "added",
+          path: "file.txt",
+          originalPath: undefined,
+          similarity: undefined,
+          additions: 1,
+          deletions: 0,
+          isBinary: false,
+        },
+      ]);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("a cancelled detail() request kills its processes; a subsequent one still succeeds", async () => {
+    const repo = linear(2);
+    const runner = new CountingRunner();
+    const service = await RepoService.create({
+      runner,
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const sha1 = repo.commits[1];
+      if (!sha1) throw new Error("unreachable");
+
+      const controller = new AbortController();
+      controller.abort();
+      await expect(
+        service.detail(opened.repoId, sha1, 0, controller.signal),
+      ).rejects.toBeInstanceOf(GitCancelled);
+
+      // The superseded request must not have poisoned the cache or left anything unusable.
+      const detail = await service.detail(opened.repoId, sha1);
+      expect(detail.sha).toBe(sha1);
+    } finally {
+      service.dispose();
+    }
+  });
+});
+
+describe("RepoService — per-file diff (P5 W3)", () => {
+  test("fileDiff() returns the text hunks for an ordinary modification, and is cached", async () => {
+    const repo = linear(3);
+    const runner = new CountingRunner();
+    const service = await RepoService.create({
+      runner,
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+      const sha1 = repo.commits[1];
+      if (!sha1) throw new Error("unreachable");
+
+      const diff = await service.fileDiff(repoId, sha1, "file.txt", undefined);
+      expect(diff.sha).toBe(sha1);
+      expect(diff.parentIndex).toBe(0);
+      expect(diff.baseSha).toBe(repo.commits[0] ?? null);
+      expect(diff.change.path).toBe("file.txt");
+      expect(diff.change.kind).toBe("modified");
+      expect(diff.body.kind).toBe("text");
+      if (diff.body.kind !== "text") throw new Error("unreachable");
+      expect(diff.body.hunks).toHaveLength(1);
+      expect(diff.body.hunks[0]?.lines.map((l) => [l.kind, l.text])).toEqual([
+        ["del", "line 0"],
+        ["add", "line 1"],
+      ]);
+
+      const spawnsAfterFirst = runner.totalSpawnCount;
+      const cached = await service.fileDiff(repoId, sha1, "file.txt", undefined);
+      expect(cached).toEqual(diff);
+      expect(runner.totalSpawnCount).toBe(spawnsAfterFirst); // served from the diff cache
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("fileDiff() on a root commit reports baseSha null and an added file", async () => {
+    const repo = linear(1);
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const sha0 = repo.commits[0];
+      if (!sha0) throw new Error("unreachable");
+
+      const diff = await service.fileDiff(opened.repoId, sha0, "file.txt", undefined);
+      expect(diff.baseSha).toBeNull();
+      expect(diff.change.kind).toBe("added");
+      expect(diff.body.kind).toBe("text");
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("fileDiff() rejects a path that is not one of the commit's changed files", async () => {
+    const repo = linear(2);
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const sha1 = repo.commits[1];
+      if (!sha1) throw new Error("unreachable");
+
+      await expect(
+        service.fileDiff(opened.repoId, sha1, "nonexistent.txt", undefined),
+      ).rejects.toThrow();
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("the diff cache evicts the least-recently-used entry once the byte cap is exceeded", async () => {
+    const repo = linear(6);
+    const runner = new CountingRunner();
+    // Small enough that at most a couple of these tiny one-line patches fit at once.
+    const service = await RepoService.create(
+      {
+        runner,
+        fileWatcher: new NodeFileWatcher(),
+        logger: new FakeLogger(),
+        settings: settingsWithPageSize(10),
+        configuredGitCandidates: [],
+      },
+      { diffCacheMaxBytes: 1 },
+    );
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+      const sha1 = repo.commits[1];
+      const sha2 = repo.commits[2];
+      if (!sha1 || !sha2) throw new Error("unreachable");
+
+      await service.fileDiff(repoId, sha1, "file.txt", undefined);
+      const spawnsAfterFirst = runner.totalSpawnCount;
+      await service.fileDiff(repoId, sha2, "file.txt", undefined); // evicts sha1's entry
+      const spawnsAfterSecond = runner.totalSpawnCount;
+      expect(spawnsAfterSecond).toBeGreaterThan(spawnsAfterFirst);
+
+      await service.fileDiff(repoId, sha1, "file.txt", undefined); // must re-spawn, not hit
+      expect(runner.totalSpawnCount).toBeGreaterThan(spawnsAfterSecond);
+    } finally {
+      service.dispose();
+    }
+  });
+});
+
+describe("RepoService — blob() (P5 W3)", () => {
+  test("found: decodes a text blob's content", async () => {
+    const repo = linear(2);
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const sha1 = repo.commits[1];
+      if (!sha1) throw new Error("unreachable");
+
+      const result = await service.blob(opened.repoId, sha1, "file.txt");
+      expect(result).toEqual({ kind: "found", content: "line 1\n" });
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("missing: a path that does not exist at that revision", async () => {
+    const repo = linear(1);
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const sha0 = repo.commits[0];
+      if (!sha0) throw new Error("unreachable");
+
+      const result = await service.blob(opened.repoId, sha0, "nonexistent.txt");
+      expect(result).toEqual({ kind: "missing" });
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("binary: a NUL byte in the first 8 KB is reported as binary, not decoded", async () => {
+    const repo = linear(1);
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+
+      writeFileSync(join(repo.dir, "image.bin"), Buffer.from([0x00, 0x01, 0x02, 0xff]));
+      execFileSync("git", ["add", "image.bin"], { cwd: repo.dir, env: baseEnv(repo.dir) });
+      execFileSync("git", ["commit", "--quiet", "--no-gpg-sign", "-m", "add a binary file"], {
+        cwd: repo.dir,
+        env: {
+          ...baseEnv(repo.dir),
+          GIT_AUTHOR_NAME: "Kira Fixture",
+          GIT_AUTHOR_EMAIL: "fixture@kira-version.test",
+          GIT_AUTHOR_DATE: "1700100000 +0000",
+          GIT_COMMITTER_NAME: "Kira Fixture",
+          GIT_COMMITTER_EMAIL: "fixture@kira-version.test",
+          GIT_COMMITTER_DATE: "1700100000 +0000",
+        },
+      });
+      const headSha = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repo.dir,
+        env: baseEnv(repo.dir),
+        encoding: "utf8",
+      }).trim();
+
+      const result = await service.blob(opened.repoId, headSha, "image.bin");
+      expect(result).toEqual({ kind: "binary" });
+    } finally {
+      service.dispose();
+    }
+  });
+});
+
+describe("RepoService — worktreeDiff() and pathExistsInCheckout() (P5 W3)", () => {
+  test("worktreeDiff(): null for a file identical to <rev>, hunks once it drifts on disk", async () => {
+    const repo = linear(2);
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const sha1 = repo.commits[1];
+      if (!sha1) throw new Error("unreachable");
+
+      const unchanged = await service.worktreeDiff(opened.repoId, sha1, "file.txt");
+      expect(unchanged).toBeNull();
+
+      writeFileSync(join(opened.identity.root, "file.txt"), "line 1\nline 1.5\n");
+      const hunks = await service.worktreeDiff(opened.repoId, sha1, "file.txt");
+      expect(hunks).not.toBeNull();
+      expect(hunks?.flatMap((h) => h.lines.map((l) => l.text))).toContain("line 1.5");
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("worktreeDiff(): null for an untracked file, even though it exists on disk", async () => {
+    const repo = linear(1);
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const sha0 = repo.commits[0];
+      if (!sha0) throw new Error("unreachable");
+
+      writeFileSync(join(opened.identity.root, "untracked.txt"), "hello\n");
+      expect(service.pathExistsInCheckout(opened.repoId, "untracked.txt")).toBe(true);
+
+      const result = await service.worktreeDiff(opened.repoId, sha0, "untracked.txt");
+      expect(result).toBeNull();
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("pathExistsInCheckout(): true for a real file, false for a missing one, false for path traversal", async () => {
+    const repo = linear(1);
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      expect(service.pathExistsInCheckout(repoId, "file.txt")).toBe(true);
+      expect(service.pathExistsInCheckout(repoId, "nonexistent.txt")).toBe(false);
+      expect(service.pathExistsInCheckout(repoId, "../../etc/passwd")).toBe(false);
+      expect(service.pathExistsInCheckout(repoId, "/etc/passwd")).toBe(false);
+    } finally {
+      service.dispose();
+    }
+  });
 });

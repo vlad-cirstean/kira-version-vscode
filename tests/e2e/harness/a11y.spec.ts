@@ -80,6 +80,31 @@ test.describe("axe: no serious/critical violations", () => {
       expect(await unexpectedSeriousViolations(page)).toEqual([]);
     });
   }
+
+  // P5 W14's own "Done when": the populated commit-detail pane and the open diff, each scanned
+  // in all four theme kinds — `detail.ts`'s "tip" commit (row 1) is the one scenario carrying
+  // every `FileChangeKind`/non-text `FileDiffBody` shape, so this exercises the file tree's
+  // status letters and the diff's binary/LFS/too-large message rows in the same pass.
+  for (const kind of THEME_KINDS) {
+    test(`commit-detail pane, populated: ${kind}`, async ({ page }) => {
+      await page.goto(`/?scenario=detail&theme=${kind}`);
+      await ready(page);
+      await page.locator('.slick-row[data-row="1"]').click();
+      await expect(page.getByTestId("file-tree")).toBeVisible();
+
+      expect(await unexpectedSeriousViolations(page)).toEqual([]);
+    });
+
+    test(`commit-detail pane, diff open: ${kind}`, async ({ page }) => {
+      await page.goto(`/?scenario=detail&theme=${kind}`);
+      await ready(page);
+      await page.locator('.slick-row[data-row="1"]').click();
+      await page.locator(".kv-file-tree-row", { hasText: "modified.ts" }).click();
+      await expect(page.getByTestId("diff-view").locator(".kv-diff-body")).toBeVisible();
+
+      expect(await unexpectedSeriousViolations(page)).toEqual([]);
+    });
+  }
 });
 
 test.describe("row accessibility bookkeeping at scale", () => {
@@ -162,8 +187,12 @@ test.describe("row accessibility bookkeeping at scale", () => {
     // focus sinks may carry a `tabindex` attribute once this grid has mounted (the sweep in
     // `CommitGrid.vue`'s `onMounted` removes it outright, not merely sets it to `-1` — see that
     // sweep's own doc comment for why the *attribute* has to be gone, not just the property).
+    // `.kv-cell-sha` is excluded too, but for a different, deliberate reason (P5 W10): its
+    // `tabindex` is real and present on purpose, `0` on the one tabbable row's own button and
+    // `-1` everywhere else — `applyAccessibility`'s own doc comment on why that roving scheme
+    // has to extend to this button, not just the row.
     const stray = await page
-      .locator(".kv-grid-host [tabindex]:not(.slick-row):not(.slick-cell)")
+      .locator(".kv-grid-host [tabindex]:not(.slick-row):not(.slick-cell):not(.kv-cell-sha)")
       .count();
     expect(stray).toBe(0);
   });

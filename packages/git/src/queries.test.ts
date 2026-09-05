@@ -5,7 +5,7 @@ import { combineFileChanges } from "./queries.ts";
 describe("combineFileChanges", () => {
   test("an ordinary modification picks up its numstat line counts", () => {
     const numstat: NumstatEntry[] = [
-      { path: "a.txt", additions: 3, deletions: 1, isBinary: false },
+      { path: "a.txt", originalPath: undefined, additions: 3, deletions: 1, isBinary: false },
     ];
     const nameStatus: NameStatusEntry[] = [
       { kind: "modified", path: "a.txt", originalPath: undefined, similarity: undefined },
@@ -25,7 +25,13 @@ describe("combineFileChanges", () => {
 
   test("a binary file's numstat entry has undefined additions/deletions", () => {
     const numstat: NumstatEntry[] = [
-      { path: "b.bin", additions: undefined, deletions: undefined, isBinary: true },
+      {
+        path: "b.bin",
+        originalPath: undefined,
+        additions: undefined,
+        deletions: undefined,
+        isBinary: true,
+      },
     ];
     const nameStatus: NameStatusEntry[] = [
       { kind: "added", path: "b.bin", originalPath: undefined, similarity: undefined },
@@ -36,11 +42,12 @@ describe("combineFileChanges", () => {
     expect(change?.deletions).toBeUndefined();
   });
 
-  test("a rename combines the old path's deletions with the new path's additions", () => {
-    // numstat ran without -M, so it sees this as an independent full delete + full add.
+  test("a rename (P1 fix): joins on the new path and reports the true post-rename delta", () => {
+    // Both invocations run with -M -C (P5 fix), so numstat's rename record carries the same
+    // path/originalPath framing as name-status and the real, similarity-matched line delta —
+    // not an independent full delete of the old path plus a full add of the new one.
     const numstat: NumstatEntry[] = [
-      { path: "old.txt", additions: 0, deletions: 5, isBinary: false },
-      { path: "new.txt", additions: 6, deletions: 0, isBinary: false },
+      { path: "new.txt", originalPath: "old.txt", additions: 1, deletions: 0, isBinary: false },
     ];
     const nameStatus: NameStatusEntry[] = [
       { kind: "renamed", path: "new.txt", originalPath: "old.txt", similarity: 92 },
@@ -51,8 +58,8 @@ describe("combineFileChanges", () => {
         path: "new.txt",
         originalPath: "old.txt",
         similarity: 92,
-        additions: 6,
-        deletions: 5,
+        additions: 1,
+        deletions: 0,
         isBinary: false,
       },
     ]);
@@ -60,8 +67,7 @@ describe("combineFileChanges", () => {
 
   test("a copy behaves the same as a rename for line-count combination", () => {
     const numstat: NumstatEntry[] = [
-      { path: "orig.txt", additions: 0, deletions: 0, isBinary: false },
-      { path: "copy.txt", additions: 3, deletions: 0, isBinary: false },
+      { path: "copy.txt", originalPath: "orig.txt", additions: 3, deletions: 0, isBinary: false },
     ];
     const nameStatus: NameStatusEntry[] = [
       { kind: "copied", path: "copy.txt", originalPath: "orig.txt", similarity: 100 },
@@ -72,7 +78,7 @@ describe("combineFileChanges", () => {
     expect(change?.deletions).toBe(0);
   });
 
-  test("a file present in name-status but missing from numstat defaults counts to zero", () => {
+  test("a file present in name-status but missing from numstat leaves counts undefined", () => {
     const nameStatus: NameStatusEntry[] = [
       { kind: "deleted", path: "gone.txt", originalPath: undefined, similarity: undefined },
     ];

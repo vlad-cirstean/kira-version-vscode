@@ -1,0 +1,9 @@
+diff --git a/pointer.bin b/pointer.bin
+new file mode 100644
+index 0000000..e2e5c4e
+--- /dev/null
++++ b/pointer.bin
+@@ -0,0 +1,3 @@
++version https://git-lfs.github.com/spec/v1
++oid sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
++size 123456

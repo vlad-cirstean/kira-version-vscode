@@ -7,6 +7,27 @@ const THEME_KINDS = [
   "vscode-high-contrast-light",
 ] as const;
 
+/** Mirrors `@kira-version/core`'s `DocumentRef` (`packages/core/src/ports/editorIntegration.ts`)
+ *  and `apps/harness/src/mockBridge.ts`'s own `HarnessEditorAction` — reproduced structurally
+ *  rather than imported, since `tests/` is not itself a bun workspace member (only `packages/*`
+ *  and `apps/*` are, per the root `package.json`) and so has no `node_modules/@kira-version/*`
+ *  symlink for `moduleResolution: "bundler"` to resolve, despite `tests/tsconfig.json` listing
+ *  `packages/core` as a project *reference* (build-ordering only, not module resolution). Kept in
+ *  sync by hand the same way this file's shape already tracks `window.__kiraHarness`'s real one. */
+type HarnessDocumentRef =
+  | { readonly kind: "file"; readonly path: string }
+  | { readonly kind: "virtual"; readonly key: string; readonly label: string }
+  | { readonly kind: "empty"; readonly label: string };
+
+type HarnessEditorAction =
+  | {
+      readonly kind: "openDiff";
+      readonly left: HarnessDocumentRef;
+      readonly right: HarnessDocumentRef;
+      readonly title: string;
+    }
+  | { readonly kind: "reveal"; readonly ref: HarnessDocumentRef; readonly line: number };
+
 declare global {
   interface Window {
     __kiraHarness: {
@@ -14,6 +35,10 @@ declare global {
       readTokens(): Record<string, string>;
       checkLayoutWorker(): Promise<boolean>;
       triggerRefsChanged(): void;
+      /** P5 W12/W13: declared once, project-wide, here — `commitDetail.spec.ts` reads this
+       *  without repeating the declaration, the same convention `commitList.spec.ts`'s own doc
+       *  comment already states for this interface as a whole. */
+      readonly lastEditorAction: HarnessEditorAction | undefined;
     };
   }
 }

@@ -218,6 +218,24 @@ function recordDiffTree(): void {
     git(dir, ["commit", "--quiet", "--no-gpg-sign", "-m", "c2 pure rename"]);
     const c2 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
     save("diffTree/nameStatus-rename.bin", git(dir, nameStatusArgs(c1, c2)));
+    save("diffTree/numstat-rename.bin", git(dir, numstatArgs(c1, c2)));
+  }
+  {
+    // A rename with an edit in the same commit (P1 fix's whole point): numstat with -M -C must
+    // report the true post-rename delta (+1/-1), not an independent full delete + full add.
+    const dir = tempRepo("rename-with-edit");
+    writeFileSync(join(dir, "old.txt"), "line1\nline2\nline3\nline4\nline5\n");
+    git(dir, ["add", "old.txt"]);
+    git(dir, ["commit", "--quiet", "--no-gpg-sign", "-m", "c1"]);
+    const c1 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
+    git(dir, ["mv", "old.txt", "new.txt"]);
+    // One line changed (line3 -> line3-edited): a true +1/-1, the case P1's bug reported as
+    // +10/-10 (numstat without -M/-C sees this as an independent full delete + full add).
+    writeFileSync(join(dir, "new.txt"), "line1\nline2\nline3-edited\nline4\nline5\n");
+    git(dir, ["commit", "--quiet", "--no-gpg-sign", "-am", "c2 rename with edit"]);
+    const c2 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
+    save("diffTree/nameStatus-renameWithEdit.bin", git(dir, nameStatusArgs(c1, c2)));
+    save("diffTree/numstat-renameWithEdit.bin", git(dir, numstatArgs(c1, c2)));
   }
   {
     const dir = tempRepo("copy");
@@ -260,6 +278,143 @@ function recordDiffTree(): void {
     if (root === undefined) throw new Error("linear(1) did not produce a commit");
     save("diffTree/root-numstat.bin", git(dir, numstatArgs(undefined, root)));
     save("diffTree/root-nameStatus.bin", git(dir, nameStatusArgs(undefined, root)));
+  }
+}
+
+// ---------------------------------------------------------------------------------------
+// diff bodies — parse/diff.ts's five FileDiffBody shapes, straight from `diff-tree -p`. Argv
+// mirrors W3's `fileDiff` exactly (minus `--no-optional-locks`, which driver.ts adds structurally
+// and this recorder does not go through) so the fixture can never silently drift from what the
+// real code path sends.
+// ---------------------------------------------------------------------------------------
+
+function fileDiffArgsFixture(from: string | undefined, to: string, paths: string[]): string[] {
+  const base = [
+    "diff-tree",
+    "-r",
+    "-p",
+    "-M",
+    "-C",
+    "--no-commit-id",
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "-z",
+    "--unified=3",
+  ];
+  return [...base, ...(from === undefined ? ["--root", to] : [from, to]), "--", ...paths];
+}
+
+function recordDiffBody(): void {
+  {
+    const dir = tempRepo("diffbody-text-simple");
+    writeFileSync(join(dir, "a.txt"), "line1\nline2\n");
+    git(dir, ["add", "a.txt"]);
+    git(dir, ["commit", "--quiet", "--no-gpg-sign", "-m", "c1"]);
+    const c1 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
+    writeFileSync(join(dir, "a.txt"), "line1\nline2\nline3\n");
+    git(dir, ["commit", "--quiet", "--no-gpg-sign", "-am", "c2"]);
+    const c2 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
+    save("diffBody/text-simple.bin", git(dir, fileDiffArgsFixture(c1, c2, ["a.txt"])));
+  }
+  {
+    // Two hunks, the second with a section heading — --unified=0 keeps them from merging into one.
+    const dir = tempRepo("diffbody-text-multihunk");
+    writeFileSync(
+      join(dir, "multi.txt"),
+      "function foo() {\n  return 1;\n}\n\nfunction bar() {\n  return 2;\n}\n",
+    );
+    git(dir, ["add", "multi.txt"]);
+    git(dir, ["commit", "--quiet", "--no-gpg-sign", "-m", "c1"]);
+    const c1 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
+    writeFileSync(
+      join(dir, "multi.txt"),
+      "function foo() {\n  return 100;\n}\n\nfunction bar() {\n  return 200;\n}\n",
+    );
+    git(dir, ["commit", "--quiet", "--no-gpg-sign", "-am", "c2"]);
+    const c2 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
+    const args = fileDiffArgsFixture(c1, c2, ["multi.txt"]).map((a) =>
+      a === "--unified=3" ? "--unified=0" : a,
+    );
+    save("diffBody/text-multiHunk.bin", git(dir, args));
+  }
+  {
+    const dir = tempRepo("diffbody-no-newline-add");
+    writeFileSync(join(dir, "single.txt"), "one\n");
+    git(dir, ["add", "single.txt"]);
+    git(dir, ["commit", "--quiet", "--no-gpg-sign", "-m", "c1"]);
+    const c1 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
+    writeFileSync(join(dir, "single.txt"), "one changed");
+    git(dir, ["commit", "--quiet", "--no-gpg-sign", "-am", "c2 drop trailing newline"]);
+    const c2 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
+    save("diffBody/text-noNewlineOnAdd.bin", git(dir, fileDiffArgsFixture(c1, c2, ["single.txt"])));
+  }
+  {
+    const dir = tempRepo("diffbody-no-newline-del");
+    writeFileSync(join(dir, "single.txt"), "one");
+    git(dir, ["add", "single.txt"]);
+    git(dir, ["commit", "--quiet", "--no-gpg-sign", "-m", "c1"]);
+    const c1 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
+    writeFileSync(join(dir, "single.txt"), "one changed\n");
+    git(dir, ["commit", "--quiet", "--no-gpg-sign", "-am", "c2 gain trailing newline"]);
+    const c2 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
+    save("diffBody/text-noNewlineOnDel.bin", git(dir, fileDiffArgsFixture(c1, c2, ["single.txt"])));
+  }
+  {
+    const dir = tempRepo("diffbody-binary");
+    writeFileSync(join(dir, "b.bin"), Buffer.from([0x00, 0x01, 0x02]));
+    git(dir, ["add", "b.bin"]);
+    git(dir, ["commit", "--quiet", "--no-gpg-sign", "-m", "c1 add binary"]);
+    const c1 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
+    save("diffBody/binary-add.bin", git(dir, fileDiffArgsFixture(undefined, c1, ["b.bin"])));
+    writeFileSync(join(dir, "b.bin"), Buffer.from([0x00, 0x01, 0x02, 0xff]));
+    git(dir, ["commit", "--quiet", "--no-gpg-sign", "-am", "c2 modify binary"]);
+    const c2 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
+    save("diffBody/binary-modify.bin", git(dir, fileDiffArgsFixture(c1, c2, ["b.bin"])));
+    git(dir, ["rm", "--quiet", "b.bin"]);
+    git(dir, ["commit", "--quiet", "--no-gpg-sign", "-m", "c3 delete binary"]);
+    const c3 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
+    save("diffBody/binary-delete.bin", git(dir, fileDiffArgsFixture(c2, c3, ["b.bin"])));
+  }
+  {
+    const dir = tempRepo("diffbody-lfs-pointer");
+    const pointer =
+      "version https://git-lfs.github.com/spec/v1\n" +
+      `oid sha256:${"a".repeat(64)}\n` +
+      "size 123456\n";
+    writeFileSync(join(dir, "pointer.bin"), pointer);
+    git(dir, ["add", "pointer.bin"]);
+    git(dir, ["commit", "--quiet", "--no-gpg-sign", "-m", "c1 add lfs pointer"]);
+    const c1 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
+    save(
+      "diffBody/lfsPointer-add.bin",
+      git(dir, fileDiffArgsFixture(undefined, c1, ["pointer.bin"])),
+    );
+  }
+  {
+    const dir = tempRepo("diffbody-mode-change");
+    writeFileSync(join(dir, "g.txt"), "content\n");
+    git(dir, ["add", "g.txt"]);
+    git(dir, ["commit", "--quiet", "--no-gpg-sign", "-m", "c1"]);
+    const c1 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
+    execFileSync("chmod", ["+x", join(dir, "g.txt")]);
+    git(dir, ["commit", "--quiet", "--no-gpg-sign", "-am", "c2 chmod +x, no content change"]);
+    const c2 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
+    save("diffBody/empty-modeChangeOnly.bin", git(dir, fileDiffArgsFixture(c1, c2, ["g.txt"])));
+  }
+  {
+    const dir = tempRepo("diffbody-pure-rename");
+    writeFileSync(join(dir, "old.txt"), "a\nb\nc\n");
+    git(dir, ["add", "old.txt"]);
+    git(dir, ["commit", "--quiet", "--no-gpg-sign", "-m", "c1"]);
+    const c1 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
+    git(dir, ["mv", "old.txt", "new.txt"]);
+    git(dir, ["commit", "--quiet", "--no-gpg-sign", "-m", "c2 pure rename, identical content"]);
+    const c2 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
+    save(
+      "diffBody/empty-identicalPureRename.bin",
+      git(dir, fileDiffArgsFixture(c1, c2, ["old.txt", "new.txt"])),
+    );
   }
 }
 
@@ -383,6 +538,7 @@ function main(): void {
   recordRefs();
   recordStatus();
   recordDiffTree();
+  recordDiffBody();
   recordStash();
   recordMergeTree();
   recordHandAuthored();

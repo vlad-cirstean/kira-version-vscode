@@ -20,6 +20,11 @@
  * the plan's own instruction to note it at the mark rather than silently — see that mark's new
  * home, `CommitGrid.vue`'s `handleChunkLayout`, and `App.vue`'s own doc comment on why it moved.
  *
+ * `docs/plans/P5.md` W15 adds `detailPaintMs` (recorded only — §5.1 sets no separate renderer
+ * budget for the detail pane): selection to the pane's file tree in the DOM, over the mock
+ * bridge, so it isolates render cost from `historyPipeline.ts`'s `commitDetailMs`, which measures
+ * the *other* half of the same §5.1 number (real git spawns, no renderer at all).
+ *
  * **Deliberate departures from the plan's literal wording, all because the literal reading was
  * impractical (or, in the third case, actively misleading) at this scale, recorded here and in
  * the phase's own Findings:**
@@ -99,6 +104,12 @@ interface Measurement {
   readonly svgNodesPerRow: number;
   readonly bundleKB: number;
   readonly scenarioBuildMsReference: number;
+  /** `docs/plans/P5.md` W15 — the renderer half of §5.1's "commit select → detail pane populated
+   *  ≤ 80 ms": selection to the pane's file tree being in the DOM, over the mock bridge (zero
+   *  added latency), so this isolates render cost alone from `historyPipeline.ts`'s
+   *  `commitDetailMs` (the host half, real git spawns, no renderer). Recorded only — §5.1 sets no
+   *  separate renderer-side budget for the detail pane. */
+  readonly detailPaintMs: number;
 }
 
 const CEILINGS: Readonly<Record<string, number>> = {
@@ -128,6 +139,7 @@ const RECORDED_ONLY_METRICS = [
   "svgNodesPerRow",
   "bundleKB",
   "scenarioBuildMsReference",
+  "detailPaintMs",
 ] as const;
 
 function median(values: readonly number[]): number {
@@ -465,6 +477,23 @@ async function measure(): Promise<Measurement> {
       return total / svgs.length;
     });
 
+    // --- detailPaintMs: `docs/plans/P5.md` W15 — the `detail` scenario's `manyFiles` row (row 0,
+    // the 5,000-file commit topology.ts's own doc comment names) is what makes the W8 render
+    // cap's number meaningful rather than assumed. A fresh navigation (rather than reusing
+    // `badges` above) so `selection → file tree in the DOM` is not sharing a page with any prior
+    // scenario's own leftover detail state. Node-side start/elapsed around the click, same
+    // bracket `pressLoadMoreOnce` above already uses for `loadMoreMs` — the one CDP round trip
+    // each of `.click()`/`.waitFor()` costs is the same on both sides of the measurement in every
+    // run, so it does not bias a regression comparison against the committed baseline. ---
+    await page.goto(`${HARNESS_BASE}/?scenario=detail`);
+    await page.waitForFunction(
+      () => document.querySelector('[data-testid="connection-state"]') !== null,
+    );
+    const detailPaintStart = performance.now();
+    await page.locator('.slick-row[data-row="0"]').click();
+    await page.locator('[data-testid="file-tree"]').waitFor({ state: "attached" });
+    const detailPaintMs = performance.now() - detailPaintStart;
+
     return {
       firstPaintMs,
       firstPageMs,
@@ -479,6 +508,7 @@ async function measure(): Promise<Measurement> {
       svgNodesPerRow,
       bundleKB,
       scenarioBuildMsReference,
+      detailPaintMs,
     };
   } finally {
     await browser.close();

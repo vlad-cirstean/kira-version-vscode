@@ -18,6 +18,7 @@ import { openGitDriver } from "../../packages/git/src/driver.ts";
 import { openLogSession } from "../../packages/git/src/logSession.ts";
 import { NodeProcessRunner } from "../../packages/git/src/nodeProcessRunner.ts";
 import { refs } from "../../packages/git/src/queries.ts";
+import { noopCatFileSession } from "../../packages/git/src/testFakes.ts";
 import {
   baseEnv,
   branchy,
@@ -29,7 +30,7 @@ import {
 } from "../fixtures/generateRepo.ts";
 
 const runner = new NodeProcessRunner();
-const noopCatFile = { dispose: () => {} };
+const noopCatFile = noopCatFileSession();
 const cleanupDirs: string[] = [];
 afterAll(() => {
   for (const dir of cleanupDirs) rmSync(dir, { recursive: true, force: true });

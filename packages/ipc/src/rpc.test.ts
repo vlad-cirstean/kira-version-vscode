@@ -120,6 +120,11 @@ function stubHandlers(
       "graph.status": notImplemented,
       "graph.loadMore": notImplemented,
       "graph.refresh": notImplemented,
+      "commit.detail": notImplemented,
+      "commit.fileDiff": notImplemented,
+      "editor.openDiff": notImplemented,
+      "editor.goToFile": notImplemented,
+      "clipboard.write": notImplemented,
       ...requestOverrides,
     },
     streams: {

@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test";
 import { locateGit } from "../../packages/git/src/discovery.ts";
 import { openGitDriver } from "../../packages/git/src/driver.ts";
 import { NodeProcessRunner } from "../../packages/git/src/nodeProcessRunner.ts";
+import { noopCatFileSession } from "../../packages/git/src/testFakes.ts";
 import { conflicting, linear, withRemote } from "../fixtures/generateRepo.ts";
 
 /**
@@ -12,7 +13,7 @@ import { conflicting, linear, withRemote } from "../fixtures/generateRepo.ts";
  * for real through the driver — not just the recorded-stderr unit tests in errors.test.ts.
  */
 const runner = new NodeProcessRunner();
-const noopCatFile = { dispose: () => {} };
+const noopCatFile = noopCatFileSession();
 
 async function driverFor(repoRoot: string) {
   const resolution = await locateGit({ runner });

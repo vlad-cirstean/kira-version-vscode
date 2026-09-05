@@ -10,11 +10,18 @@
  * constructs it there).
  */
 import { coerceSettings, SETTINGS, type SettingKey, type Settings } from "@kira-version/core";
-import { NodeFileWatcher, NodeProcessRunner, RepoService } from "@kira-version/git";
+import {
+  createVirtualDocumentSource,
+  NodeFileWatcher,
+  NodeProcessRunner,
+  RepoService,
+} from "@kira-version/git";
 import type { SettingsSnapshot } from "@kira-version/ipc";
 import * as vscode from "vscode";
 import { KiraGraphViewProvider } from "./panelView.ts";
+import { VsCodeClipboard } from "./ports/clipboard.ts";
 import { VsCodeDialogs } from "./ports/dialogs.ts";
+import { VsCodeEditorIntegration } from "./ports/editorIntegration.ts";
 import { VsCodeLogger } from "./ports/logger.ts";
 import { VsCodeTheme } from "./ports/theme.ts";
 import { VsCodeWorkspaceRoots } from "./ports/workspaceRoots.ts";
@@ -64,6 +71,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const roots = new VsCodeWorkspaceRoots();
   const dialogs = new VsCodeDialogs();
   const theme = new VsCodeTheme();
+  const editor = new VsCodeEditorIntegration();
+  const clipboard = new VsCodeClipboard();
 
   const repoService = await RepoService.create({
     runner: new NodeProcessRunner(),
@@ -75,6 +84,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   service = repoService;
   logger.log("info", "activated", { git: repoService.git, theme: theme.current() });
 
+  // Registered once, here, rather than inside `createRepoHandlers`: `resolveWebviewView` reruns
+  // on every hide/reveal, and VS Code allows only one content provider per scheme.
+  context.subscriptions.push(
+    editor.registerVirtualDocuments(createVirtualDocumentSource(repoService)),
+  );
+
   const provider = new KiraGraphViewProvider({
     extensionUri: context.extensionUri,
     service: repoService,
@@ -82,6 +97,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     dialogs,
     settings: () => currentSettings,
     logger,
+    editor,
+    clipboard,
   });
 
   context.subscriptions.push(

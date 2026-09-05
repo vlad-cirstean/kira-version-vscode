@@ -35,12 +35,29 @@ export type {
   CommitDetail,
   CommitIdentity,
   CommitRecord,
+  CommitSignature,
   DecorationRef,
   FileChange,
   FileChangeKind,
   SignatureStatus,
 } from "./model/commit.ts";
 export type { MergePrediction, UnmergedEntry, UnmergedStage } from "./model/conflict.ts";
+export type {
+  CommitTrailer,
+  DiffHunk,
+  DiffLine,
+  DiffLineKind,
+  DiffRow,
+  DiffSide,
+  FileDiff,
+  FileDiffBody,
+} from "./model/diff.ts";
+export {
+  flattenDiffRows,
+  mapDiffLineToRevision,
+  mapLineAcrossDiff,
+  splitTrailerBlock,
+} from "./model/diff.ts";
 export type { RefKind, RefRecord, RefTrack } from "./model/ref.ts";
 export type { HeadState, RepoIdentity } from "./model/repo.ts";
 export type { StashEntry } from "./model/stash.ts";
@@ -54,8 +71,15 @@ export type {
   StatusResult,
   UntrackedStatusEntry,
 } from "./model/status.ts";
+export type { Clipboard } from "./ports/clipboard.ts";
 export type { Dialogs, PickFolderOptions } from "./ports/dialogs.ts";
 export type { Disposable } from "./ports/disposable.ts";
+export type {
+  DocumentRef,
+  EditorCapabilities,
+  EditorIntegration,
+  VirtualDocumentSource,
+} from "./ports/editorIntegration.ts";
 export type { FileWatchEvent, FileWatcher, FileWatchOptions } from "./ports/fileWatcher.ts";
 export type { Logger, LogLevel } from "./ports/logger.ts";
 export type {

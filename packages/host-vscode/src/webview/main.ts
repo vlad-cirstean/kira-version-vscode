@@ -87,7 +87,7 @@ const viewState = new VsCodeApiViewStateStore(vscodeApi);
 // state — that would defeat the rehydration this same state exists to prove.
 if (bootstrap.repo && !viewState.read()) {
   viewState.write({
-    version: 2,
+    version: 3,
     repoId: bootstrap.repo,
     loadedRows: 0,
     detailOpen: true,
@@ -96,6 +96,7 @@ if (bootstrap.repo && !viewState.read()) {
     columnWidths: DEFAULT_COLUMN_WIDTHS,
     dateFormat: "relative",
     detailWidth: DEFAULT_DETAIL_WIDTH,
+    fileListMode: "tree",
   });
 }
 

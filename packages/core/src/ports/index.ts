@@ -1,5 +1,12 @@
+export type { Clipboard } from "./clipboard.ts";
 export type { Dialogs, PickFolderOptions } from "./dialogs.ts";
 export type { Disposable } from "./disposable.ts";
+export type {
+  DocumentRef,
+  EditorCapabilities,
+  EditorIntegration,
+  VirtualDocumentSource,
+} from "./editorIntegration.ts";
 export type { FileWatchEvent, FileWatcher, FileWatchOptions } from "./fileWatcher.ts";
 export type { Logger, LogLevel } from "./logger.ts";
 export type {

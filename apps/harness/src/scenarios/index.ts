@@ -3,8 +3,12 @@ import { badges } from "./badges.ts";
 import { ceiling } from "./ceiling.ts";
 import { clean } from "./clean.ts";
 import { conflicted } from "./conflicted.ts";
+import { detail } from "./detail.ts";
 import { dirty } from "./dirty.ts";
+import { goToFile } from "./goToFile.ts";
 import { hugeRepo } from "./hugeRepo.ts";
+import { merge } from "./merge.ts";
+import { noCapabilities } from "./noCapabilities.ts";
 import { pagedBranch } from "./pagedBranch.ts";
 import { tooOld } from "./tooOld.ts";
 import type { Scenario } from "./types.ts";
@@ -17,6 +21,10 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
   authFailure,
   badges,
   tooOld,
+  detail,
+  merge,
+  goToFile,
+  noCapabilities,
 };
 
 /** Loadable by exact name via `?scenario=<name>` but deliberately left out of `SCENARIOS` above

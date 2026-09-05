@@ -1,7 +1,7 @@
 export type { GitCapabilities, RepoCapabilities } from "./capabilities.ts";
 export { CapabilitiesCache, capabilitiesForVersion } from "./capabilities.ts";
 export type { CatFileResult, CatFileSessionOptions } from "./catFile.ts";
-export { openCatFileSession } from "./catFile.ts";
+export { DEFAULT_MAX_BLOB_BYTES, openCatFileSession } from "./catFile.ts";
 export type {
   GitResolution,
   GitVersion,
@@ -34,6 +34,13 @@ export type { LogSession, LogSessionOptions, PageOutcome, ReadPageOptions } from
 export { openLogSession } from "./logSession.ts";
 export { FileWatchError, NodeFileWatcher } from "./nodeFileWatcher.ts";
 export { NodeProcessRunner, ProcessSpawnError } from "./nodeProcessRunner.ts";
+export type { ParsedFileDiffBody } from "./parse/diff.ts";
+export {
+  fileDiffArgs,
+  hasDeletedPostImage,
+  parseFileDiffBody,
+  worktreeDiffArgs,
+} from "./parse/diff.ts";
 export type { NameStatusEntry, NumstatEntry } from "./parse/diffTree.ts";
 export {
   nameStatusArgs,
@@ -66,13 +73,21 @@ export {
   status,
 } from "./queries.ts";
 export type {
+  BlobResult,
   GitStatus,
   GraphChunkPayload,
   RepoOpenOutcome,
   RepoServiceDeps,
 } from "./repoService.ts";
-export { CHUNK_ROWS, HIDDEN_EVICT_MS, RepoService } from "./repoService.ts";
+export {
+  CHUNK_ROWS,
+  DETAIL_CACHE_MAX_ENTRIES,
+  DIFF_CACHE_MAX_BYTES,
+  HIDDEN_EVICT_MS,
+  MAX_PATCH_BYTES,
+  RepoService,
+} from "./repoService.ts";
 export type { RepoHandlersDeps, RepoServicePort } from "./rpcHandlers.ts";
-export { createRepoHandlers } from "./rpcHandlers.ts";
+export { createRepoHandlers, createVirtualDocumentSource } from "./rpcHandlers.ts";
 export type { RepoWatcher, WatchRepoOptions, WatchSignal } from "./watcher.ts";
 export { watchRepo } from "./watcher.ts";

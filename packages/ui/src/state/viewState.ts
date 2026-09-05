@@ -8,9 +8,18 @@
  * §5.4's full list lands at P4 W5 (version 2): scroll position and selection survive a re-walk
  * because they are stored by row/sha rather than implied by `loadedRows` alone, and the column
  * layout (widths, date format, detail pane width) survives independently of any one repo.
+ *
+ * `docs/plans/P5.md` W11 (version 3) adds exactly one field, `fileListMode` — a user preference
+ * about *how* files are browsed, the same kind of thing `dateFormat` already is. Deliberately
+ * **not** added: the open diff, the selected file, or `parentIndex` — those are facts about one
+ * commit at one moment, and restoring a stale one is §6.8's own argument against a remembered
+ * comparison base, applied here. `FileListMode` is imported from `state/detail.ts` rather than
+ * redefined here — one alias, not two structurally-identical types drifting apart.
  */
+import type { FileListMode } from "./detail.ts";
+
 export interface PersistedViewState {
-  readonly version: 2;
+  readonly version: 3;
   readonly repoId: string | null;
   readonly loadedRows: number;
   readonly detailOpen: boolean;
@@ -22,6 +31,7 @@ export interface PersistedViewState {
   readonly columnWidths: ColumnWidths;
   readonly dateFormat: DateFormat;
   readonly detailWidth: number;
+  readonly fileListMode: FileListMode;
 }
 
 export interface ColumnWidths {
@@ -48,9 +58,9 @@ function isColumnWidthsShape(value: unknown): value is ColumnWidths {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
   return (
-    typeof record["author"] === "number" &&
-    typeof record["date"] === "number" &&
-    typeof record["sha"] === "number"
+    typeof record.author === "number" &&
+    typeof record.date === "number" &&
+    typeof record.sha === "number"
   );
 }
 
@@ -58,15 +68,16 @@ function isPersistedViewStateShape(value: unknown): value is PersistedViewState 
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
   return (
-    record["version"] === 2 &&
-    (typeof record["repoId"] === "string" || record["repoId"] === null) &&
-    typeof record["loadedRows"] === "number" &&
-    typeof record["detailOpen"] === "boolean" &&
-    typeof record["scrollRow"] === "number" &&
-    (typeof record["selectedSha"] === "string" || record["selectedSha"] === null) &&
-    isColumnWidthsShape(record["columnWidths"]) &&
-    (record["dateFormat"] === "relative" || record["dateFormat"] === "absolute") &&
-    typeof record["detailWidth"] === "number"
+    record.version === 3 &&
+    (typeof record.repoId === "string" || record.repoId === null) &&
+    typeof record.loadedRows === "number" &&
+    typeof record.detailOpen === "boolean" &&
+    typeof record.scrollRow === "number" &&
+    (typeof record.selectedSha === "string" || record.selectedSha === null) &&
+    isColumnWidthsShape(record.columnWidths) &&
+    (record.dateFormat === "relative" || record.dateFormat === "absolute") &&
+    typeof record.detailWidth === "number" &&
+    (record.fileListMode === "tree" || record.fileListMode === "flat")
   );
 }
 

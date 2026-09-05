@@ -22,6 +22,14 @@ import { topology } from "../../fixtures/topology.ts";
 // directory's own module scope — it is packages/ui's dependency, not the tests package's).
 const stubGraphFormatter: Parameters<typeof buildColumns>[2] = () => document.createElement("div");
 
+// The sha column's copy button (W10) is exercised directly in shaFormatter's own tests; these
+// buildColumns tests only assert column shape/width/resizability, so a never-invoked stub with
+// clipboard support "off" is all a caller here needs.
+const stubShaCopyCtx: Parameters<typeof buildColumns>[3] = {
+  enabled: () => false,
+  onCopy: () => {},
+};
+
 function record(overrides: Partial<CommitRecord> = {}): CommitRecord {
   return {
     sha: "a".repeat(40),
@@ -42,6 +50,7 @@ describe("buildColumns", () => {
       { ...DEFAULT_COLUMN_WIDTHS, laneCount: 2, messageWidth: 300 },
       dateCtx,
       stubGraphFormatter,
+      stubShaCopyCtx,
     );
     expect(columns.map((column) => column.id)).toEqual([
       GRAPH_COLUMN_ID,
@@ -57,6 +66,7 @@ describe("buildColumns", () => {
       { ...DEFAULT_COLUMN_WIDTHS, laneCount: 5, messageWidth: 300 },
       dateCtx,
       stubGraphFormatter,
+      stubShaCopyCtx,
     );
     const graph = columns.find((column) => column.id === GRAPH_COLUMN_ID);
     expect(graph?.width).toBe(graphColumnWidth(5));
@@ -68,6 +78,7 @@ describe("buildColumns", () => {
       { author: 111, date: 222, sha: 333, laneCount: 0, messageWidth: 444 },
       dateCtx,
       stubGraphFormatter,
+      stubShaCopyCtx,
     );
     const widthOf = (id: string) => columns.find((column) => column.id === id)?.width;
     expect(widthOf(MESSAGE_COLUMN_ID)).toBe(444);
@@ -81,6 +92,7 @@ describe("buildColumns", () => {
       { ...DEFAULT_COLUMN_WIDTHS, laneCount: 1, messageWidth: 200 },
       dateCtx,
       stubGraphFormatter,
+      stubShaCopyCtx,
     );
     for (const column of columns) {
       expect(column.resizable).toBe(false);

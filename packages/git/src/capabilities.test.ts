@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { CapabilitiesCache, capabilitiesForVersion } from "./capabilities.ts";
 import type { GitVersion } from "./discovery.ts";
 import { type CatFileSession, openGitDriver } from "./driver.ts";
-import { FakeProcessRunner, fakeResolvedGit, flushUntil } from "./testFakes.ts";
+import { FakeProcessRunner, fakeResolvedGit, flushUntil, noopCatFileSession } from "./testFakes.ts";
 
 function version(major: number, minor: number, patch = 0): GitVersion {
   return { major, minor, patch, raw: `${major}.${minor}.${patch}` };
@@ -63,7 +63,7 @@ describe("CapabilitiesCache — per-binary", () => {
   });
 });
 
-const noopCatFile: CatFileSession = { dispose: () => {} };
+const noopCatFile: CatFileSession = noopCatFileSession();
 
 describe("CapabilitiesCache — per-repo", () => {
   test("computes repo capabilities once per generation (one spawn, not two)", async () => {

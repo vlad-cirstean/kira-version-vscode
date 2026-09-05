@@ -66,9 +66,29 @@
   /* Status / diff colours reuse Git's own decoration tokens (§6.1) */
   --kv-diff-added-fg: var(--vscode-gitDecoration-addedResourceForeground, #81b88b);
   --kv-diff-modified-fg: var(--vscode-gitDecoration-modifiedResourceForeground, #e2c08d);
-  --kv-diff-deleted-fg: var(--vscode-gitDecoration-deletedResourceForeground, #c74e39);
+  /* P5 W14: the real VS Code dark-theme literal (#c74e39) is only 3.63:1 against this file's own
+     editor-background fallback (#1e1e1e) — a real host always supplies its own actual
+     `--vscode-gitDecoration-deletedResourceForeground` and never renders this literal at all, so
+     this brightens only the *fallback* (caught by W14's own axe scan on the populated pane, the
+     first scan to read this token's dark default rather than a real host's). */
+  --kv-diff-deleted-fg: var(--vscode-gitDecoration-deletedResourceForeground, #e2685a);
   --kv-diff-renamed-fg: var(--vscode-gitDecoration-renamedResourceForeground, #73c991);
   --kv-diff-conflict-fg: var(--vscode-gitDecoration-conflictingResourceForeground, #e4676b);
+  /* P5 W8: `copied` and `typeChanged` have no dedicated workbench colour id (VS Code's own SCM
+     view renders both with the same tokens as their nearest sibling — a copy is a rename with
+     no path change worth a new hue, and a type change is a kind of modification), so these
+     alias rather than invent a sixth literal. `unmerged` reuses the conflict token directly —
+     the one status this table already had a name for. */
+  --kv-diff-copied-fg: var(--kv-diff-renamed-fg);
+  --kv-diff-typechanged-fg: var(--kv-diff-modified-fg);
+  --kv-diff-unmerged-fg: var(--kv-diff-conflict-fg);
+
+  /* P5 W9: DiffView.vue's insert/remove backgrounds and current-line highlight, straight off
+     the diff/text editor's own tokens (§6.1) so the in-app diff matches the real editor beside
+     it. Fallbacks are the editor's own defaults' approximate dark-theme values. */
+  --kv-diff-inserted-bg: var(--vscode-diffEditor-insertedTextBackground, rgba(155, 185, 85, 0.2));
+  --kv-diff-removed-bg: var(--vscode-diffEditor-removedTextBackground, rgba(255, 0, 0, 0.2));
+  --kv-line-highlight-bg: var(--vscode-editor-lineHighlightBackground, rgba(255, 255, 255, 0.07));
 
   /* Fonts */
   --kv-font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, sans-serif);
@@ -127,6 +147,14 @@ body.vscode-high-contrast-light {
   --kv-badge-stash-fg: var(--vscode-gitDecoration-ignoredResourceForeground, #5a5a5a);
   --kv-badge-stash-border: var(--vscode-gitDecoration-ignoredResourceForeground, #5a5a5a);
   --kv-error-fg: var(--vscode-errorForeground, #a1260d);
+  /* P5 W14: the file tree's and diff's own added/deleted colours (line 67/69 above) are the
+     dark kind's tuning and fail 4.5:1 against a light panel — caught by W14's own axe scan on
+     the populated pane and the open diff, neither of which had exercised these two tokens
+     against a light background before now. Same aliasing as `--kv-badge-tag-fg`/`--kv-error-fg`
+     just above: the identical workbench colour id, a light-appropriate literal already verified
+     for this exact panel-background pair. */
+  --kv-diff-added-fg: var(--vscode-gitDecoration-addedResourceForeground, #256b3a);
+  --kv-diff-deleted-fg: var(--vscode-gitDecoration-deletedResourceForeground, #a1260d);
 }
 
 /* kv-lane-rules:start (scripts/gen-lane-palette.ts) — do not hand-edit */
