@@ -116,8 +116,35 @@ describe("locateGit", () => {
     process.env.PATH = "";
     try {
       await expect(
-        locateGit({ runner, configuredCandidates: ["/no/such/git-binary"], platform: "linux" }),
+        locateGit({ runner, configuredCandidates: ["/no/such/git-binary"], platform: "win32" }),
       ).rejects.toThrow(/not supported yet/);
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  test("the Linux fallback list is reachable and resolves, not a throw", async () => {
+    // Unlike the darwin fallback case above (whose /usr/bin/git is gated behind
+    // `xcode-select -p`, which fails on this container), the Linux fallback list has no gate
+    // and this container has a real, working /usr/bin/git — so reaching the Linux fallbacks
+    // here resolves "ok" via that binary rather than exhausting into "notFound". That is a
+    // stronger proof the branch works than a synthetic notFound would be: it exercises the
+    // real candidate end to end. The important assertion is the one that would fail if W1
+    // still threw: this call resolves at all (a throw would reject the promise, not return
+    // "ok"), and the resolved path is a Linux fallback candidate — proving the fallback list
+    // was actually reached, since PATH is cleared so it cannot have been found any other way.
+    const savedPath = process.env.PATH;
+    process.env.PATH = "";
+    try {
+      const resolution = await locateGit({
+        runner,
+        configuredCandidates: ["/no/such/git-binary"],
+        platform: "linux",
+      });
+      expect(resolution.kind).toBe("ok");
+      if (resolution.kind === "ok") {
+        expect(resolution.git.path).toBe("/usr/bin/git");
+      }
     } finally {
       process.env.PATH = savedPath;
     }
