@@ -2,12 +2,23 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { baseEnv, clearLargeCache, largeBranchy } from "./generateRepo.ts";
+import { baseEnv, clearLargeCacheEntry, largeBranchy } from "./generateRepo.ts";
 
 const dirs: string[] = [];
 afterAll(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
-  clearLargeCache();
+  // Scoped per-entry (P6a W3 finding), not clearLargeCache()'s full-directory wipe — this file's
+  // own repos are small (n<=600); a full wipe would also force test:integration's 100k/PAGE_SIZE
+  // templates to cold-rebuild on every `bun run test`.
+  clearLargeCacheEntry("largeBranchy", 600, { branchCount: 4, commitsPerRound: 20 });
+  clearLargeCacheEntry("largeBranchy", 300, { branchCount: 3, commitsPerRound: 15 });
+  clearLargeCacheEntry("largeBranchy", 200, { branchCount: 2, commitsPerRound: 10 });
+  clearLargeCacheEntry("largeBranchy", 200, {
+    branchCount: 2,
+    commitsPerRound: 10,
+    commitGraph: false,
+  });
+  clearLargeCacheEntry("largeBranchy", 400, { branchCount: 5, commitsPerRound: 20 });
 });
 
 function commitCount(dir: string): number {
@@ -38,7 +49,7 @@ describe("largeBranchy()", () => {
   });
 
   test("is deterministic: regenerating twice yields identical shas", () => {
-    clearLargeCache();
+    clearLargeCacheEntry("largeBranchy", 300, { branchCount: 3, commitsPerRound: 15 });
     const a = largeBranchy(300, { branchCount: 3, commitsPerRound: 15 });
     dirs.push(a.dir);
     const shaA = execFileSync("git", ["rev-parse", "main"], {
@@ -46,7 +57,7 @@ describe("largeBranchy()", () => {
       env: baseEnv(a.dir),
       encoding: "utf8",
     }).trim();
-    clearLargeCache();
+    clearLargeCacheEntry("largeBranchy", 300, { branchCount: 3, commitsPerRound: 15 });
     const b = largeBranchy(300, { branchCount: 3, commitsPerRound: 15 });
     dirs.push(b.dir);
     const shaB = execFileSync("git", ["rev-parse", "main"], {

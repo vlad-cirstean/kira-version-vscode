@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import {
   branchy,
-  clearLargeCache,
+  clearLargeCacheEntry,
   conflicting,
   crissCross,
   type GeneratedRepo,
@@ -111,7 +111,9 @@ describe("generateRepo shapes", () => {
 
 describe("generateRepo large()", () => {
   afterAll(() => {
-    clearLargeCache();
+    // Scoped to this describe's own n=200 entry (P6a W3 finding) — clearLargeCache()'s full-wipe
+    // would also destroy the 100k/PAGE_SIZE templates test:integration depends on for speed.
+    clearLargeCacheEntry("large", 200);
   });
 
   test("large(n) builds via fast-import and is cached on a second call", () => {
