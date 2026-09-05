@@ -518,7 +518,8 @@ function toSettingsSnapshot(): SettingsSnapshot {
  *  a real in-memory pipe using `structuredClone` (with transfer support) so posting on one end
  *  synchronously invokes the other, mimicking real `postMessage`/transfer-detach semantics
  *  closely enough that `createRpcClient`/`createRpcServer` cannot tell this from a real host
- *  channel. */
+ *  channel. Declares `bufferEncoding: "native"` (P15's W6): `structuredClone` genuinely carries
+ *  an `ArrayBuffer`, so nothing about this pipe's behaviour needed to change. */
 function createInMemoryChannelPair(): readonly [MessageChannelLike, MessageChannelLike] {
   let handlerA: ((message: unknown) => void) | undefined;
   let handlerB: ((message: unknown) => void) | undefined;
@@ -526,6 +527,7 @@ function createInMemoryChannelPair(): readonly [MessageChannelLike, MessageChann
   let closedB = false;
 
   const a: MessageChannelLike = {
+    bufferEncoding: "native",
     post(message, transfer) {
       if (closedA) return;
       const cloned = transfer
@@ -544,6 +546,7 @@ function createInMemoryChannelPair(): readonly [MessageChannelLike, MessageChann
     },
   };
   const b: MessageChannelLike = {
+    bufferEncoding: "native",
     post(message, transfer) {
       if (closedB) return;
       const cloned = transfer
