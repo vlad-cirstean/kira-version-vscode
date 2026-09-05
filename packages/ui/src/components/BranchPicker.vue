@@ -29,6 +29,7 @@ const props = defineProps<{ refs: RefsState; ops: OpsState }>();
 
 const isOpen = ref(false);
 const rootEl = ref<HTMLElement | null>(null);
+const triggerEl = ref<HTMLButtonElement | null>(null);
 const filter = ref("");
 
 const triggerLabel = computed(() => {
@@ -66,13 +67,25 @@ function toggle(): void {
   if (!isOpen.value) close();
 }
 
-async function checkoutBranch(row: RefRow): Promise<void> {
+/** W20: `close()` unmounts the whole panel, including whatever row button the click just
+ *  focused — by the time `runCheckout` might open `CheckoutDialog.vue`, that button is gone and
+ *  `useModalFocus`'s own invoker capture would land on nothing (the browser's own fallback,
+ *  `<body>`). Moving focus to the trigger *first* — a stable control that survives the panel's
+ *  own close — gives that capture something real to return to, the same "make sure a persisting
+ *  anchor holds focus before the invoking control disappears" fix `RowContextMenu.vue`'s own W20
+ *  change makes for the row menu. */
+function closeForCheckout(): void {
+  triggerEl.value?.focus();
   close();
+}
+
+async function checkoutBranch(row: RefRow): Promise<void> {
+  closeForCheckout();
   await props.ops.runCheckout(row.shortName, "switch");
 }
 
 async function checkoutRemote(row: RefRow): Promise<void> {
-  close();
+  closeForCheckout();
   await props.ops.runCheckout(remoteCheckoutTarget(row, props.refs.branches.value), "switch");
 }
 
@@ -173,6 +186,7 @@ onBeforeUnmount(() => {
 <template>
   <div ref="rootEl" class="kv-branch-picker" @keydown.escape="close">
     <button
+      ref="triggerEl"
       type="button"
       class="kv-branch-trigger"
       aria-haspopup="true"

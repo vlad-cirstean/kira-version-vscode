@@ -350,6 +350,11 @@ function applyOp(
       return { result: opOk(session), changed: "refsChanged" };
     }
     case "branchDelete": {
+      if (!op.force && (scenario.notFullyMergedBranches ?? []).includes(op.name)) {
+        return {
+          result: opError(session, "NotFullyMerged", `branch '${op.name}' is not fully merged`),
+        };
+      }
       const idx = session.refs.branches.findIndex((b) => b.shortName === op.name);
       if (idx === -1)
         return { result: opError(session, "NotFound", `branch '${op.name}' not found`) };
@@ -656,6 +661,23 @@ async function emitRange(
   return nextBase;
 }
 
+/** One `op.run` call as the mock recorded it — the wire-level `OpRequest` the UI actually sent,
+ *  paired with the `OpResult` it got back. P6 W19's own "argv contract" analogue for a mock with
+ *  no real git spawn behind it (`RowContextMenu`/`BranchPicker`/dialog specs assert on this the
+ *  same way `packages/git`'s own unit tests assert on real argv — see `refOps.spec.ts`'s and
+ *  `undo.spec.ts`'s own doc comments). */
+export interface RecordedOp {
+  readonly request: OpRequest;
+  readonly result: OpResult;
+}
+
+/** One `undo.run` call as the mock recorded it — kept distinct from `RecordedOp` since `undo.run`
+ *  is its own RPC entry, not an `OpRequest` variant. */
+export interface RecordedUndo {
+  readonly id: string;
+  readonly result: OpResult;
+}
+
 /** `createHandlers`'s own `ServerHandlers` plus a way to read its private `activeRepoId` closure
  *  variable from outside (P4 W12) — `createMockBridge`'s `triggerRefsChanged` hook needs to know
  *  which repo, if any, is open, without duplicating that tracking at its own level. */
@@ -664,6 +686,19 @@ interface MockHandlers {
   getActiveRepoId(): string | null;
   /** P5 W12's own hook — see `HarnessEditorAction`'s doc comment. */
   getLastEditorAction(): HarnessEditorAction | undefined;
+  /** P6 W19's own hook — see `RecordedOp`'s doc comment. */
+  getLastOp(): RecordedOp | undefined;
+  /** P6 W19's own hook — see `RecordedUndo`'s doc comment. */
+  getLastUndo(): RecordedUndo | undefined;
+  /** P6 W19: `conflicted.ts`'s own doc comment already flagged this gap — "Continue re-enables
+   *  once the mock's `op.run`/`status.get` loop reflects [conflicts] resolved, which this
+   *  scenario cannot fake without a real index". This is that fake: marks one conflicted path
+   *  resolved on the active repo's `inProgress` (as `git add <path>` would), decrementing
+   *  `unmergedCount`, and fires the same `worktreeChanged` event a real index touch would —
+   *  `OpsState.refreshStatus`'s own `repo.changed` subscription is what actually re-enables
+   *  `ConflictBanner.vue`'s Continue button, exactly as `conflictBanner.spec.ts` needs to prove
+   *  happens with no manual refresh. Returns whether there was a conflicted path to resolve. */
+  resolveOneConflictedPath(): boolean;
 }
 
 function createHandlers(
@@ -673,6 +708,8 @@ function createHandlers(
   const sessions = new Map<string, RepoSession>();
   let activeRepoId: string | null = null;
   let lastEditorAction: HarnessEditorAction | undefined;
+  let lastOp: RecordedOp | undefined;
+  let lastUndo: RecordedUndo | undefined;
 
   const appInit: RequestHandler<"app.init"> = async () => ({
     host: "harness",
@@ -957,6 +994,7 @@ function createHandlers(
     // undoable, even though every `applyOp` branch above already agrees with that table.
     if (UNDO_POLICY[op.kind].kind !== "undoable") session.pendingUndo = null;
     if (changed) notifyChanged(repoId, changed);
+    lastOp = { request: op, result };
     return result;
   };
 
@@ -969,13 +1007,32 @@ function createHandlers(
     const session = requireSession(sessions, repoId);
     const pending = session.pendingUndo;
     if (!pending || pending.snapshot.id !== id) {
-      return opError(session, "NotFound", "This undo record is no longer available.");
+      const result = opError(session, "NotFound", "This undo record is no longer available.");
+      lastUndo = { id, result };
+      return result;
     }
     pending.restore();
     session.pendingUndo = null;
     notifyChanged(repoId, "refsChanged");
-    return opOk(session);
+    const result = opOk(session);
+    lastUndo = { id, result };
+    return result;
   };
+
+  function resolveOneConflictedPath(): boolean {
+    if (activeRepoId === null) return false;
+    const session = sessions.get(activeRepoId);
+    const inProgress = session?.inProgress;
+    if (!session || !inProgress || inProgress.conflictedPaths.length === 0) return false;
+    const [, ...rest] = inProgress.conflictedPaths;
+    session.inProgress = {
+      ...inProgress,
+      conflictedPaths: rest,
+      unmergedCount: Math.max(0, inProgress.unmergedCount - 1),
+    };
+    notifyChanged(activeRepoId, "worktreeChanged");
+    return true;
+  }
 
   return {
     serverHandlers: {
@@ -1008,6 +1065,9 @@ function createHandlers(
     },
     getActiveRepoId: () => activeRepoId,
     getLastEditorAction: () => lastEditorAction,
+    getLastOp: () => lastOp,
+    getLastUndo: () => lastUndo,
+    resolveOneConflictedPath,
   };
 }
 
@@ -1023,6 +1083,18 @@ export interface MockBridge extends Transport {
    *  `undefined` if neither has fired yet this session — `main.ts` exposes this as
    *  `window.__kiraHarness.lastEditorAction` for W13's Playwright suite. */
   getLastEditorAction(): HarnessEditorAction | undefined;
+  /** P6 W19: the most recent `op.run` call the mock recorded (the `OpRequest` the UI actually
+   *  sent, and the `OpResult` it got back) — `main.ts` exposes this as
+   *  `window.__kiraHarness.lastOp`, letting a Playwright spec assert on the wire-level "argv"
+   *  (e.g. `branchDelete`'s `force`, `tagCreate`'s `message`/`force`) the same way `packages/git`'s
+   *  own unit tests assert on real argv. */
+  getLastOp(): RecordedOp | undefined;
+  /** P6 W19: the most recent `undo.run` call the mock recorded — `main.ts` exposes this as
+   *  `window.__kiraHarness.lastUndo`. */
+  getLastUndo(): RecordedUndo | undefined;
+  /** P6 W19: `main.ts` exposes this as `window.__kiraHarness.resolveOneConflictedPath` — see
+   *  `MockHandlers`'s own doc comment on why this exists. */
+  resolveOneConflictedPath(): boolean;
 }
 
 export function createMockBridge(scenarioName: string): MockBridge {
@@ -1032,10 +1104,14 @@ export function createMockBridge(scenarioName: string): MockBridge {
   // exist — broken by handing it an indirection that starts as a no-op and is pointed at the
   // real `server.emit` the moment `server` exists, a few lines below.
   let emitChanged: (repoId: string, kind: "refsChanged" | "worktreeChanged") => void = () => {};
-  const { serverHandlers, getActiveRepoId, getLastEditorAction } = createHandlers(
-    scenario,
-    (repoId, kind) => emitChanged(repoId, kind),
-  );
+  const {
+    serverHandlers,
+    getActiveRepoId,
+    getLastEditorAction,
+    getLastOp,
+    getLastUndo,
+    resolveOneConflictedPath,
+  } = createHandlers(scenario, (repoId, kind) => emitChanged(repoId, kind));
   const server = createRpcServer(serverChannel, serverHandlers);
   const client = createRpcClient(clientChannel);
   emitChanged = (repoId, kind) => server.emit("repo.changed", { repoId, kind });
@@ -1052,5 +1128,8 @@ export function createMockBridge(scenarioName: string): MockBridge {
       server.emit("repo.changed", { repoId, kind: "refsChanged" });
     },
     getLastEditorAction,
+    getLastOp,
+    getLastUndo,
+    resolveOneConflictedPath,
   };
 }

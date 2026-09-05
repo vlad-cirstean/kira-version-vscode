@@ -164,10 +164,23 @@ function confirm(): void {
   margin-top: var(--kv-space-2);
 }
 
+/* W20: was `background: var(--kv-focus-border); color: var(--kv-app-bg)` — `focusBorder` is a
+ * VS Code outline-ring token, not a filled-button one, and pairing it with the editor background
+ * as text colour fell to 3.95:1 against vscode-dark's own default focus-border blue (axe's own
+ * `color-contrast` scan of `RevertDialog.vue`'s enabled "Revert" button, the one primary button
+ * this file's own dialogs ever render enabled rather than disabled at rest). `--kv-button-bg`/
+ * `--kv-button-fg` are the tokens this app already uses for exactly this — a real, dedicated
+ * filled-button pair (`NoRepositoryPanel.vue`'s own buttons) — reused here rather than inventing
+ * a third. */
 .kv-modal-button--primary {
-  background: var(--kv-focus-border);
-  color: var(--kv-app-bg);
-  border-color: var(--kv-focus-border);
+  background: var(--kv-button-bg);
+  color: var(--kv-button-fg);
+  border-color: var(--kv-button-bg);
+}
+
+.kv-modal-button--primary:hover:not(:disabled) {
+  background: var(--kv-button-hover-bg);
+  border-color: var(--kv-button-hover-bg);
 }
 
 .kv-modal-button--primary:disabled {

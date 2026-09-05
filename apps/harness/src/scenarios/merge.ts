@@ -35,6 +35,15 @@ const mergeCommit = decorated[0];
 if (!mergeCommit) throw new Error("merge scenario: topology() produced no commits");
 const mergeSha = mergeCommit.sha;
 
+// P6 W19's own "predicted conflict" case: `side-a` is an ordinary, single-parent commit —
+// `defaultRevertPreflight` would otherwise call it a clean, un-prompted revert, so this scenario
+// states an explicit `preflight.revert` fixture for it instead (`revert.spec.ts`'s own doc
+// comment on why: no other scenario has a reason to name a revert-conflict fixture by hand).
+const sideACommit = decorated.find((c) => c.subject === "side-a");
+if (!sideACommit) throw new Error("merge scenario: no commit named 'side-a'");
+const sideASha = sideACommit.sha;
+const REVERT_CONFLICT_PATHS = ["a-only.ts"];
+
 function detailFixture(body: string, files: CommitDetailFixture["files"]): CommitDetailFixture {
   return { body, trailers: [], signature: { status: "N", signer: "" }, files };
 }
@@ -104,6 +113,21 @@ export const merge: Scenario = {
     [diffKey(mergeSha, "c-only.ts")]: {
       kind: "text",
       hunks: [hunk(1, 1, 0, 0, [del("removed c", 1)])],
+    },
+  },
+  preflight: {
+    revert: {
+      [sideASha]: {
+        shas: [sideASha],
+        mainlineRequired: [],
+        dirtyPaths: [],
+        inProgress: null,
+        prediction: { kind: "conflicts", paths: REVERT_CONFLICT_PATHS },
+        predictedFor: sideASha,
+        detachedHead: false,
+        verdict: "willConflict",
+        blockers: [],
+      },
     },
   },
 };

@@ -123,4 +123,12 @@ export interface Scenario {
     readonly checkout?: Readonly<Record<string, CheckoutPreflight>>;
     readonly revert?: Readonly<Record<string, RevertPreflight>>;
   };
+  /**
+   * P6 W19's `refOps.spec.ts`: branch names `op.run`'s `branchDelete` refuses with `NotFullyMerged`
+   * unless `force` is set — `mockBridge.ts`'s `applyOp` has no real merge-ancestry graph to check
+   * against (the mock has no commit-graph writer at all, this file's own doc comment), so a
+   * scenario states which names should behave as if git's own ff-check had failed, the same way
+   * `preflight`'s hazard-shaped fixtures state an outcome rather than deriving one.
+   */
+  readonly notFullyMergedBranches?: readonly string[];
 }

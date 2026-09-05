@@ -130,7 +130,16 @@ const PATH_DISPLAY_CAP = 20;
 .kv-conflict-banner {
   flex-shrink: 0;
   padding: var(--kv-space-2) var(--kv-space-3);
-  background-color: var(--kv-overlay-bg);
+  /* W20: not `--kv-overlay-bg` — that token is a translucent modal-backdrop scrim (rgba black at
+   * a fixed alpha, meant to sit *behind* an opaque dialog, not to host text of its own); over a
+   * light theme's own bright app background it blends to a middling gray that this banner's own
+   * `--kv-description-fg`/`--kv-diff-deleted-fg` text (both tuned for contrast against a real
+   * panel background) fails against (axe's own `color-contrast` scan, vscode-light/
+   * high-contrast-light). This banner is persistent chrome, not a transient dimmer, so it gets
+   * the same opaque panel background every other persistent, text-bearing surface in this app
+   * already renders correctly on.
+   */
+  background-color: var(--kv-panel-bg);
   border-bottom: 1px solid var(--kv-panel-border);
 }
 

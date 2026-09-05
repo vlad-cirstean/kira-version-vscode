@@ -32,15 +32,24 @@ function shaOf(subject: string): string {
   return commit.sha;
 }
 
-function branchRow(name: string, isHead: boolean, objectId = shaOf(name)): RefRow {
+function branchRow(
+  name: string,
+  isHead: boolean,
+  objectId = shaOf(name),
+  // P6 W19's `undo.spec.ts`: `feature-carry` carries real upstream-tracking metadata precisely so
+  // deleting it and undoing has something beyond the bare ref to prove came back — the mock's own
+  // analogue of `repoService.test.ts`'s real-git "branchDelete undo restores upstream tracking
+  // config" test, at the UI/wire layer instead of `packages/git`'s.
+  tracking?: { readonly upstream: string; readonly track: RefRow["track"] },
+): RefRow {
   return {
     refname: `refs/heads/${name}`,
     kind: "branch",
     shortName: name,
     objectId,
     peeledObjectId: undefined,
-    upstream: undefined,
-    track: undefined,
+    upstream: tracking?.upstream,
+    track: tracking?.track,
     committerDate: 1_700_003_600,
     isHead,
     checkedOutIn: undefined,
@@ -113,13 +122,20 @@ export const dirty: Scenario = {
     branches: [
       branchRow("main", true),
       branchRow("feature-clean", false),
-      branchRow("feature-carry", false),
+      branchRow("feature-carry", false, undefined, {
+        upstream: "origin/feature-carry",
+        track: { ahead: 0, behind: 2 },
+      }),
       // These two exist only as pre-flight targets above — `feature-blocked-tracked`'s and
       // `feature-blocked-untracked`'s own `objectId` resolve to `main`'s tip rather than each
       // needing its own commit; the fixture only needs a real ref for the branch picker to
       // list, not a distinct history.
       branchRow("feature-blocked-tracked", false, shaOf("main")),
       branchRow("feature-blocked-untracked", false, shaOf("main")),
+      // P6 W19's `refOps.spec.ts`: the not-fully-merged force-delete path — see
+      // `notFullyMergedBranches` below and `types.ts`'s own doc comment on why this is a named
+      // fixture rather than something the mock derives from real ancestry.
+      branchRow("feature-unmerged", false, shaOf("main")),
     ],
     remoteBranches: [],
     tags: [],
@@ -133,4 +149,5 @@ export const dirty: Scenario = {
     inProgress: null,
   },
   preflight: { checkout: preflightByTarget },
+  notFullyMergedBranches: ["feature-unmerged"],
 };

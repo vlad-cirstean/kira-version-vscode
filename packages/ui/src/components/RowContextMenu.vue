@@ -24,6 +24,14 @@ const emit = defineEmits<{
 const rootEl = ref<HTMLDivElement | null>(null);
 const menuEl = ref<HTMLDivElement | null>(null);
 
+/** W20: "focus returned to the row" — the same capture-on-open/restore-on-close shape
+ *  `modalFocus.ts` already gives every dialog, applied here since this menu is not a dialog and
+ *  does not go through that helper. Captured at mount, before `focusItem` below moves focus onto
+ *  the first enabled item, so this is whatever held focus the instant the menu opened — the row
+ *  itself for the keyboard path (`Shift+F10`/the Menu key only ever fire from an already-focused
+ *  row), which is the path W20 actually cares about. */
+let invoker: HTMLElement | null = null;
+
 const flatItems = computed(() => props.sections.flatMap((section) => section.items));
 
 function itemId(id: string): string {
@@ -118,6 +126,7 @@ function onDocumentPointerDown(event: PointerEvent): void {
 const style = ref({ left: `${props.x}px`, top: `${props.y}px` });
 
 onMounted(() => {
+  invoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   document.addEventListener("pointerdown", onDocumentPointerDown, true);
   focusItem(focusedId.value);
   requestAnimationFrame(() => {
@@ -135,6 +144,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   document.removeEventListener("pointerdown", onDocumentPointerDown, true);
+  invoker?.focus();
 });
 </script>
 

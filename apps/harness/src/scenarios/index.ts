@@ -3,6 +3,7 @@ import { badges } from "./badges.ts";
 import { ceiling } from "./ceiling.ts";
 import { clean } from "./clean.ts";
 import { conflicted } from "./conflicted.ts";
+import { conflictedNoResolve } from "./conflictedNoResolve.ts";
 import { detail } from "./detail.ts";
 import { dirty } from "./dirty.ts";
 import { goToFile } from "./goToFile.ts";
@@ -44,6 +45,7 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
 const HIDDEN_SCENARIOS: Readonly<Record<string, () => Scenario>> = {
   ceiling,
   pagedBranch,
+  conflictedNoResolve: () => conflictedNoResolve,
 };
 
 export function loadScenario(name: string): Scenario {
