@@ -52,7 +52,9 @@ test.describe("checkout pre-flight", () => {
     await expect(modal).toBeVisible();
     const files = await modal.locator(".kv-modal-file-list li").allTextContents();
     expect(files).toEqual(["src/tracked.ts", "README.md"]);
-    await expect(modal.getByRole("button", { name: "Discard changes and check out" })).toBeVisible();
+    await expect(
+      modal.getByRole("button", { name: "Discard changes and check out" }),
+    ).toBeVisible();
     await expect(modal.getByRole("button", { name: "Cancel" })).toBeVisible();
     // §7.5/P6: no stash route exists yet (a future version's own addition, per the dialog's own
     // disclosure note) — there is no actionable stash button/route, only Discard and Cancel.
@@ -91,7 +93,10 @@ test.describe("checkout pre-flight", () => {
     await ready(page);
     await openPicker(page);
 
-    await page.locator(".kv-branch-row", { hasText: "topic" }).locator(".kv-branch-row-main").click();
+    await page
+      .locator(".kv-branch-row", { hasText: "topic" })
+      .locator(".kv-branch-row-main")
+      .click();
 
     const modal = dialog(page);
     await expect(modal).toBeVisible();

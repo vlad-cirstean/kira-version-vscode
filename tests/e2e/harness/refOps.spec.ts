@@ -59,7 +59,9 @@ test.describe("branch operations", () => {
       checkout: true,
       track: undefined,
     });
-    expect((lastOp?.request as { startPoint: string }).startPoint.startsWith(shownSha)).toBe(true);
+    expect(lastOp).toBeDefined();
+    const request = lastOp?.request as { startPoint: string };
+    expect(request.startPoint.startsWith(shownSha)).toBe(true);
     expect(lastOp?.result.ok).toBe(true);
     // `checkout: true` really switched — the toolbar reflects the new branch.
     await expect(page.locator(".kv-branch-trigger-label")).toHaveText("new-feature");
@@ -112,7 +114,11 @@ test.describe("branch operations", () => {
     await page.getByRole("menuitem", { name: "Delete branch" }).click();
 
     let lastOp = await page.evaluate(() => window.__kiraHarness.lastOp);
-    expect(lastOp?.request).toEqual({ kind: "branchDelete", name: "feature-unmerged", force: false });
+    expect(lastOp?.request).toEqual({
+      kind: "branchDelete",
+      name: "feature-unmerged",
+      force: false,
+    });
     expect(lastOp?.result.ok).toBe(false);
     expect(lastOp?.result.error?.kind).toBe("NotFullyMerged");
     // Still present — the plain delete did not remove it.
@@ -123,7 +129,11 @@ test.describe("branch operations", () => {
     await confirm.getByRole("button", { name: "Force delete" }).click();
 
     lastOp = await page.evaluate(() => window.__kiraHarness.lastOp);
-    expect(lastOp?.request).toEqual({ kind: "branchDelete", name: "feature-unmerged", force: true });
+    expect(lastOp?.request).toEqual({
+      kind: "branchDelete",
+      name: "feature-unmerged",
+      force: true,
+    });
     expect(lastOp?.result.ok).toBe(true);
     await expect(page.locator(".kv-branch-row", { hasText: "feature-unmerged" })).toHaveCount(0);
   });

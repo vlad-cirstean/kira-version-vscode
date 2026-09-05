@@ -66,7 +66,11 @@ type HarnessOpRequest =
 interface HarnessOpResult {
   readonly ok: boolean;
   readonly error: { readonly kind: string; readonly message: string } | undefined;
-  readonly undo: { readonly id: string; readonly label: string; readonly recoverySha: string } | null;
+  readonly undo: {
+    readonly id: string;
+    readonly label: string;
+    readonly recoverySha: string;
+  } | null;
 }
 
 declare global {
@@ -82,7 +86,9 @@ declare global {
       readonly lastEditorAction: HarnessEditorAction | undefined;
       /** P6 W19: declared once, project-wide, here — `refOps.spec.ts`/`undo.spec.ts` read this
        *  without repeating the declaration. */
-      readonly lastOp: { readonly request: HarnessOpRequest; readonly result: HarnessOpResult } | undefined;
+      readonly lastOp:
+        | { readonly request: HarnessOpRequest; readonly result: HarnessOpResult }
+        | undefined;
       /** P6 W19: ditto, for `undo.run`. */
       readonly lastUndo: { readonly id: string; readonly result: HarnessOpResult } | undefined;
       /** P6 W19: `conflictBanner.spec.ts`'s own hook — see `mockBridge.ts`'s

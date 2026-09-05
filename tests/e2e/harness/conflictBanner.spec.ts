@@ -18,9 +18,7 @@ function banner(page: Page) {
 }
 
 test.describe("conflict banner (§7.11)", () => {
-  test("appears with role=status, names the operation and the unmerged count", async ({
-    page,
-  }) => {
+  test("appears with role=status, names the operation and the unmerged count", async ({ page }) => {
     await page.goto("/?scenario=conflicted");
     await ready(page);
 
@@ -91,9 +89,7 @@ test.describe("conflict banner (§7.11)", () => {
     await expect(region).toBeHidden();
   });
 
-  test("Abort clears the banner outright, even with unmerged paths remaining", async ({
-    page,
-  }) => {
+  test("Abort clears the banner outright, even with unmerged paths remaining", async ({ page }) => {
     await page.goto("/?scenario=conflicted");
     await ready(page);
     const region = banner(page);

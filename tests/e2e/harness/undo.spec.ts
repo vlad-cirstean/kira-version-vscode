@@ -103,7 +103,10 @@ test.describe("undo (§7.12)", () => {
     // `checkout` is `notUndoable` (`UNDO_POLICY`) — running it clears the slot outright, with no
     // undo ever run.
     await openPicker(page);
-    await page.locator(".kv-branch-row", { hasText: "feature-carry" }).locator(".kv-branch-row-main").click();
+    await page
+      .locator(".kv-branch-row", { hasText: "feature-carry" })
+      .locator(".kv-branch-row-main")
+      .click();
 
     await expect(page.locator(".kv-undo")).toHaveCount(0);
   });

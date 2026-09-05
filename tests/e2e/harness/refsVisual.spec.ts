@@ -105,9 +105,7 @@ test.describe("visual baseline: dialogs in their hazardous state", () => {
       await expect(page).toHaveScreenshot(`revert-dialog-conflict-${kind}.png`);
     });
 
-    test(`TagDialog — force-move would silently drop the annotation: ${kind}`, async ({
-      page,
-    }) => {
+    test(`TagDialog — force-move would silently drop the annotation: ${kind}`, async ({ page }) => {
       await page.goto(`/?scenario=tags&theme=${kind}`);
       await ready(page);
       const row = page.locator(".slick-row", { hasText: "main" }).first();

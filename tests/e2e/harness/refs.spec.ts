@@ -96,7 +96,10 @@ test.describe("branch picker", () => {
     await expect(page.locator(".kv-branch-trigger-label")).toHaveText("main");
     await openPicker(page);
 
-    await page.locator(".kv-branch-row", { hasText: "feature-clean" }).locator(".kv-branch-row-main").click();
+    await page
+      .locator(".kv-branch-row", { hasText: "feature-clean" })
+      .locator(".kv-branch-row-main")
+      .click();
 
     await expect(page.locator(".kv-modal-backdrop")).toHaveCount(0);
     await expect(page.locator(".kv-branch-panel")).toBeHidden();
