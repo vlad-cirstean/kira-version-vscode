@@ -8,12 +8,16 @@
  * ("transfers, not clones") versus without one, and what `appendPacked` costs on the receiving
  * side — the whole round trip a real host's `postMessage` performs every page.
  *
- * `cloneMsNoTransfer` is why this item exists at all rather than folding into W16 or
- * `historyPipeline.ts`: `Webview.postMessage` (VS Code, V1) exposes no transfer list in
- * `@types/vscode`, which implies a full structured clone of every `ArrayBuffer` on that
- * boundary. §5.1 gives the panel 300ms to first paint and 400ms to a first page; if that clone
- * cost is large, it belongs in that budget's accounting from P3 onward, not discovered by P4
- * while it is also standing up a renderer.
+ * `cloneMsNoTransfer` is why this item existed before P15: `Webview.postMessage` was assumed to
+ * expose no transfer list in `@types/vscode`, implying a full structured clone of every
+ * `ArrayBuffer` on that boundary. P15's W1 finding replaced that assumption with a measured one —
+ * the real cost is not a bigger clone, it is `JSON.stringify`/`JSON.parse` of a base64 string
+ * (`toWireSafe`'s `number[]` predecessor was worse still) — so `hostBoundaryMs`/`hostWireBytes`
+ * below are what actually belongs in §5.1's budget from P3 onward, and `cloneMsNoTransfer` stays
+ * only as the "what it would have cost if VS Code really did structured-clone this" number P4c's
+ * own accounting wanted.
+ *
+ * §5.1 gives the panel 300ms to first paint and 400ms to a first page.
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -21,12 +25,17 @@ import { CommitStore, packedTransferList } from "../../packages/core/src/store/c
 import { locateGit } from "../../packages/git/src/discovery.ts";
 import { openLogSession } from "../../packages/git/src/logSession.ts";
 import { NodeProcessRunner } from "../../packages/git/src/nodeProcessRunner.ts";
+import { decode, encode, VSCODE_WEBVIEW_BUFFER_ENCODING } from "../../packages/ipc/src/codec.ts";
 import { largeBranchy } from "../fixtures/generateRepo.ts";
 
 const BASELINE_PATH = join(import.meta.dir, "streamRoundTrip.budget.json");
 const REGRESSION_TOLERANCE = 0.2; // 20%, matching run.ts's and historyPipeline.ts's §5.1 convention
 const COMMIT_COUNT = 100_000;
 const PAGE_SIZE = 5000;
+/** Production's `RepoService.CHUNK_ROWS` (`packages/git/src/repoService.ts`) — kept as a literal
+ *  rather than imported since perf harnesses stay independent of the modules they measure
+ *  (`historyPipeline.ts`'s own convention). */
+const CHUNK_ROWS = 500;
 
 interface Measurement {
   readonly packMs: number;
@@ -36,6 +45,16 @@ interface Measurement {
   readonly wireBytesFirstPage: number;
   readonly wireBytes100k: number;
   readonly roundTripMs100k: number;
+  /** P15 W8: the real host boundary — `encode` (declaring `VSCODE_WEBVIEW_BUFFER_ENCODING`) ->
+   *  `JSON.stringify` -> `JSON.parse` -> `decode` -> `appendPacked`, over one 5,000-row page as
+   *  ten 500-row chunks (production's `CHUNK_ROWS`), exactly as `host-vscode/src/transport.ts`
+   *  and `webview/main.ts` put a real page through today. */
+  readonly hostBoundaryMs: number;
+  /** The `JSON.stringify`ed string's own byte length, summed over the same ten chunks — the
+   *  thing an actual `postMessage` call moves across the boundary under `"base64"`. Deterministic
+   *  for a given page, so a 20% tolerance on it is a real tripwire against the payload quietly
+   *  growing rather than a flaky one. */
+  readonly hostWireBytes: number;
 }
 
 function transferListBytes(chunk: ReturnType<CommitStore["packSlice"]>): number {
@@ -108,6 +127,45 @@ async function measure(): Promise<Measurement> {
     );
   }
 
+  // P15 W8: one 5,000-row page as ten 500-row chunks (production's `CHUNK_ROWS`), each put
+  // through the real host boundary — encode -> JSON.stringify -> JSON.parse -> decode. Not the
+  // "native" structured-clone path measured above: `host-vscode`'s WebviewView declares
+  // `VSCODE_WEBVIEW_BUFFER_ENCODING` ("base64", P15's W1 finding), so this is what a real page
+  // costs today, not what a hypothetical native transfer would have cost. `packSlice` and
+  // `appendPacked` are deliberately *outside* the timed section — each already has its own gated
+  // metric (`packMs`, `appendMs`/V5) — so `hostBoundaryMs` isolates exactly the cost W1's finding
+  // is about: turning buffers into something JSON can carry, and back.
+  const hostChunks: ReturnType<CommitStore["packSlice"]>[] = [];
+  {
+    let cursor = 0;
+    for (let from = 0; from < PAGE_SIZE; from += CHUNK_ROWS) {
+      const to = Math.min(from + CHUNK_ROWS, PAGE_SIZE);
+      const chunk = store.packSlice(from, to, cursor);
+      cursor += chunk.dictionary.length;
+      hostChunks.push(chunk);
+    }
+  }
+
+  let hostWireBytes = 0;
+  const hostDecoded: ReturnType<CommitStore["packSlice"]>[] = [];
+  const hostBoundaryStart = performance.now();
+  for (const chunk of hostChunks) {
+    const { payload } = encode(chunk, VSCODE_WEBVIEW_BUFFER_ENCODING);
+    const wireString = JSON.stringify(payload);
+    hostWireBytes += Buffer.byteLength(wireString, "utf8");
+    const parsed = JSON.parse(wireString);
+    hostDecoded.push(
+      decode<ReturnType<CommitStore["packSlice"]>>(parsed, VSCODE_WEBVIEW_BUFFER_ENCODING),
+    );
+  }
+  const hostBoundaryMs = performance.now() - hostBoundaryStart;
+
+  const hostReceiver = new CommitStore();
+  for (const decoded of hostDecoded) hostReceiver.appendPacked(decoded);
+  if (hostReceiver.rowCount !== PAGE_SIZE) {
+    throw new Error(`host boundary: expected ${PAGE_SIZE} rows, received ${hostReceiver.rowCount}`);
+  }
+
   return {
     packMs,
     cloneMs,
@@ -116,6 +174,8 @@ async function measure(): Promise<Measurement> {
     wireBytesFirstPage,
     wireBytes100k,
     roundTripMs100k,
+    hostBoundaryMs,
+    hostWireBytes,
   };
 }
 
@@ -128,7 +188,7 @@ function saveBaseline(measurement: Measurement): void {
   writeFileSync(BASELINE_PATH, `${JSON.stringify(measurement, null, 2)}\n`);
 }
 
-const GATED_METRICS = ["packMs", "cloneMs", "appendMs"] as const;
+const GATED_METRICS = ["packMs", "cloneMs", "appendMs", "hostBoundaryMs", "hostWireBytes"] as const;
 const RECORDED_ONLY_METRICS = [
   "cloneMsNoTransfer",
   "wireBytesFirstPage",
