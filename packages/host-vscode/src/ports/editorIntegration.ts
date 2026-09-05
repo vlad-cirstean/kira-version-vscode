@@ -10,8 +10,12 @@
  *    immutable, so this provider fires no `onDidChange` and needs no emitter.
  * 3. `vscode.diff` is always given two virtual (or empty) URIs, never the live working file —
  *    both sides of a historical diff are historical.
- * 4. `capabilities` is the constant below; the conflict-resolution capability (§7.11, D15) is
- *    not added until P6, where it has a consumer.
+ * 4. `capabilities` is the constant below; `resolveConflict` (§7.11, D15) is two commands and no
+ *    UI of ours — `workbench.view.scm` to reveal the SCM view, then `vscode.open` on the
+ *    conflicted file, which is what routes it into the three-way merge editor when the user has
+ *    it enabled and into `merge-conflict`'s inline decorations when they do not. We choose
+ *    neither; both are the user's own configuration, and picking for them would be exactly the
+ *    reimplementation §7.11 forbids.
  */
 import type {
   Disposable,
@@ -46,7 +50,11 @@ function toUri(ref: DocumentRef): vscode.Uri {
 }
 
 export class VsCodeEditorIntegration implements EditorIntegration {
-  readonly capabilities: EditorCapabilities = { openInEditor: true, goToFile: true };
+  readonly capabilities: EditorCapabilities = {
+    openInEditor: true,
+    goToFile: true,
+    resolveConflict: true,
+  };
   #source: VirtualDocumentSource | undefined;
 
   registerVirtualDocuments(source: VirtualDocumentSource): Disposable {
@@ -84,5 +92,10 @@ export class VsCodeEditorIntegration implements EditorIntegration {
     await vscode.window.showTextDocument(doc, {
       selection: new vscode.Range(position, position),
     });
+  }
+
+  async resolveConflict(req: { readonly path: string }): Promise<void> {
+    await vscode.commands.executeCommand("workbench.view.scm");
+    await vscode.commands.executeCommand("vscode.open", vscode.Uri.file(req.path));
   }
 }
