@@ -144,3 +144,5 @@ export {
   splitLimitedFields,
   splitRecords,
 } from "./util/nulSplit.ts";
+export type { UndoPolicy, UndoRecord } from "./undo/slot.ts";
+export { UNDO_POLICY, UndoSlot } from "./undo/slot.ts";
