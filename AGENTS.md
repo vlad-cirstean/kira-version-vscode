@@ -146,7 +146,11 @@ anticipate, add it to the tree in the same commit — the spec stays the map.
 ## Running the suites
 
 - `bun run check`, `bun run test`, `bun run test:e2e` (the `harness` project) and `bun run
-  test:perf` all run here as-is; `PLAYWRIGHT_BROWSERS_PATH` is preset.
+  test:perf` all run here as-is; `PLAYWRIGHT_BROWSERS_PATH` is preset. `test` still means
+  everything; `test:unit` (~5 s) is the inner loop to run after every edit, `test:integration` is
+  the slower real-`git` lane the usual "implement, then test once" cadence already covers.
+- A `generateRepo.ts` change makes the next `test:integration` rebuild `tests/fixtures/.cache/`
+  and run slower than steady state; `clearLargeCache()` forces that rebuild on demand.
 - The VS Code tier is `bun run test:e2e:vscode` — it starts Xvfb itself on Linux and is a
   passthrough on macOS.
 - macOS stays the authoritative platform for results (D27); the visual baselines already in the
