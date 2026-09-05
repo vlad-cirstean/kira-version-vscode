@@ -17,6 +17,34 @@ const THEME_KINDS = [
   "vscode-high-contrast-light",
 ] as const;
 
+/**
+ * P6a W6 — one theme per surface runs axe's full (default) ruleset; the other three run only its
+ * `cat.color`-tagged rules (`color-contrast`, `link-in-text-block`, `color-contrast-enhanced` in
+ * axe-core@4.13.0 — the *tag*, not a hand-listed id, so a future axe-core release that adds a
+ * colour-dependent rule is still picked up), minus `color-contrast-enhanced` — see
+ * `COLOR_ONLY_DISABLED_RULES` below for why. Themes here only change CSS custom properties and a
+ * `body` class — never the DOM, roles, accessible names, ARIA relationships, tab order or
+ * heading structure, which is what every other rule inspects. Verified, not assumed: the premise
+ * probe recorded in `docs/plans/P6a-test-perf.md`'s Findings ran the full ruleset in all four
+ * themes for every surface in both a11y files and found the non-`cat.color` violation sets
+ * identical everywhere, so `FULL_SCAN_THEME` is an arbitrary pick among four equivalent themes,
+ * not a special one.
+ */
+const FULL_SCAN_THEME: (typeof THEME_KINDS)[number] = "vscode-dark";
+
+/**
+ * `color-contrast-enhanced` (WCAG AAA, a 7:1 ratio) ships in axe-core with `enabled: false` —
+ * axe's default ruleset (what `FULL_SCAN_THEME`'s plain `new AxeBuilder({ page })` runs, and what
+ * every theme ran before this file existed) never executes it. `withTags(["cat.color"])` does not
+ * respect that default: a tag-based `runOnly` pulls in every rule carrying the tag regardless of
+ * its own `enabled` flag, so naively using the tag on the three abbreviated scans would start
+ * checking an AAA rule three themes never had to satisfy before — a stricter, *different* test,
+ * not the same coverage run cheaper, and a real one: this app has several real (7:1-only) AAA
+ * contrast shortfalls, caught the hard way while landing this. Disabled here to keep the
+ * abbreviated scan's coverage identical to what the full ruleset already checked everywhere.
+ */
+const COLOR_ONLY_DISABLED_RULES = ["color-contrast-enhanced"];
+
 async function ready(page: Page): Promise<void> {
   await page.getByTestId("connection-state").waitFor();
 }
@@ -47,8 +75,15 @@ function isKnownRowSelectedContrastFalsePositive(violationId: string, target: st
   );
 }
 
-async function unexpectedSeriousViolations(page: Page): Promise<string[]> {
-  const results = await new AxeBuilder({ page }).analyze();
+async function unexpectedSeriousViolations(
+  page: Page,
+  kind: (typeof THEME_KINDS)[number],
+): Promise<string[]> {
+  const builder = new AxeBuilder({ page });
+  const results = await (kind === FULL_SCAN_THEME
+    ? builder
+    : builder.withTags(["cat.color"]).disableRules(COLOR_ONLY_DISABLED_RULES)
+  ).analyze();
   return results.violations
     .filter((v) => v.impact === "serious" || v.impact === "critical")
     .flatMap((v) =>
@@ -58,9 +93,15 @@ async function unexpectedSeriousViolations(page: Page): Promise<string[]> {
     );
 }
 
+/** Appended to every axe test's name so a reader can tell, without opening the file, which scan
+ *  ran the full ruleset and which ran `cat.color` only. */
+function scanLabel(kind: (typeof THEME_KINDS)[number]): string {
+  return kind === FULL_SCAN_THEME ? "full ruleset" : "color-contrast only";
+}
+
 test.describe("axe: no serious/critical violations", () => {
   for (const kind of THEME_KINDS) {
-    test(`badges scenario, with a row selected: ${kind}`, async ({ page }) => {
+    test(`badges scenario, with a row selected: ${kind} (${scanLabel(kind)})`, async ({ page }) => {
       await page.goto(`/?scenario=badges&theme=${kind}`);
       await ready(page);
       await page.locator('.slick-row[data-row="0"]').waitFor({ state: "visible" });
@@ -68,16 +109,18 @@ test.describe("axe: no serious/critical violations", () => {
       // otherwise never sees — `--kv-row-selected-bg`/`-fg`'s own contrast, in particular.
       await page.locator('.slick-row[data-row="0"]').click();
 
-      expect(await unexpectedSeriousViolations(page)).toEqual([]);
+      expect(await unexpectedSeriousViolations(page, kind)).toEqual([]);
     });
   }
 
   for (const kind of THEME_KINDS) {
-    test(`authFailure scenario (git-blocked panel): ${kind}`, async ({ page }) => {
+    test(`authFailure scenario (git-blocked panel): ${kind} (${scanLabel(kind)})`, async ({
+      page,
+    }) => {
       await page.goto(`/?scenario=authFailure&theme=${kind}`);
       await page.getByTestId("git-blocked-panel").waitFor();
 
-      expect(await unexpectedSeriousViolations(page)).toEqual([]);
+      expect(await unexpectedSeriousViolations(page, kind)).toEqual([]);
     });
   }
 
@@ -86,23 +129,23 @@ test.describe("axe: no serious/critical violations", () => {
   // every `FileChangeKind`/non-text `FileDiffBody` shape, so this exercises the file tree's
   // status letters and the diff's binary/LFS/too-large message rows in the same pass.
   for (const kind of THEME_KINDS) {
-    test(`commit-detail pane, populated: ${kind}`, async ({ page }) => {
+    test(`commit-detail pane, populated: ${kind} (${scanLabel(kind)})`, async ({ page }) => {
       await page.goto(`/?scenario=detail&theme=${kind}`);
       await ready(page);
       await page.locator('.slick-row[data-row="1"]').click();
       await expect(page.getByTestId("file-tree")).toBeVisible();
 
-      expect(await unexpectedSeriousViolations(page)).toEqual([]);
+      expect(await unexpectedSeriousViolations(page, kind)).toEqual([]);
     });
 
-    test(`commit-detail pane, diff open: ${kind}`, async ({ page }) => {
+    test(`commit-detail pane, diff open: ${kind} (${scanLabel(kind)})`, async ({ page }) => {
       await page.goto(`/?scenario=detail&theme=${kind}`);
       await ready(page);
       await page.locator('.slick-row[data-row="1"]').click();
       await page.locator(".kv-file-tree-row", { hasText: "modified.ts" }).click();
       await expect(page.getByTestId("diff-view").locator(".kv-diff-body")).toBeVisible();
 
-      expect(await unexpectedSeriousViolations(page)).toEqual([]);
+      expect(await unexpectedSeriousViolations(page, kind)).toEqual([]);
     });
   }
 });
