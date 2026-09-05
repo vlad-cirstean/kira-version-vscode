@@ -58,9 +58,20 @@ export {
   mapLineAcrossDiff,
   splitTrailerBlock,
 } from "./model/diff.ts";
-export type { RefKind, RefRecord, RefTrack } from "./model/ref.ts";
+export type {
+  InProgressKind,
+  InProgressOperation,
+  InProgressStateFiles,
+  OpErrorKind,
+  OpRequest,
+  OpResult,
+  UndoSlotSnapshot,
+} from "./model/operation.ts";
+export { canRunOp, classifyInProgress, describeInProgress } from "./model/operation.ts";
+export type { RefKind, RefRecord, RefTrack, TagAnnotation } from "./model/ref.ts";
 export type { HeadState, RepoIdentity } from "./model/repo.ts";
 export type { StashEntry } from "./model/stash.ts";
+export { isAnnotated, tagTargetCommit } from "./model/tag.ts";
 export type {
   FileStatusCode,
   IgnoredStatusEntry,
