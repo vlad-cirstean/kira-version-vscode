@@ -114,7 +114,7 @@ export async function refs(driver: GitDriver): Promise<RefRecord[]> {
   const records: Uint8Array[] = [];
   for await (const record of read.records(REFS_RECORD_DELIMITER)) records.push(record);
   await read.done;
-  return records.filter((r) => r.length > 0).map(parseRefRecord);
+  return records.filter((r) => r.length > 0).map((r) => parseRefRecord(r));
 }
 
 export async function status(

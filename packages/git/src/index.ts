@@ -59,7 +59,13 @@ export {
   showMetadataArgs,
 } from "./parse/log.ts";
 export { mergeTreeArgs, parseMergeTreeOutput } from "./parse/mergeTree.ts";
-export { parseRefRecord, REFS_FORMAT, REFS_RECORD_DELIMITER, refsArgs } from "./parse/refs.ts";
+export {
+  parseRefRecord,
+  REFS_FORMAT,
+  REFS_RECORD_DELIMITER,
+  refsArgs,
+  TAG_REFS_FORMAT,
+} from "./parse/refs.ts";
 export { parseStashRecord, STASH_FORMAT, stashListArgs } from "./parse/stash.ts";
 export { parseStatus, statusArgs } from "./parse/status.ts";
 export type { CommitDetailOptions, LogQueryOptions } from "./queries.ts";
