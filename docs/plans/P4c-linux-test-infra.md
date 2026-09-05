@@ -595,3 +595,232 @@ with a reason rather than by accident.
 ---
 
 ## Findings
+
+### W1 — the sibling test resolves `"ok"`, not `"notFound"`
+
+W1's own text (above) expected the new Linux sibling test to mirror the `darwin` case two tests
+above it and assert `notFound`. In practice, with `PATH` cleared, `locateGit({ platform: "linux"
+})` resolves `"ok"` via `/usr/bin/git` — this container's real, executable git — because the
+Linux branch has no `xcode-select`-style gate to fail the way the `darwin` case's does here. The
+test asserts `"ok"` and the resolved path, with a comment explaining this is a *stronger* proof
+than a synthetic `notFound` would have been: it exercises the real candidate end to end, and the
+important assertion — the one that would fail if W1 still threw — is that the call resolves at
+all. Recorded as a deviation from the plan's own prediction, not silently reconciled.
+
+### W2 — the manual Node stale-inode probe
+
+`nodeFileWatcher.ts`'s doc comment (commit `def17ed`) references this section for the exact
+result: a manual probe against a real repository confirmed that Node's userland recursive watcher
+(`internal/fs/recursive_watch`) places a *per-file* watch on each ref file that goes stale after
+that file's first atomic rename-over. Concretely: with `watchRepo()`'s recursive `refs/` watch as
+the only subscription, `git branch -f <ref> <sha1>` against an already-watched branch ref fired a
+`refsChanged` signal; a second `git branch -f <ref> <sha2>` immediately after, against the same
+ref, produced **no event** — the per-file watch never rebinds to the new inode after the rename.
+The fix (already committed, W2) adds non-recursive directory watches on `refs/heads`, `refs/tags`
+and `refs/remotes` alongside the existing recursive one, the same directory-watch mechanism
+already relied on for `HEAD`; `tests/integration/watcher.test.ts`'s new regression test guards the
+fix's extra subscription against regressing the ordinary case (it cannot reproduce the staleness
+itself, since this suite runs under Bun, whose recursive watcher does not exhibit it — noted in
+that test's own comment).
+
+**`engines.node` (judgment call 9): not raised.** `package.json` stays at `"node": ">=20"`. Node's
+userland recursive-watch implementation landed in the v20 line itself (confirmed against Node's
+own release notes), so the floor that already exists already covers what this plan needed; there
+was nothing to raise, and no sub-item to drop.
+
+### W4 — resolved VS Code version
+
+`downloadAndUnzipVSCode()` resolves and caches **`1.136.1`** (stable channel) into
+`.vscode-test/vscode-linux-x64-1.136.1/`, confirmed by every `bunx`/`playwright test`
+invocation's own `√ Validated version: 1.136.1` / `√ Found existing install` banner. The download
+itself, blocked through P4b, is unblocked in this container — no proxy or network change was
+needed beyond what P4b already had.
+
+### W5 — the Unix-domain-socket path length
+
+`resolveCliArgsFromVSCodeExecutablePath()`'s own default `--user-data-dir`
+(`getProfileArguments()`, via `@vscode/test-electron`'s `defaultCachePath`) roots at
+`<cwd>/.vscode-test/user-data`. In this worktree checkout, that alone is already **95 bytes**
+(`/home/user/kira-version-vscode/.claude/worktrees/agent-a5d21dc2544640b9e/.vscode-test/user-data`)
+— before VS Code's own main process appends its single-instance-lock socket name under it, which
+is what actually exceeds the ~107-byte `sun_path` limit and produces `listen EINVAL`. (The exact
+appended suffix and final byte count observed live earlier in this work were not preserved verbatim
+across a context compaction partway through this session — recorded here as a gap rather than
+invented.) What is fully verified is the fix and its effect: `launchVSCode()`'s
+`mkdtempSync(join(tmpdir(), "kira-vscode-profile-"))` produces a `--user-data-dir` of
+`/tmp/kira-vscode-profile-XXXXXX/user-data` — **41 bytes**, independent of how deep the repo
+itself is checked out — and every launch since has reached a real window with no `EINVAL`.
+
+### W6 — five further bugs, found live, once the launch itself was fixed
+
+`panel.spec.ts` had never run on any platform before this plan (see above); fixing the CLI-wrapper
+launch bug W6 already names was necessary but nowhere near sufficient. Each of the following was
+confirmed against a real, downloaded VS Code build — not guessed at — before being fixed:
+
+1. **`packages/host-vscode/package.json` had no `version` field.** VS Code refuses to load an
+   extension whose manifest lacks one ("property `version` is mandatory and must be of type
+   `string`"), confirmed by reading the notification-toast text VS Code renders for the failure.
+   Fixed by adding `"version": "0.0.0"`.
+2. **Constructing a real `Worker` from this webview throws a synchronous `SecurityError`.** The
+   worker script's URL is served from `vscode-resource.vscode-cdn.net`; the webview document's own
+   origin is `vscode-webview://...` — a cross-origin mismatch confirmed via a `pageerror` listener
+   on the real window, which showed the `SecurityError` immediately followed by a cascading
+   `ReferenceError` from the half-initialized module (the thrown error aborted the whole webview
+   app's Vue mount, not just layout). `packages/ui/src/graph/layoutClient.ts`'s own header comment
+   had already anticipated exactly this fallback and left a placeholder for it; `createWorker()`
+   now tries `createRealWorker()` and falls back to a main-thread implementation (`layoutAppend`
+   run synchronously on a `setTimeout(0)`) on failure. No mock bridge or test harness this code
+   already ran under touches this real webview origin, which is why the bug was invisible until
+   this plan.
+3. **VS Code's Workspace Trust modal steals focus between `openPanel()`'s two commands.** A fresh
+   `--user-data-dir` profile has never seen the generated fixture folder before, so the "Do you
+   trust..." dialog pops — confirmed via a screenshot showing the focused element was the dialog's
+   own "Trust Folder & Continue" button. `--disable-workspace-trust` (the standard automation
+   switch VS Code's own smoke tests use for this, not a security relaxation of the extension) fixes
+   it.
+4. **Xvfb has no window manager, so nothing gives a freshly created `BrowserWindow` OS-level input
+   focus.** The very first `F1` `openPanel()` sends was silently dropped without an explicit click
+   into the workbench first — confirmed by removing an artificial settle delay and reproducing the
+   drop reliably. An explicit `.monaco-workbench` click before any command fixes it, and doubles as
+   what a real user's first action would be anyway.
+5. **A real VS Code `WebviewView`'s `postMessage` does not recreate `ArrayBuffer`s or
+   `Uint8Array`s the way `@types/vscode` documents.** Confirmed by temporarily logging the message
+   actually received in `commitStore.ts`'s `appendPacked()`: a bare `ArrayBuffer` arrived as `{}`
+   (no own enumerable properties), and a `Uint8Array` arrived as a plain object keyed by
+   stringified index (`{"0":123,"1":185,...}`) with no `.length` — `@types/vscode`'s claim that
+   ArrayBuffers are "correctly recreated" for extensions targeting 1.57+ holds for a
+   `WebviewPanel`, but not, empirically, for this extension's `WebviewView`. A genuine JS `Array`
+   *does* survive the clone intact, so `packages/host-vscode/src/transport.ts`'s `toWireSafe()`
+   converts every `ArrayBuffer` to `Array.from(new Uint8Array(buffer))` immediately before the one
+   real `postMessage` call; every consumer already does `new Uint8Array(chunk.field)`, which
+   accepts a plain number array exactly as it does an `ArrayBuffer`, so nothing downstream changed.
+   This is the fix that took real streamed commit data from zero rows to actual data flowing, and
+   the single most consequential bug this plan found.
+
+Two further, purely test-side bugs surfaced once real data was flowing:
+
+6. **`.slick-row` count is not a valid "all rows loaded" assertion.** The grid virtualizes rows —
+   `tests/e2e/harness/commitList.spec.ts`'s own pre-existing "`.slick-row` count stays bounded"
+   test already establishes this as a deliberate invariant — and a real VS Code panel is short
+   enough that even a 10-row repo does not fit in one screen's worth of rendered rows. Fixed by an
+   `expectAllRowsLoaded()` helper that scrolls the grid's viewport to its end and checks the *last*
+   row, mirroring the harness suite's own established pattern, in place of the original (never
+   previously exercised, since this spec had never run) exact-count assertion.
+7. **The command palette's fuzzy filter does not always rank the intended command first.** Typing
+   `>Preferences: Color Theme` also fuzzy-matches `"Preferences: Browse Color Themes in
+   Marketplace"`, and this VS Code build ranks the marketplace-browse command *above* the exact
+   one — confirmed by logging every matched row's text. Blindly accepting the top row therefore
+   silently ran the wrong command, whose own quick pick then hangs forever on a live marketplace
+   theme search this sandbox has no network path to reach ("Searching for themes..." never
+   resolves; a longer wait eventually surfaces "Error while searching for themes: Failed to
+   fetch"). `runCommand()` now locates the row whose own label starts with the requested title and
+   clicks it directly, which is immune to however the palette ranks or reorders matches — the same
+   discipline `typeAndAccept()` applies to the theme-name quick pick it drives. Once selecting the
+   right command was fixed, a second, unrelated bug was still present: this build's actual built-in
+   theme labels are **"Light Modern"/"Dark Modern"**, not the older **"Default Light
+   Modern"/"Default Dark Modern"** the test originally typed (confirmed against
+   `theme-defaults/package.nls.json` shipped in the downloaded build) — the old names never
+   matched any installed theme, so the picker fell through to the same unreachable marketplace
+   search. Both bugs had to be fixed together for the theme test to pass.
+
+A further, non-VS-Code-specific concurrency bug surfaced once all three tests could individually
+pass: **two real VS Code windows sharing one Xvfb display with no window manager fight over input
+focus** when Playwright's default `fullyParallel` scheduling runs more than one of this file's
+tests at once (reproduced with `bun run test:e2e:vscode`'s own default 2-worker split). Each test
+already launches and tears down its own VS Code instance, so `test.describe.configure({ mode:
+"serial" })` costs wall-clock time, not coverage, and reliably removes the failure.
+
+**Verification.** With all of the above fixed, all three `panel.spec.ts` tests passed on every one
+of five consecutive runs during this work (both directly via `playwright test --project=vscode
+--workers=1` and via the real `bun run test:e2e:vscode` entry point, including once at its default
+2-worker split before the serial-mode fix, and multiple times after).
+
+### W7 — the macOS-assumption grep, re-run
+
+`grep -rniE 'darwin|macos|process\.platform|/usr/bin|/opt/homebrew|osascript'` across `packages`,
+`apps`, `tests` and `scripts` (`.ts`/`.vue`), one line per surviving file:
+
+| File | Disposition |
+|---|---|
+| `apps/harness/src/scenarios/{authFailure,badges,ceiling,clean,hugeRepo,pagedBranch,tooOld}.ts` | expected — inert `"/usr/bin/git"` string fixtures, as predicted |
+| `packages/core/src/settings/schema.test.ts` | expected — inert `"/usr/bin/git"` fixture, as predicted |
+| `packages/git/src/capabilities.test.ts` | expected — inert cache-key fixture strings, as predicted |
+| `packages/git/src/discovery.ts` | expected — W1's Linux `PlatformGitLocator` branch |
+| `packages/git/src/nodeFileWatcher.ts` | expected — W2's Linux doc comment |
+| `packages/ipc/src/codec.test.ts` | expected — inert `"/usr/bin/git"` fixture, as predicted |
+| `packages/ui/src/components/gitBlockedCopy.ts` | expected — the user-agent `"mac"` branch (matches on `Mac OS X`/`Macintosh`, not the literal string `macos`, so it is not caught by the pattern's `macos` alternative but is the exact file the plan names) |
+| `tests/unit/ui/gitBlockedCopy.test.ts` | expected — its test, as predicted |
+| `tests/unit/git/rpcHandlers.test.ts` | expected — inert `"/usr/bin/git"` fixture, as predicted |
+| `tests/integration/discovery.test.ts` | new, but a direct companion of W1 — its own test file, not named separately in the plan's list but the obvious sibling of the `discovery.ts` entry above |
+| `tests/integration/nodeFileWatcher.test.ts` | new, but a direct companion of W2 for the same reason |
+| `packages/ui/src/components/RefreshButton.vue` | **new finding** — an inert doc-comment aside ("`Cmd+R` on macOS") documenting a keybinding label difference, no functional platform branch |
+| `tests/unit/ui/bridgeClient.test.ts` | **new finding** — one more inert `"/usr/bin/git"` fixture, same category as the ones the plan did name, just not individually listed |
+| `packages/git/dist/discovery.d.ts` | excluded — a gitignored build artifact (`.gitignore:83`), not source; a stray `bun run build` byproduct on disk, not part of the tree this grep audits |
+| `scripts/{build,check-tokens,gen-lane-palette,gen-settings}.ts`, `tests/perf/*.ts` | false positives — every hit is only the `#!/usr/bin/env bun` shebang matching the pattern's `/usr/bin` alternative |
+| `scripts/e2e-display.ts` | expected — W3's `process.platform === "linux"` branch (plus the same shebang false positive) |
+| `tests/e2e/vscode/panel.spec.ts` | expected — W6's own file |
+
+No unattributed survivor. The expected set the plan named up front was accurate; the additions
+above are all either direct companions of files the plan did name, or genuinely inert matches the
+grep's necessarily-broad pattern was always going to catch.
+
+### W10 — verification pass, in full
+
+1. **`bun run check`** — green (exit 0). `biome format`/`lint`/`check:types`/`check:vue`/
+   `check-tokens`/`gen-settings --check`/`gen-lane-palette --check` all pass. Lint surfaces 16
+   pre-existing `useLiteralKeys` infos in `packages/ui/src/state/viewState.ts` — not introduced by
+   this work (same count P4b's own Findings recorded) and not failures.
+2. **`bun run test`** — **622 pass, 0 fail**, against P4b's recorded 620. The delta is exactly
+   `+2`: W1 added one new integration test (the Linux-fallback-resolves sibling) without removing
+   the one it repurposed (moved to `win32`, not deleted), and W2 added one new integration
+   regression test (the repeated-ref-update guard). 620 + 1 + 1 = 622.
+3. **`bun run build`** — green; both bundles produced, bundle-size checks pass.
+4. **`bunx playwright test --project=harness`**, run as `xvfb-run -a node
+   node_modules/.bin/playwright test --project=harness` — **42 passed**, matching P4b's recorded
+   42/42. No baseline was regenerated (confirmed by `git status` showing no changes under either
+   `*-snapshots/` directory).
+5. **`bun run test:e2e:vscode` — all three `panel.spec.ts` tests pass headlessly**, repeatedly (see
+   W6 above). This is the criterion this plan exists for, and it is met.
+6. **`bun run test:perf`** — runs to completion when scripts are invoked individually; the chained
+   `test:perf` script itself stops at the first non-zero exit (its steps are joined with `&&`), so
+   a regressed step must be re-run standalone to see the rest. Every run in this session showed at
+   least one wall-clock-timing metric (variously `kira:first-paint`/`kira:layout-complete` in
+   `run.ts`, `firstPageMs`/`loadMoreMsWorst` in `historyPipeline.ts`, or `firstPaintMs`/
+   `firstPageMs`/`loadMoreMs` in `graphUi.ts`) exceed the 20% tolerance, but **which** metric
+   tripped varied run to run with no relation to what code was under test. Confirmed directly: `git
+   stash`-ing every change this plan made and re-running `test:perf` against the untouched tree
+   still showed `historyPipeline.ts` regress (`firstPageMs` +56.2%, `loadMoreMsWorst` +43.7%) on
+   one run and `run.ts` pass cleanly on another — proving the variance is this shared/virtualized
+   container's own ambient load, not a regression this work introduced, and extending (rather than
+   contradicting) the plan's own pre-existing attribution of `graphUi.ts`'s frame-timing metrics
+   (`worstFrameMs`/`medianFrameMs` sit essentially exactly at their ceiling on every run, the
+   hallmark of an already-known-marginal metric) to headless-compositor/container noise. `heap`,
+   `storeBytes`, `layoutBytes`, `bytesPerSecond`/`recordsPerSecond`, `packMs`/`cloneMs`/`appendMs`
+   and both `heapFirstPageMB`/`heapFullMB` in `graphUi.ts` — every non-wall-clock metric across all
+   five scripts — stayed within tolerance on every run.
+7. **The macOS-assumption grep** — re-run in full above (W7); no unattributed survivor.
+8. **`git status`** — clean of `.vscode-test/`, `test-results/` and baseline churn once the scratch
+   probe scripts (`scripts/.probe-launch.mjs`, `.probe-launch2.ts`, `.gen-repo.ts`,
+   `.probe-theme.mjs` — none part of the deliverable, all used only to diagnose the W6 bugs above)
+   were deleted.
+9. **The scope check.** `git diff` on `docs/SPEC.md` touches only §2.1.2's closing paragraph, §4.2
+   step 4, §8.4's Integration-suite paragraph, and D27/D28's rows (one appended clause each) — **no
+   change to §9, §10 or §12**, confirmed by diff-hunk line numbers (all four hunks fall between
+   lines 144 and 1871; §9 starts at line 1747, so the D27/D28 hunk is the only one after it and it
+   only appends clauses to existing text). §2.1.2's heading claim (*"macOS only for v1. Windows and
+   Linux are not supported, not tested, and not claimed."*) and D27's decision sentence (*"macOS
+   only for v1. Windows and Linux are not supported or tested..."*) both remain present verbatim.
+
+### Left open
+
+- **The exact byte count that made W5's default `--user-data-dir` path overflow `sun_path`** was
+  observed live but not preserved verbatim across a context compaction partway through this
+  session (see W5 above) — the fix and its verification are complete regardless, but the precise
+  historical number is an honest gap rather than a reconstructed one.
+- **P0's owed `-darwin` baseline set stays owed.** Nothing in this plan touched rendered output;
+  the harness's Linux snapshots are unchanged.
+- **`bun run test:perf`'s chained script stops at the first failing step** (its five steps are
+  joined with `&&`, not run independently) — pre-existing behavior, not something this plan
+  introduced, but worth naming since it means a single noisy wall-clock metric anywhere in the
+  chain hides whether the later steps would otherwise have passed. Not fixed here: `test:perf`'s
+  own script structure is out of this plan's scope, and each step was verified individually above.
