@@ -168,6 +168,43 @@ describe("Branch operations against real git (P6 W21)", () => {
   });
 });
 
+describe("driver.write() serializes two rapid ops in submission order (P6 W22 V6)", () => {
+  test("branchCreate then branchDelete, fired back-to-back with no await between them, run in order", async () => {
+    const repo = branchy();
+    const { service, repoId } = await openService(repo.dir);
+    try {
+      // Neither call is awaited before the next is issued — exactly the "double-click Checkout"
+      // shape V6 asks about. If the write queue did not serialize in submission order, the
+      // delete could reach git before the create did and fail with "branch not found"; if it
+      // ran the delete against a pre-create read of refs, it could report a stale success. Both
+      // resolving `ok: true`, in this order, is only possible if `driver.ts`'s FIFO queue ran
+      // the create fully to completion (including RepoService's own post-write read-back)
+      // before starting the delete.
+      const createPromise = service.runOp(repoId, {
+        kind: "branchCreate",
+        name: "temp-order-test",
+        startPoint: "HEAD",
+        checkout: false,
+        track: undefined,
+      });
+      const deletePromise = service.runOp(repoId, {
+        kind: "branchDelete",
+        name: "temp-order-test",
+        force: false,
+      });
+
+      const [created, deleted] = await Promise.all([createPromise, deletePromise]);
+      expect(created.ok).toBe(true);
+      expect(deleted.ok).toBe(true); // only possible if the delete saw the branch the create made
+
+      const refs = await service.refs(repoId);
+      expect(refs.branches.some((b) => b.shortName === "temp-order-test")).toBe(false);
+    } finally {
+      service.dispose();
+    }
+  });
+});
+
 describe("refs.list is exactly two spawns, regardless of ref count (P6 W21 — a correctness invariant, not a budget)", () => {
   test("a repo with many more refs still costs the same two spawns as a small one", async () => {
     const small = branchy();
