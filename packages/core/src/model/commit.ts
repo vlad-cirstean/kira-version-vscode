@@ -3,6 +3,8 @@
  * into structured refs here rather than kept as the raw "HEAD -> main, tag: v1, origin/main"
  * string, since every consumer wants to know which kind of ref it is looking at.
  */
+import type { CommitTrailer } from "./diff.ts";
+
 export interface CommitIdentity {
   readonly name: string;
   readonly email: string;
@@ -55,10 +57,21 @@ export interface FileChange {
 /** `%G?`'s raw signature-verification code (§4.4, D20): good, bad, unknown key, expired, etc. */
 export type SignatureStatus = "G" | "B" | "U" | "X" | "Y" | "R" | "E" | "N";
 
+export interface CommitSignature {
+  readonly status: SignatureStatus;
+  /** `%GS` — empty when `status` is `"N"` (no signature to name a signer for). */
+  readonly signer: string;
+}
+
 export interface CommitDetail extends CommitRecord {
-  /** The message body — everything after the subject line, per git's own %b convention. */
+  /** The message body, trailer paragraph already removed by `splitTrailerBlock` — everything
+   *  else after the subject line, per git's own %b convention. */
   readonly body: string;
-  readonly signatureStatus: SignatureStatus;
+  /** Git's own `%(trailers:only=true,unfold=true)` parse — folded onto one line each. */
+  readonly trailers: readonly CommitTrailer[];
+  readonly signature: CommitSignature;
+  /** Which parent `files` (and any requested `FileDiff`) is diffed against — 0 for a non-merge. */
+  readonly parentIndex: number;
   /** Diffed against a single selected parent (default: first). Empty array for a root commit's
    *  detail against the empty tree, which is a real, valid diff, not a missing one. */
   readonly files: readonly FileChange[];

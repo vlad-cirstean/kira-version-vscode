@@ -224,7 +224,7 @@ kira-version-vscode/
 │   │   ├── tsconfig.json
 │   │   └── src/
 │   │       ├── index.ts
-│   │       ├── model/              commit.ts ref.ts tag.ts stash.ts status.ts repo.ts conflict.ts
+│   │       ├── model/              commit.ts diff.ts ref.ts tag.ts stash.ts status.ts repo.ts conflict.ts
 │   │       ├── store/              commitStore.ts   column-wise typed arrays (§5.5)
 │   │       │                       shaTable.ts      20-byte binary sha storage + hex formatting
 │   │       │                       intern.ts        string interning + concatenated subject buffer

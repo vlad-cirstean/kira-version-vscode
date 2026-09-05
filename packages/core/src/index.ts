@@ -35,12 +35,24 @@ export type {
   CommitDetail,
   CommitIdentity,
   CommitRecord,
+  CommitSignature,
   DecorationRef,
   FileChange,
   FileChangeKind,
   SignatureStatus,
 } from "./model/commit.ts";
 export type { MergePrediction, UnmergedEntry, UnmergedStage } from "./model/conflict.ts";
+export type {
+  CommitTrailer,
+  DiffHunk,
+  DiffLine,
+  DiffLineKind,
+  DiffRow,
+  DiffSide,
+  FileDiff,
+  FileDiffBody,
+} from "./model/diff.ts";
+export { flattenDiffRows, mapDiffLineToRevision, mapLineAcrossDiff, splitTrailerBlock } from "./model/diff.ts";
 export type { RefKind, RefRecord, RefTrack } from "./model/ref.ts";
 export type { HeadState, RepoIdentity } from "./model/repo.ts";
 export type { StashEntry } from "./model/stash.ts";
