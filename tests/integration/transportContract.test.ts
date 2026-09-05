@@ -5,7 +5,9 @@ import { join } from "node:path";
 import type { PackedCommitChunk } from "../../packages/core/src/index.ts";
 import { CommitStore, defaultSettings } from "../../packages/core/src/index.ts";
 import {
+  FakeClipboard,
   FakeDialogs,
+  FakeEditorIntegration,
   FakeLogger,
   FakeWorkspaceRoots,
 } from "../../packages/core/src/ports/testFakes.ts";
@@ -90,6 +92,8 @@ async function setup(pageSize = 4) {
   });
   const roots = new FakeWorkspaceRoots();
   const dialogs = new FakeDialogs();
+  const editor = new FakeEditorIntegration();
+  const clipboard = new FakeClipboard();
   const handlers = createRepoHandlers({
     service,
     roots,
@@ -97,6 +101,8 @@ async function setup(pageSize = 4) {
     settings: () => defaultSettings(),
     host: "vscode",
     logger: new FakeLogger(),
+    editor,
+    clipboard,
   });
   const [clientChannel, serverChannel] = createInMemoryChannelPair();
   const server = createRpcServer(serverChannel, handlers);

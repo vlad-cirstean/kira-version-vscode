@@ -88,6 +88,6 @@ export {
   RepoService,
 } from "./repoService.ts";
 export type { RepoHandlersDeps, RepoServicePort } from "./rpcHandlers.ts";
-export { createRepoHandlers } from "./rpcHandlers.ts";
+export { createRepoHandlers, createVirtualDocumentSource } from "./rpcHandlers.ts";
 export type { RepoWatcher, WatchRepoOptions, WatchSignal } from "./watcher.ts";
 export { watchRepo } from "./watcher.ts";

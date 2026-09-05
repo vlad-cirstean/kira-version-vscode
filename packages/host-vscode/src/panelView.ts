@@ -8,7 +8,15 @@
  * cached store outliving a hidden/disposed webview is the entire mechanism (§5.4), and disposing
  * it here would produce a phase that passes its own tests and fails its exit criterion.
  */
-import type { Dialogs, Disposable, Logger, Settings, WorkspaceRoots } from "@kira-version/core";
+import type {
+  Clipboard,
+  Dialogs,
+  Disposable,
+  EditorIntegration,
+  Logger,
+  Settings,
+  WorkspaceRoots,
+} from "@kira-version/core";
 import type { RepoService } from "@kira-version/git";
 import { createRepoHandlers } from "@kira-version/git";
 import type { RpcServer, SettingsSnapshot } from "@kira-version/ipc";
@@ -24,6 +32,8 @@ export interface KiraGraphViewProviderDeps {
   readonly dialogs: Dialogs;
   readonly settings: () => Settings;
   readonly logger: Logger;
+  readonly editor: EditorIntegration;
+  readonly clipboard: Clipboard;
 }
 
 export class KiraGraphViewProvider implements vscode.WebviewViewProvider {
@@ -36,7 +46,8 @@ export class KiraGraphViewProvider implements vscode.WebviewViewProvider {
   }
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
-    const { extensionUri, service, roots, dialogs, settings, logger } = this.#deps;
+    const { extensionUri, service, roots, dialogs, settings, logger, editor, clipboard } =
+      this.#deps;
 
     webviewView.webview.options = {
       enableScripts: true,
@@ -52,6 +63,8 @@ export class KiraGraphViewProvider implements vscode.WebviewViewProvider {
       settings,
       host: "vscode",
       logger,
+      editor,
+      clipboard,
     });
     const server = createRpcServer(channel, handlers);
     this.#server = server;

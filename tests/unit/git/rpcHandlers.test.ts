@@ -1,13 +1,20 @@
 import { describe, expect, test } from "bun:test";
-import type { Settings } from "../../../packages/core/src/index.ts";
+import type {
+  CommitDetail,
+  DiffHunk,
+  FileDiff,
+  Settings,
+} from "../../../packages/core/src/index.ts";
 import { defaultSettings } from "../../../packages/core/src/index.ts";
 import {
+  FakeClipboard,
   FakeDialogs,
+  FakeEditorIntegration,
   FakeLogger,
   FakeWorkspaceRoots,
 } from "../../../packages/core/src/ports/testFakes.ts";
 import { GitError } from "../../../packages/git/src/errors.ts";
-import type { GitStatus } from "../../../packages/git/src/repoService.ts";
+import type { BlobResult, GitStatus } from "../../../packages/git/src/repoService.ts";
 import type { RepoServicePort } from "../../../packages/git/src/rpcHandlers.ts";
 import { createRepoHandlers } from "../../../packages/git/src/rpcHandlers.ts";
 import type {
@@ -83,8 +90,69 @@ class FakeRepoService implements RepoServicePort {
   streamError: unknown;
   streamChunks: readonly StreamChunkOf<"graph.stream">[] = [];
 
+  detailResult: CommitDetail | undefined;
+  readonly detailCalls: Array<{
+    repoId: string;
+    sha: string;
+    parentIndex: number | undefined;
+    signal: AbortSignal | undefined;
+  }> = [];
+  fileDiffResult: FileDiff | undefined;
+  readonly fileDiffCalls: Array<{
+    repoId: string;
+    sha: string;
+    path: string;
+    originalPath: string | undefined;
+    parentIndex: number | undefined;
+    signal: AbortSignal | undefined;
+  }> = [];
+  blobResult: BlobResult = { kind: "missing" };
+  worktreeDiffResult: readonly DiffHunk[] | null = null;
+  checkoutPaths = new Set<string>();
+
   constructor(git: GitStatus) {
     this.git = git;
+  }
+
+  async detail(
+    repoId: string,
+    sha: string,
+    parentIndex?: number,
+    signal?: AbortSignal,
+  ): Promise<CommitDetail> {
+    this.detailCalls.push({ repoId, sha, parentIndex, signal });
+    if (!this.detailResult) throw new Error("FakeRepoService.detailResult not set");
+    return this.detailResult;
+  }
+
+  async fileDiff(
+    repoId: string,
+    sha: string,
+    path: string,
+    originalPath: string | undefined,
+    parentIndex?: number,
+    signal?: AbortSignal,
+  ): Promise<FileDiff> {
+    this.fileDiffCalls.push({ repoId, sha, path, originalPath, parentIndex, signal });
+    if (!this.fileDiffResult) throw new Error("FakeRepoService.fileDiffResult not set");
+    return this.fileDiffResult;
+  }
+
+  async blob(_repoId: string, _rev: string, _path: string): Promise<BlobResult> {
+    return this.blobResult;
+  }
+
+  async worktreeDiff(
+    _repoId: string,
+    _rev: string,
+    _path: string,
+    _signal?: AbortSignal,
+  ): Promise<readonly DiffHunk[] | null> {
+    return this.worktreeDiffResult;
+  }
+
+  pathExistsInCheckout(_repoId: string, path: string): boolean {
+    return this.checkoutPaths.has(path);
   }
 
   open(_path: string): ReturnType<RepoServicePort["open"]> {
@@ -128,6 +196,8 @@ function setup(service: FakeRepoService) {
   const roots = new FakeWorkspaceRoots([{ path: "/repos/a", label: "a" }]);
   const dialogs = new FakeDialogs();
   const logger = new FakeLogger();
+  const editor = new FakeEditorIntegration();
+  const clipboard = new FakeClipboard();
   const handlers: ServerHandlers = createRepoHandlers({
     service,
     roots,
@@ -135,11 +205,13 @@ function setup(service: FakeRepoService) {
     settings: settingsFn(),
     host: "harness",
     logger,
+    editor,
+    clipboard,
   });
   const [a, b] = createInMemoryChannelPair();
   const server = createRpcServer(a, handlers);
   const client = createRpcClient(b);
-  return { roots, dialogs, logger, server, client };
+  return { roots, dialogs, logger, editor, clipboard, server, client };
 }
 
 describe("createRepoHandlers", () => {
@@ -154,6 +226,8 @@ describe("createRepoHandlers", () => {
       settings: settingsFn(),
       host: "harness",
       logger: new FakeLogger(),
+      editor: new FakeEditorIntegration(),
+      clipboard: new FakeClipboard(),
     });
     const expectedRequests: RequestKey[] = [
       "app.init",
@@ -164,6 +238,11 @@ describe("createRepoHandlers", () => {
       "graph.status",
       "graph.loadMore",
       "graph.refresh",
+      "commit.detail",
+      "commit.fileDiff",
+      "editor.openDiff",
+      "editor.goToFile",
+      "clipboard.write",
     ];
     for (const key of expectedRequests) expect(typeof handlers.requests[key]).toBe("function");
     expect(typeof handlers.streams["graph.stream"]).toBe("function");
@@ -175,9 +254,14 @@ describe("createRepoHandlers", () => {
     try {
       const result = await client.request("app.init", {});
       expect(result.host).toBe("harness");
-      expect(result.contractVersion).toBe(3);
+      expect(result.contractVersion).toBe(4);
       expect(result.settings).toEqual(defaultSettings());
       expect(result.git).toEqual({ kind: "ok", path: "/usr/bin/git", version: "2.40.0" });
+      expect(result.capabilities).toEqual({
+        openInEditor: true,
+        goToFile: true,
+        clipboard: true,
+      });
     } finally {
       client.dispose();
       server.dispose();
@@ -460,6 +544,337 @@ describe("createRepoHandlers", () => {
           kind: "LockHeld",
         },
       );
+    } finally {
+      client.dispose();
+      server.dispose();
+    }
+  });
+
+  // ---------------------------------------------------------------------------------------
+  // P5 W6: commit.detail, commit.fileDiff, editor.openDiff, editor.goToFile, clipboard.write.
+  // ---------------------------------------------------------------------------------------
+
+  function fileChange(overrides: Partial<FileDiff["change"]> = {}): FileDiff["change"] {
+    return {
+      kind: "modified",
+      path: "src/a.ts",
+      originalPath: undefined,
+      similarity: undefined,
+      additions: 1,
+      deletions: 1,
+      isBinary: false,
+      ...overrides,
+    };
+  }
+
+  function detailFixture(overrides: Partial<CommitDetail> = {}): CommitDetail {
+    return {
+      sha: "a".repeat(40),
+      parents: ["b".repeat(40)],
+      author: { name: "T", email: "t@t.com", timestamp: 0 },
+      committer: { name: "T", email: "t@t.com", timestamp: 0 },
+      subject: "a commit",
+      body: "",
+      trailers: [],
+      signature: { status: "N", signer: "" },
+      decoration: [],
+      parentIndex: 0,
+      files: [fileChange()],
+      ...overrides,
+    };
+  }
+
+  test("app.init reports the editor port's own capabilities, not a hard-coded true", async () => {
+    const service = new FakeRepoService({ kind: "ok", path: "git", version: "2.40.0" });
+    const roots = new FakeWorkspaceRoots();
+    const dialogs = new FakeDialogs();
+    const editor = new FakeEditorIntegration({ openInEditor: false, goToFile: false });
+    const handlers = createRepoHandlers({
+      service,
+      roots,
+      dialogs,
+      settings: settingsFn(),
+      host: "harness",
+      logger: new FakeLogger(),
+      editor,
+      clipboard: new FakeClipboard(),
+    });
+    const [a, b] = createInMemoryChannelPair();
+    const server = createRpcServer(a, handlers);
+    const client = createRpcClient(b);
+    try {
+      const result = await client.request("app.init", {});
+      expect(result.capabilities).toEqual({
+        openInEditor: false,
+        goToFile: false,
+        clipboard: true,
+      });
+    } finally {
+      client.dispose();
+      server.dispose();
+    }
+  });
+
+  test("commit.detail forwards to RepoService.detail with the request's AbortSignal", async () => {
+    const service = new FakeRepoService({ kind: "ok", path: "git", version: "2.40.0" });
+    service.detailResult = detailFixture();
+    const { client, server } = setup(service);
+    try {
+      const result = await client.request("commit.detail", { repoId: "r1", sha: "abc" });
+      expect(result).toEqual(service.detailResult);
+      expect(service.detailCalls).toHaveLength(1);
+      expect(service.detailCalls[0]?.repoId).toBe("r1");
+      expect(service.detailCalls[0]?.sha).toBe("abc");
+      expect(service.detailCalls[0]?.signal).toBeInstanceOf(AbortSignal);
+    } finally {
+      client.dispose();
+      server.dispose();
+    }
+  });
+
+  test("commit.fileDiff forwards to RepoService.fileDiff, including originalPath and parentIndex", async () => {
+    const service = new FakeRepoService({ kind: "ok", path: "git", version: "2.40.0" });
+    service.fileDiffResult = {
+      sha: "abc",
+      parentIndex: 1,
+      baseSha: "def",
+      change: fileChange({ kind: "renamed", originalPath: "old.ts" }),
+      body: { kind: "text", hunks: [] },
+    };
+    const { client, server } = setup(service);
+    try {
+      const result = await client.request("commit.fileDiff", {
+        repoId: "r1",
+        sha: "abc",
+        path: "src/a.ts",
+        originalPath: "old.ts",
+        parentIndex: 1,
+      });
+      expect(result).toEqual(service.fileDiffResult);
+      expect(service.fileDiffCalls).toEqual([
+        {
+          repoId: "r1",
+          sha: "abc",
+          path: "src/a.ts",
+          originalPath: "old.ts",
+          parentIndex: 1,
+          signal: service.fileDiffCalls[0]?.signal,
+        },
+      ]);
+    } finally {
+      client.dispose();
+      server.dispose();
+    }
+  });
+
+  test("editor.openDiff resolves both sides through the port, labelling a rename's left side with originalPath", async () => {
+    const service = new FakeRepoService({ kind: "ok", path: "git", version: "2.40.0" });
+    service.fileDiffResult = {
+      sha: "abc1234",
+      parentIndex: 0,
+      baseSha: "def5678",
+      change: fileChange({ kind: "renamed", path: "new.ts", originalPath: "old.ts" }),
+      body: { kind: "text", hunks: [] },
+    };
+    const { client, server, editor } = setup(service);
+    try {
+      await client.request("editor.openDiff", {
+        repoId: "r1",
+        sha: "abc1234",
+        path: "new.ts",
+        originalPath: "old.ts",
+      });
+      expect(editor.actions).toHaveLength(1);
+      const action = editor.actions[0];
+      expect(action?.kind).toBe("openDiff");
+      expect(action?.left).toEqual({
+        kind: "virtual",
+        key: expect.stringContaining("old.ts") as unknown as string,
+        label: "old.ts",
+      });
+      expect(action?.right).toEqual({
+        kind: "virtual",
+        key: expect.stringContaining("new.ts") as unknown as string,
+        label: "new.ts",
+      });
+      expect(action?.title).toBe("new.ts (abc1234^ ↔ abc1234)");
+    } finally {
+      client.dispose();
+      server.dispose();
+    }
+  });
+
+  test("editor.openDiff uses the empty side for an added file (no baseSha) and a deleted file", async () => {
+    const service = new FakeRepoService({ kind: "ok", path: "git", version: "2.40.0" });
+    service.fileDiffResult = {
+      sha: "abc1234",
+      parentIndex: 0,
+      baseSha: null,
+      change: fileChange({ kind: "added" }),
+      body: { kind: "text", hunks: [] },
+    };
+    const { client, server, editor } = setup(service);
+    try {
+      await client.request("editor.openDiff", { repoId: "r1", sha: "abc1234", path: "src/a.ts" });
+      expect(editor.actions[0]?.left).toEqual({ kind: "empty", label: "a.ts" });
+
+      service.fileDiffResult = {
+        sha: "abc1234",
+        parentIndex: 0,
+        baseSha: "def5678",
+        change: fileChange({ kind: "deleted" }),
+        body: { kind: "text", hunks: [] },
+      };
+      await client.request("editor.openDiff", { repoId: "r1", sha: "abc1234", path: "src/a.ts" });
+      expect(editor.actions[1]?.right).toEqual({ kind: "empty", label: "a.ts" });
+    } finally {
+      client.dispose();
+      server.dispose();
+    }
+  });
+
+  test("editor.goToFile: a path in the checkout re-maps the line across worktreeDiff and reveals a file", async () => {
+    const service = new FakeRepoService({ kind: "ok", path: "git", version: "2.40.0" });
+    service.checkoutPaths.add("src/a.ts");
+    service.worktreeDiffResult = [
+      {
+        oldStart: 1,
+        oldLines: 1,
+        newStart: 1,
+        newLines: 3,
+        heading: "",
+        lines: [
+          { kind: "context", text: "x", oldLine: 1, newLine: 1, noNewlineAtEof: false },
+          { kind: "add", text: "y", oldLine: undefined, newLine: 2, noNewlineAtEof: false },
+          { kind: "add", text: "z", oldLine: undefined, newLine: 3, noNewlineAtEof: false },
+        ],
+      },
+    ];
+    const { client, server, editor } = setup(service);
+    try {
+      const result = await client.request("editor.goToFile", {
+        repoId: "/repos/a",
+        rev: "abc",
+        path: "src/a.ts",
+        line: 1,
+      });
+      // Two lines inserted after line 1 on the "old" side push a later old-line-1 reference
+      // forward — the drift re-map, not the unmapped historical line.
+      expect(result).toEqual({ kind: "liveFile", path: "src/a.ts", line: 1 });
+      expect(editor.actions).toEqual([
+        { kind: "reveal", ref: { kind: "file", path: "/repos/a/src/a.ts" }, line: 1 },
+      ]);
+    } finally {
+      client.dispose();
+      server.dispose();
+    }
+  });
+
+  test("editor.goToFile: worktreeDiff returning null falls back to the unmapped line unchanged", async () => {
+    const service = new FakeRepoService({ kind: "ok", path: "git", version: "2.40.0" });
+    service.checkoutPaths.add("src/a.ts");
+    service.worktreeDiffResult = null;
+    const { client, server } = setup(service);
+    try {
+      const result = await client.request("editor.goToFile", {
+        repoId: "/repos/a",
+        rev: "abc",
+        path: "src/a.ts",
+        line: 42,
+      });
+      expect(result).toEqual({ kind: "liveFile", path: "src/a.ts", line: 42 });
+    } finally {
+      client.dispose();
+      server.dispose();
+    }
+  });
+
+  test("editor.goToFile: a path missing from the checkout falls through to service.blob's three outcomes", async () => {
+    const service = new FakeRepoService({ kind: "ok", path: "git", version: "2.40.0" });
+    const { client, server, editor } = setup(service);
+    try {
+      service.blobResult = { kind: "missing" };
+      expect(
+        await client.request("editor.goToFile", {
+          repoId: "/repos/a",
+          rev: "abc",
+          path: "gone.ts",
+          line: 1,
+        }),
+      ).toEqual({ kind: "unavailable", reason: "notInRevision" });
+
+      service.blobResult = { kind: "binary" };
+      expect(
+        await client.request("editor.goToFile", {
+          repoId: "/repos/a",
+          rev: "abc",
+          path: "gone.ts",
+          line: 1,
+        }),
+      ).toEqual({ kind: "unavailable", reason: "binary" });
+
+      service.blobResult = { kind: "tooLarge", bytes: 2_000_000, limitBytes: 1_000_000 };
+      expect(
+        await client.request("editor.goToFile", {
+          repoId: "/repos/a",
+          rev: "abc",
+          path: "gone.ts",
+          line: 1,
+        }),
+      ).toEqual({ kind: "unavailable", reason: "tooLarge" });
+
+      service.blobResult = { kind: "found", content: "hello\n" };
+      const result = await client.request("editor.goToFile", {
+        repoId: "/repos/a",
+        rev: "abc",
+        path: "gone.ts",
+        line: 3,
+      });
+      expect(result).toEqual({ kind: "virtualBlob", path: "gone.ts", rev: "abc", line: 3 });
+      const lastAction = editor.actions.at(-1);
+      expect(lastAction?.kind).toBe("reveal");
+      expect(lastAction?.ref).toEqual({
+        kind: "virtual",
+        key: expect.stringContaining("gone.ts") as unknown as string,
+        label: "gone.ts",
+      });
+      expect(lastAction?.line).toBe(3);
+    } finally {
+      client.dispose();
+      server.dispose();
+    }
+  });
+
+  test("clipboard.write calls Clipboard.writeText and logs only the label, never the text", async () => {
+    const service = new FakeRepoService({ kind: "ok", path: "git", version: "2.40.0" });
+    const { client, server, clipboard, logger } = setup(service);
+    try {
+      const result = await client.request("clipboard.write", {
+        text: "a very secret commit message",
+        label: "full message",
+      });
+      expect(result).toEqual({});
+      expect(clipboard.writes).toEqual(["a very secret commit message"]);
+      const loggedText = logger.entries.some((entry) =>
+        JSON.stringify(entry).includes("a very secret commit message"),
+      );
+      expect(loggedText).toBe(false);
+      const loggedLabel = logger.entries.some((entry) =>
+        JSON.stringify(entry.data ?? {}).includes("full message"),
+      );
+      expect(loggedLabel).toBe(true);
+    } finally {
+      client.dispose();
+      server.dispose();
+    }
+  });
+
+  test("clipboard.write propagates a rejected write rather than swallowing it into a boolean", async () => {
+    const service = new FakeRepoService({ kind: "ok", path: "git", version: "2.40.0" });
+    const { client, server, clipboard } = setup(service);
+    clipboard.rejectWith = new Error("clipboard unavailable");
+    try {
+      await expect(client.request("clipboard.write", { text: "x", label: "y" })).rejects.toThrow();
     } finally {
       client.dispose();
       server.dispose();
