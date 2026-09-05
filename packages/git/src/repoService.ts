@@ -13,6 +13,7 @@
 import { existsSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import type {
+  CheckoutPreflight,
   CommitDetail,
   CommitStore,
   DiffHunk,
@@ -20,20 +21,69 @@ import type {
   FileDiff,
   FileDiffBody,
   FileWatcher,
+  HeadState,
+  InProgressOperation,
   Logger,
+  OpErrorKind,
+  OpRequest,
+  OpResult,
   PackedCommitChunk,
   ProcessRunner,
+  RefKind,
+  RefRecord,
   RepoIdentity,
+  RevertPreflight,
+  RevertPrediction,
   Settings,
+  StatusResult,
+  StatusSummary,
+  UndoRecord,
+  UndoSlotSnapshot,
 } from "@kira-version/core";
-import { assertDefined, CommitStore as CommitStoreImpl } from "@kira-version/core";
+import {
+  assertDefined,
+  classifyCheckout,
+  classifyInProgress,
+  classifyRevert,
+  CommitStore as CommitStoreImpl,
+  describeInProgress,
+  dirtyPathsFrom,
+  summarizeStatus,
+  UNDO_POLICY,
+  UndoSlot,
+} from "@kira-version/core";
 import { DEFAULT_MAX_BLOB_BYTES, openCatFileSession } from "./catFile.ts";
 import type { GitResolution, GitVersion, ResolvedGit } from "./discovery.ts";
 import { locateGit, resolveRepoIdentity } from "./discovery.ts";
-import type { GitDriver } from "./driver.ts";
+import type { GitDriver, GitRead } from "./driver.ts";
 import { openGitDriver } from "./driver.ts";
+import { GitError } from "./errors.ts";
 import type { LogSession } from "./logSession.ts";
 import { openLogSession } from "./logSession.ts";
+import {
+  branchConfigRegexpArgs,
+  branchCreateAndSwitchArgs,
+  branchCreateArgs,
+  branchDeleteArgs,
+  branchRenameArgs,
+  branchRevParseArgs,
+} from "./ops/branch.ts";
+import {
+  rewrittenPathsArgs,
+  switchArgs,
+  switchCreateTrackingArgs,
+  switchDetachArgs,
+} from "./ops/checkout.ts";
+import { abortArgs, continueArgs, readInProgressStateFiles } from "./ops/conflict.ts";
+import { revertArgs } from "./ops/revert.ts";
+import {
+  tagCreateArgs,
+  tagDeleteArgs,
+  tagDeleteRemoteArgs,
+  tagPushArgs,
+  undoAnnotatedTagArgs,
+  undoLightweightTagArgs,
+} from "./ops/tag.ts";
 import type { ParsedFileDiffBody } from "./parse/diff.ts";
 import {
   fileDiffArgs,
@@ -41,7 +91,15 @@ import {
   parseFileDiffBody,
   worktreeDiffArgs,
 } from "./parse/diff.ts";
-import { commitDetail } from "./queries.ts";
+import { parseRefRecord, REFS_FORMAT, REFS_RECORD_DELIMITER } from "./parse/refs.ts";
+import type { RefsSnapshot } from "./queries.ts";
+import {
+  commitDetail,
+  predictMerge,
+  refsSnapshot as fetchRefsSnapshot,
+  revertMergeParents,
+  status,
+} from "./queries.ts";
 import type { RepoWatcher, WatchSignal } from "./watcher.ts";
 import { watchRepo } from "./watcher.ts";
 
@@ -245,6 +303,143 @@ function toGitStatus(resolution: GitResolution): GitStatus {
 }
 
 // ---------------------------------------------------------------------------------------
+// P6/W8 — refs, status, pre-flight and the op executor. Local wire-shaped result types for the
+// same reason `GitStatus`/`RepoOpenOutcome` above are: no consumer across the wire exists until
+// `rpcHandlers.ts` (W11) binds this service to `@kira-version/ipc`'s contract.
+// ---------------------------------------------------------------------------------------
+
+export interface RefsResult {
+  readonly branches: readonly RefRecord[];
+  readonly remoteBranches: readonly RefRecord[];
+  readonly tags: readonly RefRecord[];
+  readonly head: HeadState;
+}
+
+/** §7.5's D \ T display cap (200): the *verdict* is always computed over the full, uncapped set
+ *  (`dirtyPathsFrom`/`summarizeStatus` never truncate) — only the list a dialog would ever try to
+ *  render gets capped, and only here, at the one layer that knows what "too many to show" means. */
+const DIRTY_PATHS_DISPLAY_CAP = 200;
+
+function capPaths(paths: readonly string[]): {
+  readonly paths: string[];
+  readonly truncated: boolean;
+} {
+  if (paths.length <= DIRTY_PATHS_DISPLAY_CAP) return { paths: [...paths], truncated: false };
+  return { paths: paths.slice(0, DIRTY_PATHS_DISPLAY_CAP), truncated: true };
+}
+
+/** D12: `%(worktreepath)` is populated for a ref checked out in ANY worktree, including this
+ *  session's own — subtracting the session's own toplevel here is what turns that raw field into
+ *  "checked out ELSEWHERE" (`RefRecord.checkedOutIn`'s own doc comment; `parse/refs.ts`'s header
+ *  comment says the same). Compared via `resolve()` on both sides so a trailing separator or a
+ *  non-normalized root can never produce a false "elsewhere". */
+function subtractOwnWorktree(records: readonly RefRecord[], ownRoot: string): RefRecord[] {
+  const root = resolve(ownRoot);
+  return records.map((r) =>
+    r.checkedOutIn !== undefined && resolve(r.checkedOutIn) === root
+      ? { ...r, checkedOutIn: undefined }
+      : r,
+  );
+}
+
+/** Every path `status` reports as unmerged — `classifyInProgress`'s `unmergedPaths` input, shared
+ *  by `statusSummary`, both pre-flights and the executor's post-op read-back, so the four never
+ *  drift on what "unmerged" means. */
+function unmergedPathsFrom(result: StatusResult): string[] {
+  return result.entries.filter((e) => e.kind === "unmerged").map((e) => e.path);
+}
+
+/**
+ * Resolves the wire's bare `target: string` (`preflight.checkout`/`op.run`'s checkout) against a
+ * ref snapshot into the `{kind, name}` shape `classifyCheckout` expects — branches checked before
+ * tags before remote branches, so a local branch always wins a same-named ambiguity (the exact
+ * case `checkout.test.ts`'s "a remote-branch target WITH a local counterpart" comment describes:
+ * *this* is where that decision is actually made, not in the classifier). Anything matching
+ * neither is a raw sha, passed through verbatim — `classifyCheckout`'s `sha` kind always detaches
+ * and git itself will reject a target that resolves to nothing at all when the argv actually runs.
+ */
+function resolveCheckoutTarget(
+  snapshot: RefsSnapshot,
+  target: string,
+): {
+  readonly kind: RefKind | "sha";
+  readonly name: string;
+  readonly checkedOutIn: string | undefined;
+} {
+  const branch = snapshot.branches.find((r) => r.shortName === target);
+  if (branch !== undefined) {
+    return { kind: "branch", name: branch.shortName, checkedOutIn: branch.checkedOutIn };
+  }
+  const tag = snapshot.tags.find((r) => r.shortName === target);
+  if (tag !== undefined) return { kind: "tag", name: tag.shortName, checkedOutIn: undefined };
+  const remoteBranch = snapshot.remoteBranches.find((r) => r.shortName === target);
+  if (remoteBranch !== undefined) {
+    return { kind: "remoteBranch", name: remoteBranch.shortName, checkedOutIn: undefined };
+  }
+  return { kind: "sha", name: target, checkedOutIn: undefined };
+}
+
+/** `origin/topic` -> `topic` — the same heuristic `classifyCheckout`'s own module uses for the
+ *  label; duplicated rather than imported because that one is `core`'s pure-data concern and this
+ *  one picks the actual branch name the executor's `switch -c` argv will create. */
+function localNameForRemoteBranch(remoteBranchName: string): string {
+  const slash = remoteBranchName.indexOf("/");
+  return slash === -1 ? remoteBranchName : remoteBranchName.slice(slash + 1);
+}
+
+function toUndoSnapshot(record: UndoRecord): UndoSlotSnapshot {
+  return {
+    id: record.id,
+    label: record.label,
+    recoverySha: record.recoverySha,
+    createdAt: record.createdAt,
+  };
+}
+
+/** One id per captured undo record — `crypto.randomUUID()` (available on both Node's and Bun's
+ *  `globalThis`) is more than enough entropy for a value that only ever needs to match against
+ *  the single record a session's one `UndoSlot` currently holds. */
+function randomId(): string {
+  return globalThis.crypto.randomUUID();
+}
+
+/** A plain one-shot collector, like `queries.ts`'s own `collectBytes` — duplicated rather than
+ *  imported because that one is not exported (an internal helper of a file this one does not
+ *  otherwise need), and this is a three-line function. */
+async function collectOneShotBytes(read: GitRead): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for await (const chunk of read.bytes) {
+    chunks.push(chunk);
+    total += chunk.length;
+  }
+  await read.done;
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
+/** A single `for-each-ref` record for exactly one refname — the undo-capture read a tag delete
+ *  needs immediately before it runs (never `session.refsCache`, which may be stale by the time an
+ *  op actually executes). `undefined` when the ref no longer resolves (a race with something else
+ *  deleting it first) rather than a throw — for-each-ref exits 0 with empty output for a refname
+ *  that matches nothing, so there is no error to catch here in the first place. */
+async function collectSingleRefRecord(
+  driver: GitDriver,
+  refname: string,
+): Promise<Uint8Array | undefined> {
+  const read = driver.read(["for-each-ref", `--format=${REFS_FORMAT}`, refname]);
+  const records: Uint8Array[] = [];
+  for await (const record of read.records(REFS_RECORD_DELIMITER)) records.push(record);
+  await read.done;
+  return records.find((r) => r.length > 0);
+}
+
+// ---------------------------------------------------------------------------------------
 // Public surface
 // ---------------------------------------------------------------------------------------
 
@@ -306,6 +501,19 @@ interface RepoSession {
    *  forever, so — unlike `detailCache` — this is *never* invalidated by the watcher; it lives
    *  exactly as long as this `RepoSession` does. */
   readonly diffCache: ByteCappedLru<FileDiffBody>;
+  /** P6/W8: the last authoritative `HeadState`. Seeded from `identity.head` at open; refreshed
+   *  by every one of `refs`/`statusSummary`/`runOp` that can see it for free, so a caller of
+   *  `refs()` between two of those still gets *some* answer instead of nothing, even in the one
+   *  narrow window (HEAD moves to a newly detached state from outside this session, between
+   *  calls) `for-each-ref` cannot see at all — see this file's module doc / the Findings section
+   *  of `docs/plans/P6.md` for the judgment call. */
+  head: HeadState;
+  /** P6/W8: `refs()`'s own cache, dropped on `refsChanged` alongside `detailCache` — a ref's
+   *  identity is stable; its `track` and its `worktreepath` are not (mirrors `detailCache`'s own
+   *  reasoning above, one level up). */
+  refsCache: RefsResult | undefined;
+  /** P6/W8 (§7.12): one undo record per session, replacing itself on every op the executor runs. */
+  readonly undo: UndoSlot;
 }
 
 function initialDictionaryMarks(): Map<number, number> {
@@ -703,6 +911,482 @@ export class RepoService {
   }
 
   // ---------------------------------------------------------------------------------------
+  // P6/W8 — refs, status, pre-flight, and the op executor (§7's four-step shape's host half).
+  // ---------------------------------------------------------------------------------------
+
+  /** §4.4/D12: two spawns (`refsSnapshot`), cached on the session and dropped on `refsChanged`
+   *  (`#handleSignal`) — the same policy as `detailCache`, one level up. `head` comes from
+   *  `for-each-ref`'s own `%(HEAD)` marker when a branch is checked out (authoritative for the
+   *  overwhelmingly common case, and free — no third spawn); a detached or unborn HEAD is
+   *  invisible to `for-each-ref` entirely, so those fall back to the session's cached `head`,
+   *  itself refreshed by `statusSummary`/`runOp` below. */
+  async refs(repoId: string): Promise<RefsResult> {
+    const session = this.#requireSession(repoId);
+    if (session.refsCache) return session.refsCache;
+
+    const snapshot = await fetchRefsSnapshot(session.driver);
+    const headBranch = snapshot.branches.find((r) => r.isHead);
+    if (headBranch !== undefined) session.head = { kind: "branch", name: headBranch.shortName };
+
+    const result: RefsResult = {
+      branches: subtractOwnWorktree(snapshot.branches, session.identity.root),
+      remoteBranches: subtractOwnWorktree(snapshot.remoteBranches, session.identity.root),
+      tags: snapshot.tags,
+      head: session.head,
+    };
+    session.refsCache = result;
+    return result;
+  }
+
+  /** §4.4/§7.11: `status()` (P1) plus `ops/conflict.ts`'s state files, folded through
+   *  `classifyInProgress` and `core`'s `summarizeStatus` — the wire-shaped `StatusSummary`.
+   *  `dirtyPaths` is capped for display at 200 (`capPaths`); the *verdict* other callers
+   *  (pre-flight) need is always computed over the full, uncapped set, never this one. */
+  async statusSummary(repoId: string): Promise<StatusSummary> {
+    const session = this.#requireSession(repoId);
+    const { statusResult, inProgress } = await this.#statusAndInProgress(session);
+    const summary = summarizeStatus(statusResult, inProgress);
+    const { paths, truncated } = capPaths(summary.dirtyPaths);
+    return { ...summary, dirtyPaths: paths, dirtyTruncated: truncated };
+  }
+
+  /** §7's pre-flight orchestration for checkout: gather the reads in parallel, resolve the
+   *  wire's bare `target` string against the current ref snapshot (§7.5/§7.9 — this is where a
+   *  same-named local branch wins over a remote-tracking one, per `resolveCheckoutTarget`'s own
+   *  comment), call the pure classifier, return. No decisions here beyond "which query" — see
+   *  the module doc on `classifyCheckout`'s `mode` parameter for why `mode` must be threaded
+   *  through rather than derived from `target.kind` alone. */
+  async preflightCheckout(
+    repoId: string,
+    target: string,
+    mode: "switch" | "detach",
+  ): Promise<CheckoutPreflight> {
+    const session = this.#requireSession(repoId);
+    const snapshot = await fetchRefsSnapshot(session.driver);
+    const resolved = resolveCheckoutTarget(snapshot, target);
+    const ownRoot = resolve(session.identity.root);
+    const checkedOutIn =
+      resolved.checkedOutIn !== undefined && resolve(resolved.checkedOutIn) !== ownRoot
+        ? resolved.checkedOutIn
+        : undefined;
+
+    const [{ statusResult, inProgress }, rewritten] = await Promise.all([
+      this.#statusAndInProgress(session),
+      this.#rewrittenPaths(session, resolved.name),
+    ]);
+
+    return classifyCheckout({
+      target: { kind: resolved.kind, name: resolved.name },
+      mode,
+      dirty: dirtyPathsFrom(statusResult),
+      rewritten,
+      targetTreePaths: null,
+      inProgress,
+      checkedOutIn,
+      stashAvailable: false,
+    });
+  }
+
+  /** §7's pre-flight orchestration for revert. `mergeParents` (one `show -s` per requested sha,
+   *  plus one per distinct merge parent — `revertMergeParents`) is the wire's own missing half:
+   *  `preflight.revert`'s request carries only `shas` and an optional already-chosen `mainline`,
+   *  never the parent lists the mainline picker needs, so this is where they are looked up. The
+   *  `merge-tree` prediction (§7.10) is scoped to `shas[0]` and only ever attempted once a single
+   *  mainline is actually known for it — a merge commit with no mainline chosen yet has no one
+   *  "other" tree to diff against, so `reason` says so rather than guessing `-m 1`. */
+  async preflightRevert(
+    repoId: string,
+    shas: readonly string[],
+    mainline?: number,
+  ): Promise<RevertPreflight> {
+    const session = this.#requireSession(repoId);
+    const [{ statusResult, inProgress }, mergeParents] = await Promise.all([
+      this.#statusAndInProgress(session),
+      revertMergeParents(session.driver, shas),
+    ]);
+
+    const firstSha = shas[0];
+    const prediction = await this.#predictRevert(session, firstSha, mergeParents, mainline);
+
+    return classifyRevert({
+      shas,
+      mergeParents,
+      mainline,
+      dirtyPaths: dirtyPathsFrom(statusResult).map((d) => d.path),
+      inProgress,
+      detachedHead: session.head.kind === "detached",
+      prediction,
+    });
+  }
+
+  async #predictRevert(
+    session: RepoSession,
+    firstSha: string | undefined,
+    mergeParents: ReadonlyMap<string, unknown>,
+    mainline: number | undefined,
+  ): Promise<RevertPrediction> {
+    if (firstSha === undefined) return { kind: "unknown", reason: "no commit selected" };
+    const isMerge = mergeParents.has(firstSha);
+    if (isMerge && mainline === undefined) {
+      return {
+        kind: "unknown",
+        reason: "a mainline parent must be chosen before predicting this merge commit's revert",
+      };
+    }
+    const effectiveMainline = isMerge ? (mainline as number) : 1;
+    try {
+      return await predictMerge(session.driver, "HEAD", `${firstSha}^${effectiveMainline}`, {
+        mergeBase: firstSha,
+      });
+    } catch (err) {
+      return { kind: "unknown", reason: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /** T for `classifyCheckout` — `git diff --name-only -z HEAD <target>`, collected into a plain
+   *  path list. A failed spawn (an unresolvable `target`) propagates: pre-flight cannot honestly
+   *  classify a target git itself cannot resolve, and the caller offered it from a ref list or a
+   *  sha the UI already validated some other way. */
+  async #rewrittenPaths(session: RepoSession, target: string): Promise<string[]> {
+    const read = session.driver.read(rewrittenPathsArgs(target));
+    const paths: string[] = [];
+    const decoder2 = new TextDecoder("utf-8", { fatal: false });
+    for await (const record of read.records(0x00)) {
+      if (record.length > 0) paths.push(decoder2.decode(record));
+    }
+    await read.done;
+    return paths;
+  }
+
+  /** §7.11's classification, shared by `statusSummary`, both pre-flights, and `runOp`/`undoRun`'s
+   *  pre- and post-op reads — the one place `status()`, `readInProgressStateFiles` and
+   *  `classifyInProgress` are joined, so no caller pays for a second `status` spawn just to get
+   *  the same in-progress answer a sibling call already computed, and none of them can disagree
+   *  on what "in progress" means. Also refreshes `session.head` as a side effect — every one of
+   *  these callers already has a fresh `StatusResult` in hand, so this is the one place the cache
+   *  can be kept honest for free (see `RepoSession.head`'s own doc comment on the narrow window
+   *  this does not cover). */
+  async #statusAndInProgress(session: RepoSession): Promise<{
+    readonly statusResult: StatusResult;
+    readonly inProgress: InProgressOperation | null;
+  }> {
+    const [statusResult, stateFiles] = await Promise.all([
+      status(session.driver),
+      readInProgressStateFiles(session.identity.gitDir),
+    ]);
+    const inProgress = classifyInProgress({
+      stateFiles,
+      unmergedPaths: unmergedPathsFrom(statusResult),
+    });
+    session.head = summarizeStatus(statusResult, inProgress).head;
+    return { statusResult, inProgress };
+  }
+
+  /** Convenience over `#statusAndInProgress` for a caller that only needs the classification
+   *  (the executor's early-abort/not-found paths) — still exactly one `status` spawn. */
+  async #currentInProgress(session: RepoSession): Promise<InProgressOperation | null> {
+    return (await this.#statusAndInProgress(session)).inProgress;
+  }
+
+  /**
+   * §7's executor, in the plan's exact order:
+   *   1. build argv          (no policy — `ops/*`)
+   *   2. capture undo        (`UNDO_POLICY[op.kind] === "undoable"` → read the sha/config FIRST)
+   *   3. `driver.write(argv)` (serialized; bumps `generation`; fires `onInvalidated` on success)
+   *   4. read back           head + in-progress state, ALWAYS — success or failure
+   *   5. `slot.set(record | null)` (null clears — §7.12)
+   *   6. return `OpResult`
+   *
+   * Step 2 before step 3 is the entire correctness of undo: the sha must be read while the ref
+   * still exists. Step 4 after *both* outcomes is what makes a conflicting revert — which fails
+   * with `Conflict` and *leaves* `REVERT_HEAD` — produce an `OpResult` whose `inProgress` is
+   * populated, so the banner appears from the operation's own reply, not a watcher tick.
+   *
+   * A `GitError` from step 3 is caught and mapped to `OpResult.error`, never rethrown: this is
+   * the one request in the contract where a git failure is an expected outcome with a rendering,
+   * not an exception. `GitCancelled` and `GitSpawnFailed` keep propagating, as everywhere else.
+   */
+  async runOp(repoId: string, op: OpRequest): Promise<OpResult> {
+    const session = this.#requireSession(repoId);
+    const prepared = await this.#prepareOp(session, op);
+
+    if (prepared.earlyError) {
+      // Nothing to git: e.g. `opContinue` with no operation in progress at all. No write ever
+      // ran, so no generation bump and no undo-slot mutation beyond the usual clearing.
+      session.undo.set(null);
+      const inProgress = await this.#currentInProgress(session);
+      return { ok: false, error: prepared.earlyError, undo: null, head: session.head, inProgress };
+    }
+
+    let error: OpResult["error"];
+    try {
+      for (const argv of prepared.argvList) {
+        await session.driver.write(argv);
+      }
+    } catch (err) {
+      if (err instanceof GitError) {
+        error = { kind: err.kind, message: err.stderr.trim() || err.message };
+      } else {
+        throw err;
+      }
+    }
+
+    const ok = error === undefined;
+    // `UNDO_POLICY` is the actual authority consulted here, not just which `#prepareOp` branch
+    // happened to build a record: a record from a kind `UNDO_POLICY` marks `notUndoable` is
+    // dropped rather than trusted, so the total mapping stays the one place this can never
+    // silently drift from the executor's own per-kind capture logic.
+    const record = ok && UNDO_POLICY[op.kind].kind === "undoable" ? prepared.undo : null;
+    session.undo.set(record);
+
+    // Step 4: read back head + in-progress state, ALWAYS — success or failure (a conflicting
+    // revert fails with `Conflict` and *leaves* `REVERT_HEAD`; this is what surfaces it here
+    // rather than waiting on a watcher tick).
+    const { inProgress } = await this.#statusAndInProgress(session);
+
+    return {
+      ok,
+      error,
+      undo: record ? toUndoSnapshot(record) : null,
+      head: session.head,
+      inProgress,
+    };
+  }
+
+  /** `undo.peek` — the current slot, or `null`. Never mutates it. */
+  undoPeek(repoId: string): UndoSlotSnapshot | null {
+    const session = this.#requireSession(repoId);
+    const record = session.undo.peek();
+    return record ? toUndoSnapshot(record) : null;
+  }
+
+  /** `undo.run` — takes the record (so a replayed undo cannot be replayed twice), checks the
+   *  captured recovery sha still resolves (`cat-file -e <sha>^{commit}`; §7.12's "so the user can
+   *  recover manually even after the slot is cleared" only holds if a stale sha is refused rather
+   *  than replayed against something else entirely), then replays its argv list in order. Reuses
+   *  `runOp`'s own read-back/error-mapping shape rather than duplicating it. */
+  async undoRun(repoId: string, id: string): Promise<OpResult> {
+    const session = this.#requireSession(repoId);
+    const record = session.undo.take(id);
+    if (record === null) {
+      const inProgress = await this.#currentInProgress(session);
+      return {
+        ok: false,
+        error: { kind: "NotFound", message: "This undo is no longer available." },
+        undo: null,
+        head: session.head,
+        inProgress,
+      };
+    }
+
+    const stillResolves = await session.driver.catFile.check(`${record.recoverySha}^{commit}`);
+    if (stillResolves.kind === "missing") {
+      const inProgress = await this.#currentInProgress(session);
+      return {
+        ok: false,
+        error: {
+          kind: "NotFound",
+          message: `The recovered commit ${record.recoverySha.slice(0, 7)} no longer exists.`,
+        },
+        undo: null,
+        head: session.head,
+        inProgress,
+      };
+    }
+
+    let error: OpResult["error"];
+    try {
+      for (const argv of record.replay) {
+        await session.driver.write(argv);
+      }
+    } catch (err) {
+      if (err instanceof GitError) {
+        error = { kind: err.kind, message: err.stderr.trim() || err.message };
+      } else {
+        throw err;
+      }
+    }
+
+    const { inProgress } = await this.#statusAndInProgress(session);
+
+    return { ok: error === undefined, error, undo: null, head: session.head, inProgress };
+  }
+
+  /** Step 1+2 of `runOp`'s executor: builds the argv list (one entry, except `branchCreate` with
+   *  an explicit `track` that differs from plain DWIM-on-`startPoint`, which is create-and-switch
+   *  plus one `--set-upstream-to`) and — for exactly the two op kinds `UNDO_POLICY` marks
+   *  `"undoable"` — captures the pre-op state the eventual undo replay needs. Both happen before
+   *  any write. `earlyError` is set instead of an argv list only for `opContinue`/`opAbort` with
+   *  no operation in progress to act on at all — there is no subcommand to even pick without
+   *  knowing the current kind, so this is caught here rather than spawning something arbitrary. */
+  async #prepareOp(
+    session: RepoSession,
+    op: OpRequest,
+  ): Promise<{
+    readonly argvList: readonly (readonly string[])[];
+    readonly undo: UndoRecord | null;
+    readonly earlyError?: { readonly kind: OpErrorKind; readonly message: string };
+  }> {
+    switch (op.kind) {
+      case "checkout": {
+        const snapshot = await fetchRefsSnapshot(session.driver);
+        const resolved = resolveCheckoutTarget(snapshot, op.target);
+        const willDetach =
+          op.mode === "detach" || resolved.kind === "tag" || resolved.kind === "sha";
+        const discard = op.discardLocalChanges;
+        if (willDetach) {
+          return { argvList: [switchDetachArgs(resolved.name, { discard })], undo: null };
+        }
+        if (resolved.kind === "remoteBranch") {
+          const branch = localNameForRemoteBranch(resolved.name);
+          return {
+            argvList: [switchCreateTrackingArgs(branch, resolved.name, { discard })],
+            undo: null,
+          };
+        }
+        return { argvList: [switchArgs(resolved.name, { discard })], undo: null };
+      }
+      case "branchCreate": {
+        if (!op.checkout) {
+          const trackOpt = op.track !== undefined ? { track: op.track } : {};
+          return { argvList: [branchCreateArgs(op.name, op.startPoint, trackOpt)], undo: null };
+        }
+        const argvList: string[][] = [branchCreateAndSwitchArgs(op.name, op.startPoint)];
+        if (op.track !== undefined) {
+          argvList.push(["branch", `--set-upstream-to=${op.track}`, op.name]);
+        }
+        return { argvList, undo: null };
+      }
+      case "branchDelete": {
+        const undo = await this.#captureBranchDeleteUndo(session, op.name);
+        return { argvList: [branchDeleteArgs(op.name, { force: op.force })], undo };
+      }
+      case "branchRename":
+        return { argvList: [branchRenameArgs(op.from, op.to)], undo: null };
+      case "tagCreate": {
+        const opts: { message?: string; force?: boolean } = { force: op.force };
+        if (op.message !== undefined) opts.message = op.message;
+        return { argvList: [tagCreateArgs(op.name, op.target, opts)], undo: null };
+      }
+      case "tagDelete": {
+        const undo = await this.#captureTagDeleteUndo(session, op.name);
+        return { argvList: [tagDeleteArgs(op.name)], undo };
+      }
+      case "tagPush":
+        return { argvList: [tagPushArgs(op.remote, op.names)], undo: null };
+      case "tagDeleteRemote":
+        return { argvList: [tagDeleteRemoteArgs(op.remote, op.name)], undo: null };
+      case "revert": {
+        const opts: { mainline?: number; noCommit?: boolean } = { noCommit: op.noCommit };
+        if (op.mainline !== undefined) opts.mainline = op.mainline;
+        return { argvList: [revertArgs(op.shas, opts)], undo: null };
+      }
+      case "opContinue":
+      case "opAbort": {
+        const inProgress = await this.#currentInProgress(session);
+        const verb = op.kind === "opContinue" ? "Continue" : "Abort";
+        if (inProgress === null) {
+          return {
+            argvList: [],
+            undo: null,
+            earlyError: {
+              kind: "Unknown",
+              message: `No operation is currently in progress to ${verb.toLowerCase()}.`,
+            },
+          };
+        }
+        const argv =
+          op.kind === "opContinue" ? continueArgs(inProgress.kind) : abortArgs(inProgress.kind);
+        if (argv === undefined) {
+          return {
+            argvList: [],
+            undo: null,
+            earlyError: {
+              kind: "Unknown",
+              message: `${describeInProgress(inProgress)} offers no ${verb}.`,
+            },
+          };
+        }
+        return { argvList: [argv], undo: null };
+      }
+    }
+  }
+
+  /** Undo-capture for a branch delete (probe P4): the branch's current tip (still resolvable
+   *  immediately before the delete — this is what makes the recovery sha the one right before it,
+   *  not a stale guess) plus every `branch.<name>.*` config line, replayed back in order on undo.
+   *  Best-effort: a branch that fails to resolve here (a race with something else deleting it)
+   *  yields `null` — the delete itself will then simply fail with `NotFound`, and there is nothing
+   *  to capture regardless. */
+  async #captureBranchDeleteUndo(session: RepoSession, name: string): Promise<UndoRecord | null> {
+    let sha: string;
+    try {
+      const bytes = await collectOneShotBytes(session.driver.read(branchRevParseArgs(name)));
+      sha = new TextDecoder().decode(bytes).trim();
+      if (sha.length === 0) return null;
+    } catch {
+      return null;
+    }
+
+    let configLines: string[] = [];
+    try {
+      const bytes = await collectOneShotBytes(session.driver.read(branchConfigRegexpArgs(name)));
+      configLines = new TextDecoder()
+        .decode(bytes)
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0);
+    } catch {
+      // `--get-regexp` exits 1 with empty output when the branch has no config at all — not an
+      // error, just nothing to replay beyond the ref itself.
+      configLines = [];
+    }
+
+    const replay: string[][] = [["update-ref", `refs/heads/${name}`, sha]];
+    for (const line of configLines) {
+      const space = line.indexOf(" ");
+      if (space === -1) continue;
+      replay.push(["config", line.slice(0, space), line.slice(space + 1)]);
+    }
+
+    return {
+      id: randomId(),
+      label: `Deleted branch ${name}`,
+      recoverySha: sha,
+      createdAt: Date.now(),
+      replay,
+    };
+  }
+
+  /** Undo-capture for a tag delete (probe P3): reads the ref fresh (never from `refsCache`, which
+   *  may be stale) right before the delete, so the annotated-vs-lightweight replay choice — and
+   *  the sha it replays at — reflect the tag as it stood at that instant, not whenever it was
+   *  last listed. */
+  async #captureTagDeleteUndo(session: RepoSession, name: string): Promise<UndoRecord | null> {
+    let record: RefRecord;
+    try {
+      const bytes = await collectSingleRefRecord(session.driver, `refs/tags/${name}`);
+      if (bytes === undefined) return null;
+      record = parseRefRecord(bytes);
+    } catch {
+      return null;
+    }
+
+    const replay =
+      record.objectType === "tag"
+        ? [undoAnnotatedTagArgs(name, record.objectId)]
+        : [undoLightweightTagArgs(name, record.objectId)];
+
+    return {
+      id: randomId(),
+      label: `Deleted tag ${name}`,
+      recoverySha: record.objectId,
+      createdAt: Date.now(),
+      replay,
+    };
+  }
+
+  // ---------------------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------------------
 
@@ -727,6 +1411,9 @@ export class RepoService {
       subscriptions: [],
       detailCache: new CountCappedLru(this.#detailCacheMaxEntries),
       diffCache: new ByteCappedLru(this.#diffCacheMaxBytes),
+      head: identity.head,
+      refsCache: undefined,
+      undo: new UndoSlot(),
     };
 
     session.subscriptions.push(watcher.onSignal((signal) => this.#handleSignal(session, signal)));
@@ -757,6 +1444,8 @@ export class RepoService {
       session.staleReason = "refsChanged";
       // §5.5: `decoration` is the one field of a cached `CommitDetail` that is not immutable.
       session.detailCache.clear();
+      // P6/W8: same policy, one level up — a ref's `track`/`worktreepath` are not immutable either.
+      session.refsCache = undefined;
     }
     for (const listener of this.#changeListeners) listener({ repoId: session.repoId, kind });
   }
