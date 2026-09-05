@@ -238,6 +238,29 @@ test.describe("vscode panel", () => {
       // Nothing is cached before this session's very first stream, so every row this load emits
       // comes from git.
       await expect(frame.getByTestId("chunk-source")).toHaveText("git");
+
+      // P15 W9: a rendered grid with *some* text in it is not proof the seven `PackedCommitChunk`
+      // columns actually crossed the real `WebviewView` boundary intact — a wrong `bufferEncoding`
+      // (P15's W1 finding) would still paint a grid, just one with garbage or empty cells, and
+      // `.not.toBeEmpty()` above would not catch that. `linear()`'s commits are in creation order
+      // (oldest first); `git log`'s own default is newest first, so row 0 is the newest commit —
+      // its own real sha (not just "a sha-shaped string") and its own real subject.
+      const newestSha = repo.commits.at(-1);
+      if (!newestSha) throw new Error("linear(10) produced no commits");
+      // `expectAllRowsLoaded` just scrolled the viewport to its very bottom to prove the last row
+      // arrived — SlickGrid virtualizes rows the same way in a real VS Code panel as it does in
+      // the harness (`expectAllRowsLoaded`'s own doc comment), so on a repo this small that scroll
+      // evicts row 0 from the DOM entirely. Scroll back to the top first so row 0 is actually
+      // rendered again before asserting on its content.
+      await frame
+        .locator(".kv-commit-grid .slick-viewport")
+        .first()
+        .evaluate((el) => {
+          el.scrollTop = 0;
+        });
+      const row0 = frame.locator('.slick-row[data-row="0"]');
+      await expect(row0.locator(".kv-cell-sha")).toHaveText(newestSha.slice(0, 7));
+      await expect(row0.locator(".kv-message-subject")).toHaveText(`commit ${repo.commits.length - 1}`);
     } finally {
       await app.close();
     }
