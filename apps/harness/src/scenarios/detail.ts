@@ -10,15 +10,21 @@ import type { CommitDetailFixture, Scenario } from "./types.ts";
  * `docs/plans/P5.md`'s own list for this scenario, in this order: an add, a modify, a delete, a
  * rename-with-edits, a copy, a binary file, an LFS pointer, and a file whose diff is over the
  * size cap.
+ *
+ * A third commit, `manyFiles`, is layered on top of `tip` and carries the HEAD/`main` decoration
+ * instead: `docs/plans/P5.md`'s W13 ("the 5,000-file scenario renders the cap plus its 'show
+ * all' row") and W15 ("the `detail` scenario's 5,000-file commit is what makes the W8 render cap
+ * meaningful") both name a 5,000-file commit within *this* scenario, distinct from the
+ * eight-file-kind workhorse `tip` above — folding both into one commit would make it impossible
+ * to assert the ordinary field-population case (`tip`) without every assertion also fighting the
+ * render cap, and vice versa.
  */
-const COMMIT_SPEC = ["root", "tip:root"];
+const COMMIT_SPEC = ["root", "tip:root", "manyFiles:tip"];
 const commits = topology(COMMIT_SPEC);
 
 const DECORATIONS: Readonly<Record<string, readonly DecorationRef[]>> = {
-  tip: [
-    { kind: "branch", name: "main", isHead: true },
-    { kind: "tag", name: "v1.0.0" },
-  ],
+  tip: [{ kind: "tag", name: "v1.0.0" }],
+  manyFiles: [{ kind: "branch", name: "main", isHead: true }],
 };
 
 function decorate(records: readonly CommitRecord[]): CommitRecord[] {
@@ -29,10 +35,28 @@ function decorate(records: readonly CommitRecord[]): CommitRecord[] {
 }
 
 const decorated = decorate(commits);
-// `topology()`'s newest-first order puts "tip" at index 0 — see this file's own `COMMIT_SPEC`.
-const tip = decorated[0];
-if (!tip) throw new Error("detail scenario: topology() produced no commits");
+// `topology()`'s newest-first order puts "manyFiles" at index 0 and "tip" at index 1 — see this
+// file's own `COMMIT_SPEC`.
+const manyFilesCommit = decorated[0];
+const tip = decorated[1];
+if (!tip || !manyFilesCommit)
+  throw new Error("detail scenario: topology() produced too few commits");
 const tipSha = tip.sha;
+const manyFilesSha = manyFilesCommit.sha;
+
+const MANY_FILES_COUNT = 5000;
+const MANY_FILES: CommitDetailFixture["files"] = Array.from(
+  { length: MANY_FILES_COUNT },
+  (_, i) => ({
+    kind: "modified",
+    path: `src/generated/file-${String(i).padStart(4, "0")}.ts`,
+    originalPath: undefined,
+    similarity: undefined,
+    additions: 1,
+    deletions: 1,
+    isBinary: false,
+  }),
+);
 
 const FILES: CommitDetailFixture["files"] = [
   {
@@ -137,6 +161,14 @@ export const detail: Scenario = {
         ],
         signature: { status: "G", signer: "Ada Lovelace <ada@example.com>" },
         files: FILES,
+      },
+    ],
+    [manyFilesSha]: [
+      {
+        body: "Touches 5,000 files to exercise the file tree's render cap.",
+        trailers: [],
+        signature: { status: "N", signer: "" },
+        files: MANY_FILES,
       },
     ],
   },
