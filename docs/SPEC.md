@@ -705,11 +705,15 @@ Mutating operations are listed per feature in §7.
 ### 4.5 Change detection
 
 An `fs.watch`-based watcher on `.git/HEAD`, `.git/refs/**`, `.git/packed-refs`,
-`.git/index`, `.git/FETCH_HEAD`, `.git/MERGE_HEAD`, `.git/rebase-merge|rebase-apply`, plus
+`.git/index`, `.git/FETCH_HEAD`, `.git/MERGE_HEAD`, `.git/rebase-merge|rebase-apply`,
+`.git/CHERRY_PICK_HEAD`, `.git/REVERT_HEAD`, `.git/BISECT_LOG`, `.git/sequencer` (P6), plus
 the worktree via the `FileWatcher` port (respecting `.gitignore`). Events are debounced
 (200 ms) and coalesced into two signals: `refsChanged` (re-run the ref query, re-render
 decorations, possibly re-walk) and `worktreeChanged` (re-run status only). We never poll on
-a timer while the window is hidden.
+a timer while the window is hidden. In a linked worktree these state files live under that
+worktree's own git dir, not the common dir shared with refs (§4.2's D12) — the watcher
+recognizes the same names there too, so a revert or cherry-pick started in a linked worktree
+still produces `refsChanged` (P6).
 
 ---
 
