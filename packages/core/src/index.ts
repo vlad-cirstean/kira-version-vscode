@@ -71,8 +71,15 @@ export type {
   StatusResult,
   UntrackedStatusEntry,
 } from "./model/status.ts";
+export type { Clipboard } from "./ports/clipboard.ts";
 export type { Dialogs, PickFolderOptions } from "./ports/dialogs.ts";
 export type { Disposable } from "./ports/disposable.ts";
+export type {
+  DocumentRef,
+  EditorCapabilities,
+  EditorIntegration,
+  VirtualDocumentSource,
+} from "./ports/editorIntegration.ts";
 export type { FileWatchEvent, FileWatcher, FileWatchOptions } from "./ports/fileWatcher.ts";
 export type { Logger, LogLevel } from "./ports/logger.ts";
 export type {

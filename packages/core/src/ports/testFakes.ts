@@ -5,8 +5,15 @@
  * product surface — `packages/git/src/testFakes.ts`'s precedent.
  */
 
+import type { Clipboard } from "./clipboard.ts";
 import type { Dialogs, PickFolderOptions } from "./dialogs.ts";
 import type { Disposable } from "./disposable.ts";
+import type {
+  DocumentRef,
+  EditorCapabilities,
+  EditorIntegration,
+  VirtualDocumentSource,
+} from "./editorIntegration.ts";
 import type { FileWatchEvent, FileWatcher, FileWatchOptions } from "./fileWatcher.ts";
 import type { Logger, LogLevel } from "./logger.ts";
 import type { Storage, StorageScope } from "./storage.ts";
@@ -141,5 +148,55 @@ export class FakeDialogs implements Dialogs {
   pickFolder(opts: PickFolderOptions): Promise<string | null> {
     this.calls.push(opts);
     return Promise.resolve(this.queuedResults.shift() ?? null);
+  }
+}
+
+export class FakeClipboard implements Clipboard {
+  readonly writes: string[] = [];
+  /** Set to make the next `writeText` (and every one after, until reset to `undefined`) reject
+   *  — a rejected clipboard write must propagate (P5, §6.4), and this is what a test drives. */
+  rejectWith: Error | undefined;
+
+  async writeText(text: string): Promise<void> {
+    if (this.rejectWith) throw this.rejectWith;
+    this.writes.push(text);
+  }
+}
+
+export interface FakeEditorAction {
+  readonly kind: "openDiff" | "reveal";
+  readonly left?: DocumentRef;
+  readonly right?: DocumentRef;
+  readonly title?: string;
+  readonly ref?: DocumentRef;
+  readonly line?: number;
+}
+
+export class FakeEditorIntegration implements EditorIntegration {
+  capabilities: EditorCapabilities;
+  readonly actions: FakeEditorAction[] = [];
+  #source: VirtualDocumentSource | undefined;
+
+  constructor(capabilities: EditorCapabilities = { openInEditor: true, goToFile: true }) {
+    this.capabilities = capabilities;
+  }
+
+  registerVirtualDocuments(source: VirtualDocumentSource): Disposable {
+    this.#source = source;
+    return { dispose: () => (this.#source = undefined) };
+  }
+
+  async openDiff(req: { left: DocumentRef; right: DocumentRef; title: string }): Promise<void> {
+    this.actions.push({ kind: "openDiff", ...req });
+  }
+
+  async reveal(ref: DocumentRef, line: number): Promise<void> {
+    this.actions.push({ kind: "reveal", ref, line });
+  }
+
+  /** Drives the registered `VirtualDocumentSource` directly, for a test asserting on what the
+   *  content provider would show without a real VS Code URI in the loop. */
+  provide(key: string): Promise<string | undefined> {
+    return this.#source?.provide(key) ?? Promise.resolve(undefined);
   }
 }
