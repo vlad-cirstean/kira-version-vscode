@@ -50,37 +50,50 @@ function enabledNeighbour(fromId: string | undefined, direction: 1 | -1): string
   return undefined;
 }
 
+/**
+ * Every key this menu recognises calls `stopPropagation()` — most load-bearingly `Escape`
+ * (§6.6's "Esc closes the menu *before* the diff/pane"): `App.vue`'s own document-level `Escape`
+ * handler must never see the same keystroke this menu already acted on, or one press would close
+ * the menu *and* the diff/pane together instead of one at a time.
+ */
 function onKeydown(event: KeyboardEvent): void {
   switch (event.key) {
     case "Escape":
       event.preventDefault();
+      event.stopPropagation();
       emit("close");
       break;
     case "ArrowDown":
       event.preventDefault();
+      event.stopPropagation();
       focusItem(enabledNeighbour(focusedId.value, 1));
       break;
     case "ArrowUp":
       event.preventDefault();
+      event.stopPropagation();
       focusItem(enabledNeighbour(focusedId.value, -1));
       break;
     case "Home":
       event.preventDefault();
+      event.stopPropagation();
       focusItem(enabledNeighbour(undefined, 1));
       break;
     case "End":
       event.preventDefault();
+      event.stopPropagation();
       focusItem(enabledNeighbour(undefined, -1));
       break;
     case "Enter":
     case " ":
       event.preventDefault();
+      event.stopPropagation();
       activate(focusedId.value);
       break;
     case "Tab":
       // A menu does not participate in normal tab order (§6.6/W20) — closing it here rather than
       // letting focus leave to whatever the page's own next tab stop happens to be.
       event.preventDefault();
+      event.stopPropagation();
       emit("close");
       break;
     default:

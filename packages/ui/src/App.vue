@@ -17,11 +17,18 @@ import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vu
 import { BridgeClient } from "./bridge/client.ts";
 import AppToolbar from "./components/AppToolbar.vue";
 import CommitGrid from "./components/CommitGrid.vue";
+import ConflictBanner from "./components/ConflictBanner.vue";
+import BranchDialog from "./components/dialogs/BranchDialog.vue";
+import CheckoutDialog from "./components/dialogs/CheckoutDialog.vue";
+import RevertDialog from "./components/dialogs/RevertDialog.vue";
+import TagDialog from "./components/dialogs/TagDialog.vue";
 import EmptyRepositoryPanel from "./components/EmptyRepositoryPanel.vue";
 import GitBlockedPanel from "./components/GitBlockedPanel.vue";
 import LoadMoreButton from "./components/LoadMoreButton.vue";
 import NoRepositoryPanel from "./components/NoRepositoryPanel.vue";
 import DetailPane from "./components/DetailPane.vue";
+import RowContextMenu from "./components/RowContextMenu.vue";
+import { buildRowMenu, type MenuSection } from "./components/rowMenuModel.ts";
 import { DetailState } from "./state/detail.ts";
 import { type DetailActions, createDetailActions } from "./state/detailActions.ts";
 import { GraphViewState } from "./state/graphView.ts";
@@ -171,6 +178,10 @@ watch(detailState.announcement, (text) => {
   liveAnnouncement.value = text;
 });
 
+watch(opsState.announcement, (text) => {
+  liveAnnouncement.value = text;
+});
+
 /**
  * `CommitMeta.vue`'s "select this parent commit" affordance, bubbled up through
  * `DetailPane.vue`'s own `selectParentCommit` emit. Mirrors a normal row click when the parent's
@@ -195,6 +206,72 @@ function selectCommitFromDetail(sha: string): void {
 
 function handleCopySha(fullSha: string): void {
   actions.value?.copy(fullSha, "full SHA");
+}
+
+// ---------------------------------------------------------------------------------------
+// `docs/plans/P6.md` W14: the per-commit context menu. `CommitGrid.vue` only ever reports which
+// row and where to open it (own doc comment on its `contextMenu` emit) — this is the one place
+// with both `opsState` and the commit store's own decorations at hand to build the menu itself.
+// ---------------------------------------------------------------------------------------
+const contextMenuState = ref<{ row: number; x: number; y: number } | undefined>(undefined);
+const tagDialogState = ref<{ open: boolean; target: string }>({ open: false, target: "" });
+const branchDialogState = ref<{ open: boolean; startPoint: string }>({
+  open: false,
+  startPoint: "",
+});
+
+function handleGridContextMenu(detail: { row: number; x: number; y: number }): void {
+  contextMenuState.value = detail;
+}
+
+const commitMenuSections = computed<MenuSection[]>(() => {
+  const state = contextMenuState.value;
+  if (!state) return [];
+  const commit = graphView.store.commitAt(state.row);
+  return buildRowMenu({
+    sha: commit.sha,
+    decorations: commit.decoration,
+    inProgress: opsState.statusSummary.value?.inProgress ?? null,
+    clipboardEnabled: actions.value?.capabilities.clipboard ?? false,
+  });
+});
+
+async function onCommitMenuSelect(id: string): Promise<void> {
+  const state = contextMenuState.value;
+  contextMenuState.value = undefined;
+  if (!state) return;
+  const commit = graphView.store.commitAt(state.row);
+  switch (id) {
+    case "checkoutDetached":
+      await opsState.runCheckout(commit.sha, "detach");
+      return;
+    case "createBranchHere":
+      branchDialogState.value = { open: true, startPoint: commit.sha };
+      return;
+    case "createTagHere":
+      tagDialogState.value = { open: true, target: commit.sha };
+      return;
+    case "revertThisCommit":
+      await opsState.runRevert([commit.sha]);
+      return;
+    case "copySha":
+      actions.value?.copy(commit.sha, "full SHA");
+      return;
+    case "copyMessage":
+      // The subject line only — available synchronously from the store. `CommitMeta.vue`'s own
+      // dedicated button (P5) copies the full trailer-joined message once its detail has loaded;
+      // duplicating that async fetch here for a context-menu convenience is not worth the race.
+      actions.value?.copy(commit.subject, "commit message");
+      return;
+    default:
+      return;
+  }
+}
+
+async function resolveConflictInEditor(path: string): Promise<void> {
+  const repoId = repoState.value?.activeRepo.value?.repoId;
+  if (!repoId) return;
+  await bridge.request("editor.resolveConflict", { repoId, path });
 }
 
 // ---------------------------------------------------------------------------------------
@@ -552,6 +629,11 @@ onBeforeUnmount(() => {
           :actions="actions"
           @repo-opened="handleRepoOpened"
         />
+        <ConflictBanner
+          :ops="opsState"
+          :resolve-conflict-enabled="actions?.capabilities.resolveConflict ?? false"
+          :resolve-conflict="resolveConflictInEditor"
+        />
         <main class="kv-body">
           <section class="kv-graph-region" data-testid="graph-region" aria-label="Commit graph">
             <CommitGrid
@@ -569,6 +651,7 @@ onBeforeUnmount(() => {
               @close-detail="closeDetail"
               @refresh="triggerRefresh"
               @copy-sha="handleCopySha"
+              @context-menu="handleGridContextMenu"
             />
             <LoadMoreButton :graph-view="graphView" :page-size="pageSize" />
             <span class="kv-visually-hidden" data-testid="chunk-source">{{
@@ -623,6 +706,31 @@ onBeforeUnmount(() => {
             />
           </aside>
         </div>
+
+        <RowContextMenu
+          v-if="contextMenuState"
+          :sections="commitMenuSections"
+          :x="contextMenuState.x"
+          :y="contextMenuState.y"
+          label="Commit actions"
+          @select="onCommitMenuSelect"
+          @close="contextMenuState = undefined"
+        />
+        <BranchDialog
+          :open="branchDialogState.open"
+          :start-point="branchDialogState.startPoint"
+          :ops="opsState"
+          @close="branchDialogState = { open: false, startPoint: '' }"
+        />
+        <TagDialog
+          :open="tagDialogState.open"
+          :target="tagDialogState.target"
+          :existing-tags="refsState.tags.value"
+          :ops="opsState"
+          @close="tagDialogState = { open: false, target: '' }"
+        />
+        <CheckoutDialog :ops="opsState" />
+        <RevertDialog :ops="opsState" />
       </template>
     </template>
   </div>

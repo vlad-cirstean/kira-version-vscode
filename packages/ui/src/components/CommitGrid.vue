@@ -61,6 +61,11 @@ const emit = defineEmits<{
    *  `clipboard.write` call and the shared live-region announcement; this component only ever
    *  reports which sha, exactly as it reports scroll/toggle/close rather than acting on them. */
   (e: "copySha", fullSha: string): void;
+  /** `docs/plans/P6.md` W14: a right-click, `Shift+F10`, or the Menu key on a row — `App.vue`
+   *  owns the actual `RowContextMenu.vue` instance (it is the one place with both `ops` and the
+   *  commit store's decorations at hand), so this only ever reports which row and where to open
+   *  it, exactly as `copySha` reports which sha rather than copying it itself. */
+  (e: "contextMenu", detail: { row: number; x: number; y: number }): void;
 }>();
 
 const MIN_COLUMN_WIDTH = 40;
@@ -228,11 +233,26 @@ function handleClick(row: number, cell: number): void {
   if (wasSelected) emit("toggleDetail");
 }
 
-/** "`onContextMenu` selects the row and does nothing else in P4" (§6.4) — no menu, so the
- *  browser's own context menu is left to appear normally; only selection changes. */
+/** §6.4: "right-click selects the row [first]", then (P6 W14) opens `RowContextMenu.vue` at the
+ *  click point — the browser's own native menu is suppressed now that there is a real one to
+ *  show instead of P4's "nothing else". */
 function handleContextMenu(event: MouseEvent): void {
+  event.preventDefault();
   const cell = grid?.getCellFromEvent(event);
-  if (cell) props.selection.select(cell.row);
+  if (!cell) return;
+  props.selection.select(cell.row);
+  emit("contextMenu", { row: cell.row, x: event.clientX, y: event.clientY });
+}
+
+/** `Shift+F10`/the Menu key (§6.6): opens the same menu `handleContextMenu` does, anchored to
+ *  the selected row's own bounding rect rather than a click point that does not exist for a
+ *  keyboard invocation. */
+function openMenuFromKeyboard(row: number): void {
+  if (!grid) return;
+  const container = grid.getContainerNode();
+  const rowNode = container.querySelector<HTMLElement>(`.slick-row[data-row="${row}"]`);
+  const rect = rowNode?.getBoundingClientRect();
+  emit("contextMenu", { row, x: rect?.left ?? 0, y: rect?.bottom ?? 0 });
 }
 
 function pageSize(): number {
@@ -319,6 +339,16 @@ function handleKeyDown(event: KeyboardEvent): boolean {
       if (!event.ctrlKey && !event.metaKey) return false;
       event.preventDefault();
       emit("refresh");
+      return true;
+    case "F10":
+      if (!event.shiftKey || current < 0) return false;
+      event.preventDefault();
+      openMenuFromKeyboard(current);
+      return true;
+    case "ContextMenu":
+      if (current < 0) return false;
+      event.preventDefault();
+      openMenuFromKeyboard(current);
       return true;
     default:
       return false;
