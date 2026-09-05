@@ -11,7 +11,8 @@
   },
   "scripts": {
     "check": "bun run format:check && bun run lint && bun run check:types && bun run check:tokens && bun run check:settings && bun run check:lane-palette",
-    "check:types": "tsc --build --force && bun run --filter '@kira-version/ui' check:vue",
+    "check:types": "tsc --build && bun run --filter '@kira-version/ui' check:vue",
+    "check:types:clean": "tsc --build --force && bun run --filter '@kira-version/ui' check:vue",
     "format:check": "biome format .",
     "format": "biome format --write .",
     "lint": "biome lint .",
