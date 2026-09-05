@@ -64,6 +64,40 @@ describe("watchRepo against a real repository", () => {
     }
   }, 10_000);
 
+  test("a second update to an already-watched branch ref still produces refsChanged", async () => {
+    // Regression guard for P4c W2: on Linux under Node, the recursive `refs/` watch alone can
+    // go stale after a ref file's first rename-over and miss the next one — the reason
+    // watchRepo() also non-recursively watches refs/heads (etc.) alongside it. This suite runs
+    // under Bun, which does not reproduce that staleness (see the manual Node probe recorded
+    // in docs/plans/P4c-linux-test-infra.md's Findings), so this test cannot exercise the bug
+    // itself — it guards that the fix's extra subscription doesn't regress the ordinary case.
+    const { commits, dir } = linear(3);
+    execFileSync("git", ["branch", "feature", commits[0] ?? ""], { cwd: dir, env: baseEnv(dir) });
+    const identity = await resolvedIdentity(dir);
+    const fileWatcher = new NodeFileWatcher();
+    const repoWatcher = watchRepo(fileWatcher, identity);
+    const seen: WatchSignal[] = [];
+    repoWatcher.onSignal((signal) => seen.push(signal));
+    try {
+      execFileSync("git", ["branch", "-f", "feature", commits[1] ?? ""], {
+        cwd: dir,
+        env: baseEnv(dir),
+      });
+      await waitForSignal(seen, "refsChanged");
+      expect(seen).toContain("refsChanged");
+      seen.length = 0;
+
+      execFileSync("git", ["branch", "-f", "feature", commits[2] ?? ""], {
+        cwd: dir,
+        env: baseEnv(dir),
+      });
+      await waitForSignal(seen, "refsChanged");
+      expect(seen).toContain("refsChanged");
+    } finally {
+      repoWatcher.dispose();
+    }
+  }, 10_000);
+
   test("a packed-refs rewrite (git pack-refs --all) produces exactly one refsChanged", async () => {
     const { dir } = linear(1);
     execFileSync("git", ["branch", "feature"], { cwd: dir, env: baseEnv(dir) });

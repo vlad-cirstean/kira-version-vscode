@@ -31,12 +31,20 @@ function tick(): Promise<void> {
 }
 
 describe("watchRepo", () => {
-  test("subscribes recursively under commonDir/refs, and non-recursively to the flat dir", () => {
+  test("subscribes recursively under commonDir/refs, and non-recursively to the flat dir plus the shallow ref dirs", () => {
     const fw = new FakeFileWatcher();
     const rw = watchRepo(fw, identity);
     expect(fw.calls).toEqual([
       { paths: [join(identity.commonDir, "refs")], opts: { recursive: true } },
-      { paths: [identity.commonDir], opts: { recursive: false } },
+      {
+        paths: [
+          identity.commonDir,
+          join(identity.commonDir, "refs", "heads"),
+          join(identity.commonDir, "refs", "tags"),
+          join(identity.commonDir, "refs", "remotes"),
+        ],
+        opts: { recursive: false },
+      },
     ]);
     rw.dispose();
   });
@@ -50,7 +58,13 @@ describe("watchRepo", () => {
     };
     const rw = watchRepo(fw, linked);
     expect(fw.calls[1]).toEqual({
-      paths: [linked.commonDir, linked.gitDir],
+      paths: [
+        linked.commonDir,
+        linked.gitDir,
+        join(linked.commonDir, "refs", "heads"),
+        join(linked.commonDir, "refs", "tags"),
+        join(linked.commonDir, "refs", "remotes"),
+      ],
       opts: { recursive: false },
     });
     rw.dispose();

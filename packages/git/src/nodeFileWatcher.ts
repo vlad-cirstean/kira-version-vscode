@@ -9,6 +9,30 @@
  * created/changed/deleted fact. A watch on a file git replaces atomically (e.g. `refs/heads/x`
  * via rename) can silently stop firing once the original inode is gone, so `watcher.ts` watches
  * directories, not individual ref files.
+ *
+ * **Linux (P4c, dev-infra only — D27 keeps v1 macOS-only).** libuv/inotify has no recursive
+ * primitive, so `recursive: true` on Linux is routed by Node itself to a **userland**
+ * implementation (`internal/fs/recursive_watch`, landed in the v20 line): it `readdir`s the tree
+ * once at start and places a separate, individual `fs.watch` on every entry — files as well as
+ * directories — adding a watch for each new entry as it appears. Two consequences, both verified
+ * directly against this runtime rather than assumed:
+ * - The `filename` contract is unchanged: every emit is still `path.relative(rootPath, file)`,
+ *   so this file's `join(path, filename)` and `watcher.ts`'s absolute-path `classify()` need no
+ *   Linux-specific branch. (This was the failure mode most worth checking, and it does not
+ *   occur — worth recording, because "the filename is already absolute" is exactly the bug a
+ *   future reader would otherwise suspect.)
+ * - The per-file watch this userland layer places on an existing ref file goes stale after that
+ *   file's *first* atomic rename-over: a manual probe (`git branch -f <ref> <sha>` run twice
+ *   against an already-watched branch ref, docs/plans/P4c-linux-test-infra.md's Findings) showed
+ *   the first update fires and the second is silently missed — the watch never rebinds to the
+ *   new inode. `watcher.ts` closes this by also watching `refs/heads`, `refs/tags` and
+ *   `refs/remotes` non-recursively, the same directory-watch mechanism it already relies on for
+ *   `HEAD`; a duplicate event costs nothing since this layer debounces and coalesces by design.
+ * - One inotify watch per file under `.git/refs`, since every entry gets its own. Fine against
+ *   this container's `fs.inotify.max_user_watches`; a repository with an unusually large
+ *   loose-ref set could exhaust it, at which point `#watchOne`'s `catch` below logs a
+ *   `FileWatchError` and that one watch is silently skipped. Not fixed here — Linux is not a
+ *   shipped platform (D27) — but written down so it isn't mistaken for an oversight.
  */
 import { existsSync, type FSWatcher, watch as fsWatch } from "node:fs";
 import { join } from "node:path";
