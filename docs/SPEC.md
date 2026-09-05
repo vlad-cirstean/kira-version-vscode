@@ -144,6 +144,12 @@ Concretely this means: no Windows path handling, no `\r\n` line-ending special c
 what git's own `core.autocrlf` does for us, no per-platform CI, and no Windows code-signing
 identity to acquire (§11 D26).
 
+This is a claim about the *product*, not about where its test suites can run. The unit,
+integration, harness-Playwright and VS-Code-Playwright tiers are all runnable on headless Linux
+for development — `docs/plans/P4c-linux-test-infra.md` — because that is where developers and
+agent sessions working on this repo actually run. That is not a support claim, a tested platform,
+or a CI matrix: it changes nothing above. No per-platform CI still holds, and D28 still holds.
+
 ### 2.2 A second host is an addition, not a rewrite
 
 v1 ships one host: local desktop VS Code (§2.1.1, D6).
@@ -557,12 +563,18 @@ Resolution order:
 2. VS Code's `git.path` setting, when running in VS Code — reuse the user's existing config.
 3. `PATH` lookup.
 4. Platform fallbacks, behind a `PlatformGitLocator` strategy selected by `process.platform`.
-   **Only the macOS strategy is implemented** (D27): probe `/opt/homebrew/bin`,
-   `/usr/local/bin`, then `/usr/bin/git` — the last being the Command Line Tools shim, where
-   **running it when CLT is not installed pops a system install dialog**, so probe with
-   `xcode-select -p` first and never spawn the shim blind. The Windows and Linux strategies
-   exist as named, unimplemented cases that throw a clear "platform not supported yet" error;
-   adding one later is a single file, not a refactor.
+   **The macOS and Linux strategies are implemented; Windows remains a named, unimplemented
+   case** that throws a clear "platform not supported yet" error. macOS probes
+   `/opt/homebrew/bin`, `/usr/local/bin`, then `/usr/bin/git` — the last being the Command Line
+   Tools shim, where **running it when CLT is not installed pops a system install dialog**, so
+   probe with `xcode-select -p` first and never spawn the shim blind. Linux probes `/usr/bin`,
+   `/usr/local/bin`, then Linuxbrew's prefix, with no such gate — its `/usr/bin/git` is a real
+   binary, not a shim that can pop a dialog. The Linux branch exists so the test suite can run
+   on Linux (`docs/plans/P4c-linux-test-infra.md`); it is not a support claim (§2.1.2, D27) —
+   without it, an unsupported-platform lookup **threw** past `RepoService.create()`'s unguarded
+   `await` instead of reaching this section's own designed blocking state, which is a worse
+   failure than the one this resolution order exists to produce. Adding the still-missing
+   Windows strategy later is a single file, not a refactor.
 
 **Minimum version: Git 2.38 — a hard requirement, not a soft floor.** `git merge-tree
 --write-tree` (2.38, Oct 2022) is what makes the checkout and stash-pop conflict predictions
@@ -1668,9 +1680,11 @@ Two suites:
    Playwright drives VS Code's own Electron binary directly (launch the downloaded build with
    the extension installed, then work through the webview frame); `@vscode/test-electron`
    remains available for extension-host-level tests that need the VS Code API rather than the
-   UI. Slower tier, run on demand, on macOS only (D27), against the Git the developer has
-   installed. The OS and Git-version matrix this tier is shaped for arrives with the second
-   platform.
+   UI. Slower tier, run on demand — on macOS, which is where its result is authoritative for the
+   shipped extension (D27), and also on headless Linux for development (Xvfb, a root container,
+   `bun run test:e2e:vscode`; `docs/plans/P4c-linux-test-infra.md`). The OS and Git-version
+   matrix this tier is shaped for arrives with the second platform: running the suite somewhere
+   is not a matrix.
 
 Layer beneath both: `bun test` unit tests over `core` (layout, search, pre-flight planners)
 and `git` (porcelain parsers, against recorded fixtures).
@@ -1853,8 +1867,8 @@ deliberately deferred rather than left undecided.**
 | D24 | Localization | **English only, and no l10n infrastructure** — no bundle, no string-id indirection, no scaffolding carried for a future that may not come. If it is ever wanted, it is a mechanical change made then. |
 | D25 | Settings | **One schema in `core`**, generating `contributes.configuration` for VS Code at build time. Defined at P3, before ~15 settings accrete in two places; a future host's own settings surface would generate from the same schema rather than inventing a second one. |
 | D26 | Licensing and distribution | **MIT; published to both the VS Code Marketplace and OpenVSX.** The `.vsix` is not notarized. The Apple Developer account and notarization requirement this row used to flag as a decide-before-ship item belonged to the standalone desktop build (`docs/plans/P4b-remove-electron.md`) and was retired with it, not decided the hard way — no such cost or identity is needed for a `.vsix`. No Windows certificate is needed while D27 holds. |
-| D27 | Operating systems | **macOS only for v1.** Windows and Linux are not supported or tested. Platform-conditional code sits behind named strategies with the other platforms as explicit unimplemented cases, so adding one later is implementation rather than untangling (2.1.2). |
-| D28 | Continuous integration | **None for now.** No workflows, no hosted runners. `bun run check`, `bun test`, `test:e2e` and `test:perf` are run locally on macOS, and running them before closing a phase is part of the phase's exit criteria rather than something a pipeline enforces. The scripts are written to be CI-callable so adding a pipeline later is configuration, not rework. |
+| D27 | Operating systems | **macOS only for v1.** Windows and Linux are not supported or tested. Platform-conditional code sits behind named strategies with the other platforms as explicit unimplemented cases, so adding one later is implementation rather than untangling (2.1.2). The test suite is runnable on Linux for development (`docs/plans/P4c-linux-test-infra.md`) — that is dev-infrastructure, not support, so the Linux `PlatformGitLocator` branch this enabled (§4.2) is deliberate, not a leak to tidy away. |
+| D28 | Continuous integration | **None for now.** No workflows, no hosted runners. `bun run check`, `bun test`, `test:e2e` and `test:perf` are run locally on macOS, and running them before closing a phase is part of the phase's exit criteria rather than something a pipeline enforces. The scripts are written to be CI-callable so adding a pipeline later is configuration, not rework. Running the suites on headless Linux locally (`docs/plans/P4c-linux-test-infra.md`) is the same kind of local run, not a pipeline — no workflow was added. |
 
 ---
 
