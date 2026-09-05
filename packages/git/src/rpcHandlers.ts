@@ -23,6 +23,7 @@ import type {
   EditorIntegration,
   HeadState,
   Logger,
+  RefRecord,
   RepoIdentity,
   Settings,
   VirtualDocumentSource,
@@ -32,6 +33,7 @@ import { mapLineAcrossDiff } from "@kira-version/core";
 import type {
   GoToFileOutcome,
   HostKind,
+  RefRow,
   RepoOpenResult,
   RepoSummary,
   RequestHandler,
@@ -60,6 +62,13 @@ export type RepoServicePort = Pick<
   | "blob"
   | "worktreeDiff"
   | "pathExistsInCheckout"
+  | "refs"
+  | "statusSummary"
+  | "preflightCheckout"
+  | "preflightRevert"
+  | "runOp"
+  | "undoPeek"
+  | "undoRun"
 >;
 
 export interface RepoHandlersDeps {
@@ -156,6 +165,15 @@ function toRepoSummary(repoId: string, identity: RepoIdentity): RepoSummary {
   };
 }
 
+/** `RefRecord.objectType` is core-internal (undo capture reads it fresh itself — see
+ *  `RepoService.#captureTagDeleteUndo` — never from this wire row) and never sent across the
+ *  wire; `wireConformance.test.ts`'s own RefRow test is what keeps this the ONLY field the two
+ *  shapes are allowed to differ by. */
+function toRefRow(record: RefRecord): RefRow {
+  const { objectType: _objectType, ...row } = record;
+  return row;
+}
+
 function toRepoOpenResult(outcome: RepoOpenOutcome): RepoOpenResult {
   switch (outcome.kind) {
     case "ok":
@@ -193,6 +211,7 @@ export function createRepoHandlers(deps: RepoHandlersDeps): ServerHandlers {
       openInEditor: deps.editor.capabilities.openInEditor,
       goToFile: deps.editor.capabilities.goToFile,
       clipboard: true,
+      resolveConflict: deps.editor.capabilities.resolveConflict,
     },
   });
 
@@ -324,6 +343,54 @@ export function createRepoHandlers(deps: RepoHandlersDeps): ServerHandlers {
     return {};
   };
 
+  // ---- P6 W11: refs, status, pre-flight, operations -------------------------------------
+
+  const refsListImpl: RequestHandler<"refs.list"> = async ({ repoId }) => {
+    const result = await deps.service.refs(repoId);
+    return {
+      branches: result.branches.map(toRefRow),
+      remoteBranches: result.remoteBranches.map(toRefRow),
+      tags: result.tags.map(toRefRow),
+      head: result.head,
+    };
+  };
+
+  const statusGetImpl: RequestHandler<"status.get"> = async ({ repoId }) =>
+    deps.service.statusSummary(repoId);
+
+  const preflightCheckoutImpl: RequestHandler<"preflight.checkout"> = async ({
+    repoId,
+    target,
+    mode,
+  }) => deps.service.preflightCheckout(repoId, target, mode);
+
+  const preflightRevertImpl: RequestHandler<"preflight.revert"> = async ({
+    repoId,
+    shas,
+    mainline,
+  }) => deps.service.preflightRevert(repoId, shas, mainline);
+
+  // `op.run` does NOT try/catch: W8's executor already turned every expected git failure into
+  // `OpResult.error` (a `GitError` never reaches here) — a throw that does escape is a genuine
+  // bug and should surface as one, exactly like every other handler in this file.
+  const opRunImpl: RequestHandler<"op.run"> = async ({ repoId, op }) =>
+    deps.service.runOp(repoId, op);
+
+  const undoPeekImpl: RequestHandler<"undo.peek"> = async ({ repoId }) => ({
+    slot: deps.service.undoPeek(repoId),
+  });
+
+  const undoRunImpl: RequestHandler<"undo.run"> = async ({ repoId, id }) =>
+    deps.service.undoRun(repoId, id);
+
+  const editorResolveConflictImpl: RequestHandler<"editor.resolveConflict"> = async ({
+    repoId,
+    path,
+  }) => {
+    await deps.editor.resolveConflict({ path: join(repoId, path) });
+    return {};
+  };
+
   return {
     requests: {
       "app.init": logged("app.init", appInitImpl),
@@ -339,6 +406,14 @@ export function createRepoHandlers(deps: RepoHandlersDeps): ServerHandlers {
       "editor.openDiff": logged("editor.openDiff", editorOpenDiffImpl),
       "editor.goToFile": logged("editor.goToFile", editorGoToFileImpl),
       "clipboard.write": logged("clipboard.write", clipboardWriteImpl),
+      "refs.list": logged("refs.list", refsListImpl),
+      "status.get": logged("status.get", statusGetImpl),
+      "preflight.checkout": logged("preflight.checkout", preflightCheckoutImpl),
+      "preflight.revert": logged("preflight.revert", preflightRevertImpl),
+      "op.run": logged("op.run", opRunImpl),
+      "undo.peek": logged("undo.peek", undoPeekImpl),
+      "undo.run": logged("undo.run", undoRunImpl),
+      "editor.resolveConflict": logged("editor.resolveConflict", editorResolveConflictImpl),
     },
     streams: {
       "graph.stream": logged("graph.stream", graphStreamImpl),
