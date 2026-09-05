@@ -225,6 +225,8 @@ kira-version-vscode/
 │   │   └── src/
 │   │       ├── index.ts
 │   │       ├── model/              commit.ts diff.ts ref.ts tag.ts stash.ts status.ts repo.ts conflict.ts
+│   │       │                       review.ts  pure base-resolution policy: upstream → default
+│   │       │                                  branch → ask (§6.8)
 │   │       ├── store/              commitStore.ts   column-wise typed arrays (§5.5)
 │   │       │                       shaTable.ts      20-byte binary sha storage + hex formatting
 │   │       │                       intern.ts        string interning + concatenated subject buffer
@@ -277,6 +279,10 @@ kira-version-vscode/
 │   │       ├── App.vue
 │   │       ├── bridge/             client.ts   typed client over the ipc contract
 │   │       ├── state/              repo.ts graphView.ts selection.ts search.ts settings.ts
+│   │       │                       packedStream.ts the chunk-application core graphView.ts
+│   │       │                                       and review.ts both compose (reset-on-
+│   │       │                                       `from:0`, appendPacked, corrupted-chunk
+│   │       │                                       recovery) — no layout, no bridge
 │   │       │                       detail.ts       P5's commit-detail pane state machine (§6.4)
 │   │       │                       refs.ts         P6 W12: branch/remote-branch/tag lists + head (§7.9)
 │   │       │                       ops.ts          P6 W12: the four-step op executor (§7's pre-flight →
@@ -349,6 +355,9 @@ kira-version-vscode/
 │           │                       rebasing.ts worktrees.ts tags.ts   P6 W18: the three
 │           │                       remaining §7.5/§7.11 hazard shapes dirty/conflicted don't
 │           │                       already cover (canContinue-false, worktree conflict, tags)
+│           │                       review.ts reviewUpstream.ts reviewMerged.ts reviewAsk.ts
+│           │                       P7 W15: the four base-resolution/range outcomes §6.8 names
+│           │                       (default-branch, upstream, empty, ask) as harness fixtures
 │           └── themeSwitcher.ts    force light/dark/high-contrast for visual tests
 │
 └── tests/
@@ -512,23 +521,26 @@ else in the window.
 
 `packages/ipc` defines a single typed contract used by both transports:
 
-- **Requests** (UI → host, one response): `repo.open`, `graph.query`, `commit.detail`,
-  `refs.list`, `status.get`, `search.run`, `review.resolveBase`, `branch.resolvePr`,
-  `op.<name>`, `preflight.<name>`.
-- **Events** (host → UI, push): `repo.changed`, `graph.invalidated`, `op.progress`,
-  `op.finished`, `log`.
+- **Requests** (UI → host, one response): `repo.open`, `graph.status`, `graph.loadMore`,
+  `graph.refresh`, `commit.detail`, `refs.list`, `status.get`, `search.run`,
+  `review.resolveBase`, `review.open`, `branch.resolvePr`, `op.<name>`, `preflight.<name>`.
+- **Events** (host → UI, push): `repo.changed`, `graph.invalidated`, `review.target`,
+  `op.progress`, `op.finished`, `log`.
 - **Streams** (host → UI, chunked with backpressure): `graph.stream` — commit records
   arrive in batches as the `git log` process produces them, so the first screenful renders
   before the walk completes.
 
-Branch review (§6.8) adds one capability and reuses the rest: `graph.query`/`graph.stream`
-take an **optional commit range**, so a `<base>..<branch>` walk is the existing streaming
-walker with a different argv rather than a second pipeline, and `commit.detail` already
-returns the per-commit file tree the review rows expand into. The one genuinely new request is
-`review.resolveBase`, which answers "what should this branch be compared against" — a branch's
-tracking branch, the repository's detected default branch, and the candidate list the override
-picker offers. Wire format, chunking and version number are P7's plan to settle, not this
-document's.
+Branch review (§6.8) adds one capability and reuses the rest: `graph.status`/`graph.loadMore`/
+`graph.stream` take an **optional commit range**, so a `<base>..<branch>` walk is the existing
+streaming walker with a different argv rather than a second pipeline, and `commit.detail`
+already returns the per-commit file tree the review rows expand into. The two genuinely new
+requests are `review.resolveBase`, which answers "what should this branch be compared
+against" — a branch's tracking branch, the repository's detected default branch, and the
+candidate list the override picker offers — and `review.open`, which reveals the review
+sidebar view for a given branch from the panel or the palette; `review.target` is the event
+that tells an already-visible review view to switch to a newly opened branch. Wire format,
+chunking and version number were P7's plan to settle, not this document's (P7 landed at
+`CONTRACT_VERSION` 7).
 
 Pull request linking (§6.7) adds one request and no events or streams: `branch.resolvePr`,
 which answers "which pull request, if any, belongs to this branch" with a PR number, title,
@@ -1188,7 +1200,7 @@ The base is **resolved, not asked for**, in this order:
    `origin/develop`) is a deliberate statement of what this branch forked from, and we honour
    it.
 2. **The repository's detected default branch** — `origin/HEAD` where it resolves
-   (`git symbolic-ref refs/remotes/origin/HEAD`), else the first of
+   (`git symbolic-ref --short refs/remotes/origin/HEAD`), else the first of
    `kiraVersion.review.baseCandidates` (default `main`, `master`) that actually exists as a
    local or remote-tracking ref.
 3. **Nothing detected → we ask**, with the base picker focused and the commit list empty. We
@@ -1219,7 +1231,12 @@ sidebar is hidden and the webview disposed, the session is simply gone, and reop
 re-resolves the base and re-runs the walk. This is affordable precisely because the walk is
 bounded: a branch's own commits are tens or hundreds, not the 100k the graph is built for. The
 range walk uses the same streaming machinery and the same page size (§5.1.1), so the rare
-enormous range gets the same **Load more** button rather than a special case.
+enormous range gets the same **Load more** button rather than a special case. A `refsChanged`
+arriving mid-review never re-walks silently and never does nothing either: the base is
+re-resolved quietly in the background, and only if the outcome or the commit count actually
+changed does the view show a "comparison has changed" banner, which the user must click to
+re-run the walk — the same "we never silently review against a guess" discipline the base
+resolution itself follows.
 
 **The interaction, top to bottom.**
 
@@ -1914,6 +1931,12 @@ deliberately deferred rather than left undecided.**
 | D30 | Branch review's comparison base | **Resolved by default, overridable always, never guessed silently.** `git log <base>..<branch>` (two-dot — the branch's own commits, the set a pull request calls "this branch's commits"), with `<base>` resolved as: the branch's upstream when it names a *different* branch, else the repository's detected default branch (`origin/HEAD`, else the first existing of `kiraVersion.review.baseCandidates` = `main`, `master`), else we ask with an empty list rather than reviewing against a guess — a review against the wrong base looks right, which is what makes guessing worse than asking. The resolved base is a picker in the view header, not static text, and says how it was resolved; changing it re-runs in place. The override is session-scoped and deliberately not persisted: what a branch forked from is a fact about the moment, and a stale remembered base fails exactly like a wrongly detected one (6.8). Same defaults-with-override shape as D10's `--all` scope and §7.3's pull strategy. |
 | D31 | How a branch's pull request is resolved | **VS Code's own built-in GitHub authentication provider, plus a direct REST call — not another extension's internals.** `vscode.authentication.getSession('github', ['repo'], …)` ships inside VS Code: no second extension to require, no OAuth application of ours to register, no login flow to write, and the session is the GitHub account the user already granted their editor. The alternative — reading what the GitHub Pull Requests extension or GitLens has already fetched — was rejected because neither publishes a documented, stable API for "the pull request for branch X"; that association would be a dependency on undocumented internals, breaking on someone else's release, for a feature the user could not then repair. `owner/repo` comes from `origin`'s URL (https or ssh), the lookup is `GET /repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=all`, and the answer is cached per branch and invalidated by §4.5's watcher like every other per-ref fact. The session is requested lazily on first real use, never at activation, and never at all without a GitHub-shaped remote or with `kiraVersion.github.enabled` off. An installed GitHub-aware extension may still be feature-detected as **enrichment only** — the same optional-capability shape as D15's conflict resolution, never a requirement and never a fallback we depend on (6.7). |
 | D32 | What "linked" means in the UI | **A badge on the branch, not only a search index entry.** The number shows where branches are already first-class — the toolbar branch picker's rows and the message column's inline branch ref badges — and clicking it opens the pull request through the existing `ExternalOpener` port (§3.3), whose stated purpose is already "open compare/PR URLs"; no new port. Indexing the association for search alone would have made it real but unfindable: you would have to already know the number to search for it. The badge is **inert rather than noisy** — absent when there is no GitHub remote, no matching PR, the setting is off, or a lookup failed, and absent rather than a spinner or an error while one is in flight — because a row in a virtualized grid is the worst place in this app to display a pending network state (6.1, 6.7). PR number and title also join §7.8's `Refs` scope, so the badge and the search hit are one association surfaced twice, not two features. |
+| D38 | How the range-scoped walk reaches the wire | **One optional `range` on `graph.stream`/`graph.loadMore`/`graph.status`, sharing the chunk shape byte for byte — and a *separate* host-side walk session.** §3.5's "a different argv rather than a second pipeline" is true of the walker and false of the session: `LogSession`, `CommitStore`, `dictionaryMarks`, `nextSeq` and `lastRemaining` are per-walk state that has lived on the per-repo object only because a repo had one walk. A range walk reusing them destroys the panel's cache. `RepoSession` gains one nullable `reviewWalk` slot (one, not a map — §6.8: the view holds exactly one session), and a ranged stream ignores `resumeThroughRow` entirely, which is §5.4's exclusion made structural rather than remembered. |
+| D39 | What `review.resolveBase` answers, and how the override works | **A resolution *and* a range state, in one request, before the first row is painted — and the override is the same request with an explicit base.** "The walk produced nothing" distinguishes none of ask / fully-merged / unrelated / failed, and §6.8 requires three of them named. So `merge-base` and `rev-list --count <base>..<branch>` run host-side up front (two cheap reads, concurrent), and the response carries `{base, reason, range, candidates}`. The override re-calls with `base` set rather than re-walking client-side against a candidate, so a user-chosen base gets exactly the checks a detected one does; `reason: "override"` records that resolution was skipped. Session-scoped and unpersisted comes free — the view persists nothing at all (D41). |
+| D40 | How the sidebar view learns which branch to review | **`review.open` from the panel, `review.target` to an open review view, and the bootstrap island for a cold one — all three, because none covers the other's case.** `resolveWebviewView` runs only on reveal-from-hidden, and §6.8 requires reviewing a second branch to replace an already-open view's contents. The palette command reveals the view with no target and lets it ask, in the same ask-state vocabulary §6.8 already defines for a missing base — no host-side quick-pick surface, and the whole flow stays reachable in the harness tier. |
+| D41 | How one bundle serves two views | **`mount({view})` selects the root, and the review view is handed a `NullViewStateStore`.** §6.8's "same bundle, different root, selected from the host's injected initial state" — so `vite.config.ts`'s one-build-one-entry rule holds and there is no second UI to keep in visual step. The null store is a named export, not an inline literal: "this view persists nothing" is a design statement (§5.4's exclusion) and must be greppable. The review view additionally runs no lane-layout worker — it draws no lanes. |
+| D42 | Whether the review commit list is virtualized | **No — it is a tree of expandable rows over a bounded range.** §5.3's virtualized grid exists for 100k rows and cannot expand a row; §6.8's range is "tens or hundreds", and VS Code's own comparable surfaces (Source Control, Search Results) are non-virtualized trees at this scale. The bound is §5.1.1's page size with Load more as the gate, exactly as §6.8 specifies. The cost — 5,000 plain rows if a user presses Load more on a degenerate range — is accepted rather than paid for by virtualizing an expandable tree. |
+| D43 | Array-valued settings | **`SETTINGS` grows a `stringArray` type; `kiraVersion.review.baseCandidates` is its first member.** D25's schema is the one place settings are defined and it could not express a list at all. Coercion follows the existing never-partly-valid rule (any non-string member falls the whole value back to the default with a logged problem), and `toVsCodeConfiguration` emits `{type:"array", items:{type:"string"}}`. Adding the type rather than encoding a list as a comma-separated string keeps the parsing in the schema instead of in every consumer — D19's protected-branch patterns are the next array setting to arrive. |
 
 ### 11.3 Behaviour and safety
 
