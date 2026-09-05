@@ -13,14 +13,15 @@ import { noCapabilities } from "./noCapabilities.ts";
 import { pagedBranch } from "./pagedBranch.ts";
 import { rebasing } from "./rebasing.ts";
 import { review } from "./review.ts";
-import { reviewPaged } from "./reviewPaged.ts";
 import { reviewAsk } from "./reviewAsk.ts";
 import { reviewMerged } from "./reviewMerged.ts";
+import { reviewPaged } from "./reviewPaged.ts";
+import { reviewPerf } from "./reviewPerf.ts";
 import { reviewUpstream } from "./reviewUpstream.ts";
 import { tags } from "./tags.ts";
 import { tooOld } from "./tooOld.ts";
-import { worktrees } from "./worktrees.ts";
 import type { Scenario } from "./types.ts";
+import { worktrees } from "./worktrees.ts";
 
 const SCENARIOS: Readonly<Record<string, Scenario>> = {
   clean,
@@ -50,12 +51,14 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
  *  module never pays a hidden scenario's own build cost — only calling `loadScenario` with its
  *  exact name does. `ceiling`'s caller is expected to be `tests/perf/graphUi.ts` (W15);
  *  `pagedBranch`'s (P4 W13) is `graph.spec.ts`'s own "screenshot after a Load more" scenario;
- *  `reviewPaged`'s (P7 W16) is `review.spec.ts`'s own "Load more" test — all three are
- *  single-purpose fixtures nobody browsing scenarios by hand needs to stumble on. */
+ *  `reviewPaged`'s (P7 W16) is `review.spec.ts`'s own "Load more" test; `reviewPerf`'s (P7 W18)
+ *  is `tests/perf/graphUi.ts`'s own `reviewFirstPaintMs` metric — all four are single-purpose
+ *  fixtures nobody browsing scenarios by hand needs to stumble on. */
 const HIDDEN_SCENARIOS: Readonly<Record<string, () => Scenario>> = {
   ceiling,
   pagedBranch,
   reviewPaged,
+  reviewPerf,
   conflictedNoResolve: () => conflictedNoResolve,
 };
 

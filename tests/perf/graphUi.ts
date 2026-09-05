@@ -25,6 +25,12 @@
  * bridge, so it isolates render cost from `historyPipeline.ts`'s `commitDetailMs`, which measures
  * the *other* half of the same §5.1 number (real git spawns, no renderer at all).
  *
+ * `docs/plans/P7.md` W18 adds `reviewFirstPaintMs` (gated, 300ms ceiling — §10's own P7 row is
+ * §5.1's existing "Panel open → first commits painted" budget applied to the review sidebar, not
+ * a new number): the review view's own `kira:first-paint` mark against a dedicated 200-commit
+ * fixture (`reviewPerf`, `apps/harness/src/scenarios/reviewPerf.ts` — see its own doc comment for
+ * why a fresh fixture rather than extending `review.ts`'s ten-commit one).
+ *
  * **Deliberate departures from the plan's literal wording, all because the literal reading was
  * impractical (or, in the third case, actively misleading) at this scale, recorded here and in
  * the phase's own Findings:**
@@ -69,8 +75,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
-import { chromium, type CDPSession, type Page } from "playwright-core";
-import { build as viteBuild, preview as vitePreview, type PreviewServer } from "vite";
+import { type CDPSession, chromium, type Page } from "playwright-core";
+import { type PreviewServer, build as viteBuild, preview as vitePreview } from "vite";
 
 // Mirrors `packages/ui/src/graph/graphColumn.ts`'s own `declare global` for the same property —
 // `tests/perf` sits outside that package's TS program, so `page.evaluate`'s in-browser callbacks
@@ -110,6 +116,13 @@ interface Measurement {
    *  `commitDetailMs` (the host half, real git spawns, no renderer). Recorded only — §5.1 sets no
    *  separate renderer-side budget for the detail pane. */
   readonly detailPaintMs: number;
+  /** `docs/plans/P7.md` W18 — §10's own P7 row, "first commits painted ≤300 ms on a 200-commit
+   *  range": `ReviewView.vue`'s own `kira:first-paint` mark (set right after mount, same idea as
+   *  `App.vue`'s for the graph panel, no lane-layout worker to wait a frame for on this surface)
+   *  against the `reviewPerf` fixture's 200-commit `feature` branch. Gated at the same 300ms
+   *  ceiling §5.1's `firstPaintMs` uses — it is that same budget applied to the review surface,
+   *  not a new one. */
+  readonly reviewFirstPaintMs: number;
 }
 
 const CEILINGS: Readonly<Record<string, number>> = {
@@ -120,6 +133,7 @@ const CEILINGS: Readonly<Record<string, number>> = {
   medianFrameMs: 1000 / 60,
   heapFirstPageMB: 80,
   heapFullMB: 250,
+  reviewFirstPaintMs: 300,
 };
 
 const GATED_METRICS = [
@@ -130,6 +144,7 @@ const GATED_METRICS = [
   "medianFrameMs",
   "heapFirstPageMB",
   "heapFullMB",
+  "reviewFirstPaintMs",
 ] as const;
 
 const RECORDED_ONLY_METRICS = [
@@ -494,6 +509,18 @@ async function measure(): Promise<Measurement> {
     await page.locator('[data-testid="file-tree"]').waitFor({ state: "attached" });
     const detailPaintMs = performance.now() - detailPaintStart;
 
+    // --- reviewFirstPaintMs: `docs/plans/P7.md` W18 — §10's own P7 row, measured the same way
+    // `firstPaintMs` above measures the graph panel's, against the review sidebar's own root and
+    // the dedicated 200-commit `reviewPerf` fixture (see that file's own doc comment for why a
+    // fresh fixture, not `review.ts`'s ten-commit one, extended). `&branch=feature` drives
+    // `main.ts`'s cold-bootstrap arm (D40) directly to a resolved target, the same "serial
+    // prelude" (`app.init` → `repo.open` → `review.resolveBase` → `graph.stream`) a real palette
+    // invocation goes through — this is deliberately the *slower* of the two paths documented in
+    // `main.ts` (the `?openRepo=1` in-view-picker arm has no resolution to wait on at all). ---
+    await page.goto(`${HARNESS_BASE}/?view=review&scenario=reviewPerf&branch=feature`);
+    await page.waitForFunction(() => performance.getEntriesByName("kira:first-paint").length > 0);
+    const reviewFirstPaintMs = await measureDurationByName(page, "kira:first-paint");
+
     return {
       firstPaintMs,
       firstPageMs,
@@ -509,6 +536,7 @@ async function measure(): Promise<Measurement> {
       bundleKB,
       scenarioBuildMsReference,
       detailPaintMs,
+      reviewFirstPaintMs,
     };
   } finally {
     await browser.close();
