@@ -18,7 +18,7 @@
  * match, exactly as a normal row click would, and only `App.vue` can do that.
  */
 import type { CommitStore } from "@kira-version/core";
-import { computed } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import type { DetailState } from "../state/detail.ts";
 import type { DetailActions } from "../state/detailActions.ts";
 import CommitMeta from "./CommitMeta.vue";
@@ -38,6 +38,22 @@ const detail = computed(() => props.detailState.detail.value);
 function onSelectParentCommit(sha: string): void {
   emit("selectParentCommit", sha);
 }
+
+/** P5 W14: "leaving the diff returns focus to the file it was showing, not to the top of the
+ *  tree" — the tree unmounts entirely while the diff is showing (this component's own `v-if`/
+ *  `v-else-if`), so there is no DOM node to hold onto across the transition; this watches
+ *  `mode` itself and re-focuses the tree's own cursor row once it is back in the DOM. Both ways
+ *  back to `"detail"` (the diff's own back affordance, and `App.vue`'s `closeDetail` on `Esc`)
+ *  go through `DetailState.showTree()`, so watching `mode` here covers both without either of
+ *  those callers needing to know this component exists. */
+const fileTreeRef = ref<InstanceType<typeof FileTree> | null>(null);
+watch(
+  () => props.detailState.mode.value,
+  (mode, previous) => {
+    if (mode === "detail" && previous === "diff")
+      void nextTick(() => fileTreeRef.value?.focusTree());
+  },
+);
 </script>
 
 <template>
@@ -67,6 +83,7 @@ function onSelectParentCommit(sha: string): void {
         @select-parent-commit="onSelectParentCommit"
       />
       <FileTree
+        ref="fileTreeRef"
         class="kv-detail-pane-tree"
         :files="detail.files"
         :selected-file="detailState.selectedFile.value"

@@ -102,6 +102,23 @@ function lineClass(row: DiffRow): string {
   return "";
 }
 
+/** P5 W14: "each row's accessible name states its kind in words" — read instead of the visual
+ *  `+`/`−` glyph (`aria-hidden` in the template), which a screen reader has no reliable way to
+ *  pronounce as "added"/"deleted" on its own. */
+function rowAccessibleName(row: DiffRow): string {
+  const body = props.diff?.body;
+  if (body?.kind !== "text") return "";
+  const hunk = body.hunks[row.hunkIndex];
+  if (row.kind === "hunkHeader") {
+    return `Hunk: old line ${hunk?.oldStart}, new line ${hunk?.newStart}${hunk?.heading ? `, ${hunk.heading}` : ""}`;
+  }
+  const line = hunk?.lines[row.lineIndex];
+  if (!line) return "";
+  if (line.kind === "add") return `Line ${line.newLine}, added: ${line.text}`;
+  if (line.kind === "del") return `Line ${line.oldLine}, deleted: ${line.text}`;
+  return `Line ${line.oldLine}/${line.newLine}, unchanged: ${line.text}`;
+}
+
 const actionMessage = ref("");
 let actionMessageTimer: ReturnType<typeof setTimeout> | undefined;
 function showActionMessage(text: string): void {
@@ -216,16 +233,24 @@ function formatBytes(bytes: number): string {
     <div v-if="diffError" class="kv-diff-message">Couldn't load this diff — {{ diffError }}</div>
 
     <template v-else-if="diff">
-      <div v-if="diff.body.kind === 'text'" ref="bodyEl" class="kv-diff-body">
+      <div
+        v-if="diff.body.kind === 'text'"
+        ref="bodyEl"
+        class="kv-diff-body"
+        role="table"
+        :aria-label="`Diff for ${diff.change.path}`"
+      >
         <div
           v-for="(row, index) in rows"
           :key="rowKey(row, index)"
           class="kv-diff-row"
           :class="[lineClass(row), { 'kv-diff-row-focused': index === focusedRow }]"
+          role="row"
+          :aria-label="rowAccessibleName(row)"
           @click="focusedRow = index"
         >
           <template v-if="row.kind === 'hunkHeader'">
-            <div class="kv-diff-hunk-header">
+            <div class="kv-diff-hunk-header" role="cell">
               @@ -{{ diff.body.hunks[row.hunkIndex]?.oldStart }},{{
                 diff.body.hunks[row.hunkIndex]?.oldLines
               }}
@@ -236,20 +261,20 @@ function formatBytes(bytes: number): string {
             </div>
           </template>
           <template v-else>
-            <span class="kv-diff-gutter kv-diff-gutter-old">{{
+            <span class="kv-diff-gutter kv-diff-gutter-old" role="cell">{{
               diff.body.hunks[row.hunkIndex]?.lines[row.lineIndex]?.oldLine ?? ""
             }}</span>
-            <span class="kv-diff-gutter kv-diff-gutter-new">{{
+            <span class="kv-diff-gutter kv-diff-gutter-new" role="cell">{{
               diff.body.hunks[row.hunkIndex]?.lines[row.lineIndex]?.newLine ?? ""
             }}</span>
-            <span class="kv-diff-marker">{{
+            <span class="kv-diff-marker" aria-hidden="true">{{
               diff.body.hunks[row.hunkIndex]?.lines[row.lineIndex]?.kind === "add"
                 ? "+"
                 : diff.body.hunks[row.hunkIndex]?.lines[row.lineIndex]?.kind === "del"
                   ? "−"
                   : ""
             }}</span>
-            <span class="kv-diff-text">{{
+            <span class="kv-diff-text" role="cell">{{
               diff.body.hunks[row.hunkIndex]?.lines[row.lineIndex]?.text
             }}</span>
             <span

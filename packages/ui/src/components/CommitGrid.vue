@@ -767,6 +767,23 @@ defineExpose({ scrollToRow });
   color: var(--kv-row-selected-fg);
 }
 
+/* Same class of bug, a fourth cell: a border-only ref badge (tag/remote/stash/overflow — every
+   `refBadges.ts` kind except `.kv-badge-local`, which already fills its own background and so
+   never depends on the row's) carries its own decoration colour as both `color` and
+   `border-color`, tuned against the row's *un*selected background. A selected row with, say, a
+   green `v1.0.0` tag badge fails contrast for real (P5 W14's own axe scan on the commit-detail
+   pane's populated state, the first scan to select a row carrying this particular badge kind) —
+   caught the same way `.kv-cell-sha` above already was, fixed the same way: the row's own
+   selected-foreground, already verified high-contrast against `--kv-row-selected-bg`, for both
+   properties so the badge's outline stays visible too. */
+.kv-commit-grid .slick-row.kv-row-selected .kv-badge-remote,
+.kv-commit-grid .slick-row.kv-row-selected .kv-badge-tag,
+.kv-commit-grid .slick-row.kv-row-selected .kv-badge-stash,
+.kv-commit-grid .slick-row.kv-row-selected .kv-badge-overflow {
+  color: var(--kv-row-selected-fg);
+  border-color: var(--kv-row-selected-fg);
+}
+
 /* W14's roving tabindex focuses a real row node (not a hidden sink) — it needs a visible
    indicator of its own, the same token every other focusable edge in this grid already uses. */
 .kv-commit-grid .slick-row:focus-visible {

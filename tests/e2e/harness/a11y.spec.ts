@@ -80,6 +80,31 @@ test.describe("axe: no serious/critical violations", () => {
       expect(await unexpectedSeriousViolations(page)).toEqual([]);
     });
   }
+
+  // P5 W14's own "Done when": the populated commit-detail pane and the open diff, each scanned
+  // in all four theme kinds — `detail.ts`'s "tip" commit (row 1) is the one scenario carrying
+  // every `FileChangeKind`/non-text `FileDiffBody` shape, so this exercises the file tree's
+  // status letters and the diff's binary/LFS/too-large message rows in the same pass.
+  for (const kind of THEME_KINDS) {
+    test(`commit-detail pane, populated: ${kind}`, async ({ page }) => {
+      await page.goto(`/?scenario=detail&theme=${kind}`);
+      await ready(page);
+      await page.locator('.slick-row[data-row="1"]').click();
+      await expect(page.getByTestId("file-tree")).toBeVisible();
+
+      expect(await unexpectedSeriousViolations(page)).toEqual([]);
+    });
+
+    test(`commit-detail pane, diff open: ${kind}`, async ({ page }) => {
+      await page.goto(`/?scenario=detail&theme=${kind}`);
+      await ready(page);
+      await page.locator('.slick-row[data-row="1"]').click();
+      await page.locator(".kv-file-tree-row", { hasText: "modified.ts" }).click();
+      await expect(page.getByTestId("diff-view").locator(".kv-diff-body")).toBeVisible();
+
+      expect(await unexpectedSeriousViolations(page)).toEqual([]);
+    });
+  }
 });
 
 test.describe("row accessibility bookkeeping at scale", () => {

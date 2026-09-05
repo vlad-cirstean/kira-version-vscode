@@ -124,6 +124,51 @@ watch(
   { immediate: true },
 );
 
+/** P5 W14: a single roving `tabindex` on the file cursor (`focusedRow`'s own row) rather than the
+ *  container — the same real-DOM-focus roving pattern `CommitGrid.vue`'s own rows use, not
+ *  `aria-activedescendant` (a screen reader tracks whichever DOM node actually has focus, and this
+ *  keeps every row a genuinely reachable `Tab` stop). */
+function rowId(index: number): string {
+  return `kv-file-tree-row-${index}`;
+}
+function focusRowEl(index: number): void {
+  void nextTick(() => {
+    treeEl.value?.querySelector<HTMLElement>(`#${rowId(index)}`)?.focus({ preventScroll: true });
+  });
+}
+watch(focusedRow, (index) => {
+  // Only follow the cursor with *real* focus when the tree already holds it — otherwise a
+  // `selectedFile` sync driven from outside (the `watch` just above, on a fresh mount or an
+  // Alt+←/→ file-to-file move made while focus is in the diff) would steal focus into the tree
+  // uninvited. `focusTree()` below is the one explicit, intentional exception.
+  if (treeEl.value?.contains(document.activeElement)) focusRowEl(index);
+});
+
+/** Exposed for `DetailPane.vue` to call after `Esc`/the back affordance returns from the diff to
+ *  the tree (P5 W14's own "leaving the diff returns focus to the file it was showing, not to the
+ *  top of the tree") — the one case where focus must move into a component that, an instant ago,
+ *  did not even exist in the DOM, so the reactive `watch` above (which requires the tree to
+ *  already contain focus) cannot fire on its own. */
+function focusTree(): void {
+  focusRowEl(focusedRow.value);
+}
+defineExpose({ focusTree });
+
+/** P5 W14: announces §8's render cap once per boundary crossing (a fresh commit whose file count
+ *  is over the cap, or the filter narrowing back above it after being below) — not on every
+ *  keystroke that leaves the cap in the same state, which `capped` itself recomputes on. */
+let lastHiddenCount: number | undefined;
+watch(
+  capped,
+  (value) => {
+    if (value.hiddenCount > 0 && value.hiddenCount !== lastHiddenCount) {
+      props.actions.announce(`Showing ${value.visible.length} of ${rows.value.length} files`);
+    }
+    lastHiddenCount = value.hiddenCount;
+  },
+  { immediate: true },
+);
+
 function rowKey(row: FileTreeRow): string {
   return row.kind === "directory" ? `dir:${row.node.path}` : `file:${row.node.path}`;
 }
@@ -195,11 +240,6 @@ function onKeydown(event: KeyboardEvent): void {
       break;
   }
 }
-
-function focusTree(): void {
-  void nextTick(() => treeEl.value?.focus());
-}
-defineExpose({ focusTree });
 
 interface ParentOption {
   readonly sha: string;
@@ -287,18 +327,20 @@ function copyPath(path: string): void {
       ref="treeEl"
       class="kv-file-tree-rows"
       :aria-label="listMode === 'tree' ? 'File tree' : 'File list'"
-      role="tree"
-      tabindex="0"
+      :role="listMode === 'tree' ? 'tree' : 'listbox'"
       @keydown="onKeydown"
     >
       <div
         v-for="(row, index) in capped.visible"
+        :id="rowId(index)"
         :key="rowKey(row)"
         class="kv-file-tree-row"
         :class="{ 'kv-row-focused': index === focusedRow, 'kv-row-selected': row.kind === 'file' && row.node.fileIndex === selectedFile }"
-        role="treeitem"
-        :aria-level="row.depth + 1"
-        :aria-expanded="row.kind === 'directory' ? row.expanded : undefined"
+        :role="listMode === 'tree' ? 'treeitem' : 'option'"
+        :aria-level="listMode === 'tree' ? row.depth + 1 : undefined"
+        :aria-expanded="listMode === 'tree' && row.kind === 'directory' ? row.expanded : undefined"
+        :aria-selected="row.kind === 'file' ? row.node.fileIndex === selectedFile : undefined"
+        :tabindex="index === focusedRow ? 0 : -1"
         :style="{ paddingLeft: `${row.depth * 16}px` }"
         @click="onRowClick(index)"
       >

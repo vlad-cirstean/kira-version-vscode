@@ -31,6 +31,39 @@ async function lastEditorAction(page: Page): Promise<unknown> {
 
 const liveAnnouncement = (page: Page) => page.getByTestId("live-announcements");
 
+/** What `document.activeElement` actually is — mirrors `commitList.spec.ts`'s own `FocusInfo`/
+ *  `focusInfo`/`tabUntil` (that file's own doc comment explains why a predicate-driven `Tab` walk
+ *  is used instead of a hard-coded stop count), with `id` added since this pane's own roving
+ *  cursor identifies its tabbable row by id (`FileTree.vue`'s `rowId`), not by class alone. */
+interface FocusInfo {
+  tag: string;
+  id: string;
+  classList: string[];
+}
+
+async function focusInfo(page: Page): Promise<FocusInfo> {
+  return page.evaluate(() => {
+    const el = document.activeElement;
+    return {
+      tag: el?.tagName.toLowerCase() ?? "",
+      id: el?.id ?? "",
+      classList: el ? Array.from(el.classList) : [],
+    };
+  });
+}
+
+async function tabUntil(
+  page: Page,
+  predicate: (info: FocusInfo) => boolean,
+  maxPresses = 25,
+): Promise<void> {
+  for (let i = 0; i < maxPresses; i++) {
+    if (predicate(await focusInfo(page))) return;
+    await page.keyboard.press("Tab");
+  }
+  throw new Error(`tabUntil: condition not met within ${maxPresses} Tab presses`);
+}
+
 test.describe("commit meta: message, trailers, timestamps, refs, signature, parents", () => {
   test("selecting the tip commit populates every field, with the trailer paragraph absent from the body", async ({
     page,
@@ -496,6 +529,68 @@ test.describe("feature detection", () => {
     await expect(diffView).toBeVisible();
     await expect(diffView.getByRole("button", { name: "Open in editor" })).toHaveCount(0);
     await expect(diffView.getByRole("button", { name: "Go to file" })).toHaveCount(0);
+  });
+});
+
+test.describe("keyboard-only pass: the whole detail pane, start to finish", () => {
+  // P5 W14's own "Done when": focus order is stated and *tested*, not merely arranged — entering
+  // the pane lands on the file cursor, the diff's back affordance and both editor actions are
+  // reachable, and leaving the diff by keyboard returns focus to the file it was showing.
+  test("file cursor in by Tab, an arrow key opens a file's diff, the diff's own actions are reachable, and Escape returns focus to that same file", async ({
+    page,
+  }) => {
+    await page.goto("/?scenario=detail");
+    await ready(page);
+    // Selecting the commit itself is the *grid's* own keyboard reachability —
+    // `commitList.spec.ts`'s own dedicated "keyboard-only pass" already covers Tab-in from a blank
+    // page to a row — out of scope for this file (this file's own header comment: it owns the
+    // pane, not the grid). `.click()` to arrive at a populated pane is this file's own established
+    // convention; every other test here does the same.
+    await rowByIndex(page, 1).click(); // tip
+    await rowByIndex(page, 1).focus(); // a known anchor to Tab forward from, into the pane
+
+    // Entering the pane lands on the file cursor: the resize handle, the message section's own
+    // copy button and the filter box are all real, legitimate tab stops ahead of it — none of them
+    // un-skippable (`tabUntil`'s own doc comment on what "reachable" means, `commitList.spec.ts`).
+    // Typing straight into the filter — still real keyboard input, reached along the same walk —
+    // keeps the file this test lands on deterministic without hand-counting
+    // `fileTreeModel.ts`'s own sort order across three directories.
+    await tabUntil(page, (info) => info.classList.includes("kv-file-tree-filter"));
+    await page.keyboard.type("modified");
+    await expect(page.getByTestId("file-tree").locator(".kv-file-tree-row")).toHaveCount(2); // "src" + modified.ts
+
+    await tabUntil(page, (info) => info.id.startsWith("kv-file-tree-row-"));
+    const cursorOnDir = await focusInfo(page);
+    expect(cursorOnDir.id).toBe("kv-file-tree-row-0"); // "src" — `focusedRow`'s untouched default
+
+    // Arrow onto the file itself. Moving the cursor onto a file row opens its diff directly —
+    // the same "the diff follows the file cursor under ArrowDown" behaviour the diff-view describe
+    // block above already covers end to end (`FileTree.vue`'s `selectRow`: a file row's own
+    // `emit("selectFile", ...)` fires from a plain cursor move, not only from `Enter`/a click) — so
+    // this single keypress is what reaches the diff by keyboard here, with nothing further to press.
+    await page.keyboard.press("ArrowDown");
+
+    const diffView = page.getByTestId("diff-view");
+    await expect(diffView).toBeVisible();
+    await expect(diffView.locator(".kv-diff-path")).toHaveText("src/modified.ts");
+
+    // The back affordance and both editor actions are reachable, in that order.
+    await diffView.focus(); // the diff root itself is the `.kv-diff-view`/tabindex="0" element
+    await tabUntil(page, (info) => info.classList.includes("kv-diff-back"));
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Tab"); // past the previous- and next-file nav buttons (both
+    // enabled here — `modified.ts` is neither the first nor the last of the tip commit's 8 files)
+    await expect(page.locator(":focus")).toHaveText("Open in editor");
+    await page.keyboard.press("Tab");
+    await expect(page.locator(":focus")).toHaveText("Go to file");
+
+    // Leaving the diff by keyboard (Escape — App.vue's document-level handler, reachable no
+    // matter which element inside the diff currently holds focus) returns focus to the file it
+    // was showing — the same row, not the top of the tree.
+    await page.keyboard.press("Escape");
+    await expect(diffView).toBeHidden();
+    await expect(page.locator("#kv-file-tree-row-1")).toBeFocused();
   });
 });
 
