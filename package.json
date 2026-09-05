@@ -24,6 +24,7 @@
     "build": "bun run scripts/build.ts",
     "test:unit": "bun test packages tests/fixtures tests/unit",
     "test:integration": "bun test tests/integration",
+    "test:integration:sharded": "bun run scripts/test-shard.ts",
     "test": "bun run test:unit && bun run test:integration",
     "test:e2e": "playwright test",
     "test:e2e:vscode": "bun run scripts/e2e-display.ts test --project=vscode",
