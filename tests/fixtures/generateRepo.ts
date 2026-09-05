@@ -159,6 +159,74 @@ export function linear(n: number): GeneratedRepo {
   return { dir: repo.dir, commits, refs: { main: repo.head() } };
 }
 
+export interface DetailWorkloadOptions {
+  /** Total commits returned — includes the merge and the many-files commit below, not on top of
+   *  them. Default 20, `docs/plans/P5.md` W15's own sample size for `commitDetailMs`. */
+  readonly commitCount?: number;
+  /** How many files the one "touches many files" commit adds at once. Default 500 — W15's own
+   *  number, matching §6.4/W8's render-cap fixture (`detail.ts`'s `manyFiles` in the harness). */
+  readonly manyFilesCount?: number;
+}
+
+/**
+ * W15's own fixture: a small, real repository built for `commitDetailMs`/`fileDiffMs` rather
+ * than layout stress (`large`/`largeBranchy` above) — `git commit` per commit is plenty fast at
+ * this scale, so this skips the fast-import machinery those two need at 100k+ commits.
+ * `commitCount` real commits, including exactly one merge (so the sample the perf script times
+ * genuinely exercises a multi-parent `commitDetail`) and exactly one commit that adds
+ * `manyFilesCount` files in a single commit (so `fileDiff` has a 5,000-line file to time, and
+ * `commitDetail`'s own `numstat`/`name-status` spawns have a realistically large file list to
+ * parse at least once in the sample, not only single-file commits).
+ */
+export function detailWorkload(opts: DetailWorkloadOptions = {}): GeneratedRepo {
+  const { commitCount = 20, manyFilesCount = 500 } = opts;
+  const repo = new Repo(tempRepoDir("detail-workload"));
+  repo.init("main");
+  const commits: string[] = [];
+
+  repo.writeFile("README.md", "root\n");
+  repo.add("README.md");
+  commits.push(repo.commit("root"));
+
+  repo.checkoutNew("feature/detail");
+  repo.writeFile("feature.txt", "feature work\n");
+  repo.add("feature.txt");
+  commits.push(repo.commit("feature commit"));
+  const featureSha = repo.head();
+
+  repo.checkout("main");
+  repo.writeFile("main.txt", "main work\n");
+  repo.add("main.txt");
+  commits.push(repo.commit("main commit before merge"));
+
+  commits.push(repo.merge("Merge feature/detail into main", [featureSha])); // the one merge
+
+  // The one many-files commit — its first file (`generated/file-0000.ts`) carries 5,000 lines
+  // rather than one, so the same commit also supplies `fileDiffMs`'s own "one 5,000-line file".
+  mkdirSync(join(repo.dir, "generated"), { recursive: true });
+  for (let i = 0; i < manyFilesCount; i++) {
+    const lineCount = i === 0 ? 5000 : 1;
+    const lines = Array.from(
+      { length: lineCount },
+      (_, line) => `export const line${line} = ${i};`,
+    );
+    repo.writeFile(`generated/file-${String(i).padStart(4, "0")}.ts`, `${lines.join("\n")}\n`);
+  }
+  repo.add("generated");
+  commits.push(repo.commit(`add ${manyFilesCount} generated files`));
+
+  // Simple single-file edits fill out the rest of `commitCount`.
+  let i = 0;
+  while (commits.length < commitCount) {
+    repo.writeFile("main.txt", `main work ${i}\n`);
+    repo.add("main.txt");
+    commits.push(repo.commit(`main commit ${i}`));
+    i++;
+  }
+
+  return { dir: repo.dir, commits, refs: { main: repo.head(), "feature/detail": featureSha } };
+}
+
 export interface BranchyOptions {
   mainCommits?: number;
   featureCommits?: number;

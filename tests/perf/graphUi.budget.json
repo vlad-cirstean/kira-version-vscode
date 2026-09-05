@@ -1,15 +1,16 @@
 {
-  "firstPaintMs": 191.89999999990687,
-  "firstPageMs": 583.7999999998137,
-  "loadMoreMs": 400.079197,
+  "firstPaintMs": 241.5,
+  "firstPageMs": 757.6000000014901,
+  "loadMoreMs": 470.2678699999997,
   "worstFrameMs": 33.30000000000109,
   "medianFrameMs": 16.69999999999709,
-  "heapFirstPageMB": 62.71156692504883,
-  "heapFullMB": 42.233646392822266,
-  "layoutSubmitMs": 74.20000000018626,
-  "rowBuildMedianMs": 0.09999999962747097,
-  "rowBuildP99Ms": 0.20000000018626451,
+  "heapFirstPageMB": 63.172428131103516,
+  "heapFullMB": 42.876914978027344,
+  "layoutSubmitMs": 98.30000000074506,
+  "rowBuildMedianMs": 0.09999999776482582,
+  "rowBuildP99Ms": 0.20000000298023224,
   "svgNodesPerRow": 3,
-  "bundleKB": 84.4189453125,
-  "scenarioBuildMsReference": 204.64327600000001
+  "bundleKB": 93.3154296875,
+  "scenarioBuildMsReference": 301.834429,
+  "detailPaintMs": 196.24968900000385
 }
