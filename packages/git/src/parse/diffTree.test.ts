@@ -69,13 +69,13 @@ describe("parseNumstatRecords", () => {
     });
   });
 
-  test("a rename with an edit (P1 fix): true +1/-0 delta, not an independent delete+add", () => {
+  test("a rename with an edit (P1 fix): true +1/-1 delta, not +10/-10 delete+add", () => {
     const [entry] = parseNumstatRecords(loadRecords(FIXTURES, "numstat-renameWithEdit"));
     expect(entry).toEqual({
       path: "new.txt",
       originalPath: "old.txt",
       additions: 1,
-      deletions: 0,
+      deletions: 1,
       isBinary: false,
     });
   });
@@ -100,7 +100,7 @@ describe("parseNameStatusRecords", () => {
   test("a rename with an edit in the same commit still reports rename linkage", () => {
     const entries = parseNameStatusRecords(loadRecords(FIXTURES, "nameStatus-renameWithEdit"));
     expect(entries).toEqual([
-      { kind: "renamed", path: "new.txt", originalPath: "old.txt", similarity: 83 },
+      { kind: "renamed", path: "new.txt", originalPath: "old.txt", similarity: 64 },
     ]);
   });
 

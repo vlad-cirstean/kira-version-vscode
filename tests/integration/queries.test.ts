@@ -325,7 +325,7 @@ describe("commitDetail", () => {
       },
     });
     execFileSync("git", ["mv", "old.txt", "new.txt"], { cwd: dir });
-    writeFileSync(join(dir, "new.txt"), "line1\nline2\nline3\nline4\nline5\nline6\n");
+    writeFileSync(join(dir, "new.txt"), "line1\nline2\nline3-edited\nline4\nline5\n");
     execFileSync("git", ["commit", "--quiet", "--no-gpg-sign", "-am", "rename with edit"], {
       cwd: dir,
       env: {
@@ -342,10 +342,10 @@ describe("commitDetail", () => {
     const renamed = detail.files.find((f) => f.kind === "renamed");
     expect(renamed?.originalPath).toBe("old.txt");
     expect(renamed?.path).toBe("new.txt");
-    // The rename carried its 5 original lines across untouched and added one more — the true
-    // delta is +1/-0, never the old +6/-5 a delete+add reconstruction would have reported.
+    // One line changed inside the renamed file — the true delta is +1/-1, never the old +5/-5
+    // (or larger) a delete+add reconstruction would have reported for the same edit.
     expect(renamed?.additions).toBe(1);
-    expect(renamed?.deletions).toBe(0);
+    expect(renamed?.deletions).toBe(1);
   });
 
   const testIdentityEnv = {

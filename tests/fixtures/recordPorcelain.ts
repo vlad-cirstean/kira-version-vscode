@@ -229,7 +229,9 @@ function recordDiffTree(): void {
     git(dir, ["commit", "--quiet", "--no-gpg-sign", "-m", "c1"]);
     const c1 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
     git(dir, ["mv", "old.txt", "new.txt"]);
-    writeFileSync(join(dir, "new.txt"), "line1\nline2\nline3\nline4\nline5\nline6\n");
+    // One line changed (line3 -> line3-edited): a true +1/-1, the case P1's bug reported as
+    // +10/-10 (numstat without -M/-C sees this as an independent full delete + full add).
+    writeFileSync(join(dir, "new.txt"), "line1\nline2\nline3-edited\nline4\nline5\n");
     git(dir, ["commit", "--quiet", "--no-gpg-sign", "-am", "c2 rename with edit"]);
     const c2 = git(dir, ["rev-parse", "HEAD"]).toString("utf8").trim();
     save("diffTree/nameStatus-renameWithEdit.bin", git(dir, nameStatusArgs(c1, c2)));
