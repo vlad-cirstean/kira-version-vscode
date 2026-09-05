@@ -12,6 +12,10 @@ import { merge } from "./merge.ts";
 import { noCapabilities } from "./noCapabilities.ts";
 import { pagedBranch } from "./pagedBranch.ts";
 import { rebasing } from "./rebasing.ts";
+import { review } from "./review.ts";
+import { reviewAsk } from "./reviewAsk.ts";
+import { reviewMerged } from "./reviewMerged.ts";
+import { reviewUpstream } from "./reviewUpstream.ts";
 import { tags } from "./tags.ts";
 import { tooOld } from "./tooOld.ts";
 import { worktrees } from "./worktrees.ts";
@@ -32,6 +36,10 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
   rebasing,
   worktrees,
   tags,
+  review,
+  reviewUpstream,
+  reviewMerged,
+  reviewAsk,
 };
 
 /** Loadable by exact name via `?scenario=<name>` but deliberately left out of `SCENARIOS` above

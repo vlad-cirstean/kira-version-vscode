@@ -12,6 +12,7 @@ import {
   createMockBridge,
   type HarnessEditorAction,
   type RecordedOp,
+  type RecordedReviewOpen,
   type RecordedUndo,
 } from "./mockBridge.ts";
 import { loadScenario } from "./scenarios/index.ts";
@@ -41,6 +42,9 @@ declare global {
       /** P7 W15: pushes `review.target` at the mock bridge — see `mockBridge.ts`'s own
        *  `MockBridge.pushReviewTarget` doc comment. */
       pushReviewTarget(repoId: string, branch: string): void;
+      /** P7 W15/W16: the most recent `review.open` call the mock bridge recorded — see
+       *  `mockBridge.ts`'s own `RecordedReviewOpen` doc comment. */
+      readonly lastReviewOpen: RecordedReviewOpen | undefined;
     };
   }
 }
@@ -188,6 +192,9 @@ window.__kiraHarness = {
   pushReviewTarget(repoId: string, branch: string): void {
     transport.pushReviewTarget(repoId, branch);
   },
+  get lastReviewOpen(): RecordedReviewOpen | undefined {
+    return transport.getLastReviewOpen();
+  },
 };
 
 if (viewParam === "review") {
@@ -207,13 +214,26 @@ if (viewParam === "review") {
       // See the graph branch's own identical catch below — an unimplemented scenario stub.
     }
   }
-  mount(container, {
-    transport,
-    viewState: new NullViewStateStore(),
-    host: "harness",
-    view: "review",
-    target,
-  });
+  // `ReviewView.vue`'s cold-bootstrap arm (`props.target`) deliberately never calls `repo.open`
+  // itself — `reviewView.ts`'s own doc comment explains why: in the real host, the panel webview
+  // has already opened this repoId against the *shared* `RepoService` before the review webview
+  // is ever revealed with a pending target, so `review.resolveBase` finds an already-open
+  // session with nothing more to do. The harness has no such shared service — `createMockBridge`
+  // starts a fresh, empty `sessions` map on every page load, and this deep link is the only page
+  // load that will ever ask for this repoId — so it must open the session itself before mounting,
+  // exactly as the graph branch below gets one open through `App.vue`'s own `bootstrap()`.
+  void (async () => {
+    if (target) {
+      await transport.request("repo.open", { path: target.repoId });
+    }
+    mount(container, {
+      transport,
+      viewState: new NullViewStateStore(),
+      host: "harness",
+      view: "review",
+      target,
+    });
+  })();
 } else {
   // `App.vue`'s own `bootstrap()` only opens a repo automatically when `viewState.read()` returns
   // a persisted, non-null `repoId` — exploited here to get every scenario auto-loading on mount,

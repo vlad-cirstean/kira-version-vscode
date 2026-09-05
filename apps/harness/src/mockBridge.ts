@@ -834,6 +834,17 @@ export interface RecordedUndo {
   readonly result: OpResult;
 }
 
+/** One `review.open` call as the mock recorded it — `docs/plans/P7.md` W16's "both entry points
+ *  open the review on the right branch" needs something to assert against even though the
+ *  harness serves one view per page load and so cannot literally reveal a second one
+ *  (`reviewOpen`'s own doc comment): a spec drives the panel's "Review branch changes" menu,
+ *  reads this back, and opens a second harness page at `?view=review&branch=<recorded branch>`
+ *  to prove the request the menu actually sent was the right one. */
+export interface RecordedReviewOpen {
+  readonly repoId: string;
+  readonly branch: string;
+}
+
 /** `createHandlers`'s own `ServerHandlers` plus a way to read its private `activeRepoId` closure
  *  variable from outside (P4 W12) — `createMockBridge`'s `triggerRefsChanged` hook needs to know
  *  which repo, if any, is open, without duplicating that tracking at its own level. */
@@ -846,6 +857,8 @@ interface MockHandlers {
   getLastOp(): RecordedOp | undefined;
   /** P6 W19's own hook — see `RecordedUndo`'s doc comment. */
   getLastUndo(): RecordedUndo | undefined;
+  /** P7 W15/W16's own hook — see `RecordedReviewOpen`'s doc comment. */
+  getLastReviewOpen(): RecordedReviewOpen | undefined;
   /** P6 W19: `conflicted.ts`'s own doc comment already flagged this gap — "Continue re-enables
    *  once the mock's `op.run`/`status.get` loop reflects [conflicts] resolved, which this
    *  scenario cannot fake without a real index". This is that fake: marks one conflicted path
@@ -866,6 +879,7 @@ function createHandlers(
   let lastEditorAction: HarnessEditorAction | undefined;
   let lastOp: RecordedOp | undefined;
   let lastUndo: RecordedUndo | undefined;
+  let lastReviewOpen: RecordedReviewOpen | undefined;
 
   const appInit: RequestHandler<"app.init"> = async () => ({
     host: "harness",
@@ -1200,11 +1214,14 @@ function createHandlers(
     return { branch, base: resolvedBase, reason, range: state, candidates };
   };
 
-  /** D40: the harness has no second view container to reveal (W15's own note — "review.open
-   *  records the target and switches the mock's current review target" describes a later,
-   *  fuller mock; there is no second webview here yet for it to switch), so this resolves as a
-   *  correct no-op, exactly as a real host with no `revealReview` dependency would. */
-  const reviewOpen: RequestHandler<"review.open"> = async () => ({});
+  /** D40: the harness serves one view per page load, so there is no second, already-rendered
+   *  view for this to literally "switch" the way the real `reviewView.ts` host does — this
+   *  records `{repoId, branch}` instead (`RecordedReviewOpen`'s own doc comment says why, and how
+   *  a Playwright spec uses it) and otherwise resolves as a correct no-op. */
+  const reviewOpen: RequestHandler<"review.open"> = async ({ repoId, branch }) => {
+    lastReviewOpen = { repoId, branch };
+    return {};
+  };
 
   const preflightCheckout: RequestHandler<"preflight.checkout"> = async ({
     repoId,
@@ -1312,6 +1329,7 @@ function createHandlers(
     getLastEditorAction: () => lastEditorAction,
     getLastOp: () => lastOp,
     getLastUndo: () => lastUndo,
+    getLastReviewOpen: () => lastReviewOpen,
     resolveOneConflictedPath,
   };
 }
@@ -1337,6 +1355,9 @@ export interface MockBridge extends Transport {
   /** P6 W19: the most recent `undo.run` call the mock recorded — `main.ts` exposes this as
    *  `window.__kiraHarness.lastUndo`. */
   getLastUndo(): RecordedUndo | undefined;
+  /** P7 W15/W16: the most recent `review.open` call the mock recorded — `main.ts` exposes this
+   *  as `window.__kiraHarness.lastReviewOpen`. See `RecordedReviewOpen`'s own doc comment. */
+  getLastReviewOpen(): RecordedReviewOpen | undefined;
   /** P6 W19: `main.ts` exposes this as `window.__kiraHarness.resolveOneConflictedPath` — see
    *  `MockHandlers`'s own doc comment on why this exists. */
   resolveOneConflictedPath(): boolean;
@@ -1360,6 +1381,7 @@ export function createMockBridge(scenarioName: string): MockBridge {
     getLastEditorAction,
     getLastOp,
     getLastUndo,
+    getLastReviewOpen,
     resolveOneConflictedPath,
   } = createHandlers(scenario, (repoId, kind) => emitChanged(repoId, kind));
   const server = createRpcServer(serverChannel, serverHandlers);
@@ -1380,6 +1402,7 @@ export function createMockBridge(scenarioName: string): MockBridge {
     getLastEditorAction,
     getLastOp,
     getLastUndo,
+    getLastReviewOpen,
     resolveOneConflictedPath,
     pushReviewTarget(repoId: string, branch: string): void {
       server.emit("review.target", { repoId, branch });
