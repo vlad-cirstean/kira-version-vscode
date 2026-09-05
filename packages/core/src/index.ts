@@ -80,8 +80,10 @@ export type {
   StatusBranchInfo,
   StatusEntry,
   StatusResult,
+  StatusSummary,
   UntrackedStatusEntry,
 } from "./model/status.ts";
+export { dirtyPathsFrom, summarizeStatus } from "./model/status.ts";
 export { classifyCheckout } from "./preflight/checkout.ts";
 export { classifyRevert } from "./preflight/revert.ts";
 export { classifyTagCreate, validateRefName } from "./preflight/tag.ts";

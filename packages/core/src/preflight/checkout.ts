@@ -14,6 +14,12 @@ import type { CheckoutBlocker, CheckoutPreflight, DirtyPath } from "./types.ts";
 
 export function classifyCheckout(input: {
   readonly target: { readonly kind: RefKind | "sha"; readonly name: string };
+  /** The wire request's own explicit choice (`preflight.checkout`'s `mode`) — "detach" is what
+   *  turns an otherwise-trackable remote branch into a plain detached checkout with no tracking
+   *  branch created (§7.9's row-menu "checkout this commit" always sends "detach"; the branch
+   *  picker's plain checkout entry always sends "switch"). Not derivable from `target.kind`
+   *  alone: a `remoteBranch` target can go either way depending on which the user asked for. */
+  readonly mode: "switch" | "detach";
   readonly dirty: readonly DirtyPath[];
   /** T: paths the checkout would rewrite (`git diff --name-only -z HEAD <target>`). */
   readonly rewritten: readonly string[];
@@ -68,9 +74,16 @@ export function classifyCheckout(input: {
         : ["discard"]
       : [];
 
-  const detaches = input.target.kind === "tag" || input.target.kind === "sha";
+  // A tag or a raw sha always detaches regardless of the requested mode (git itself refuses a
+  // plain `switch` to either); a branch or remote-branch target detaches only when the caller
+  // explicitly asked for "detach" mode (§7.9's row-menu "checkout this commit"). Tracking-branch
+  // creation is the DWIM-avoidance path for a *default* checkout of a bare remote ref — an
+  // explicit detach is asking to skip landing on a branch at all, so no tracking branch is
+  // created even though the target is a `remoteBranch`.
+  const detaches =
+    input.mode === "detach" || input.target.kind === "tag" || input.target.kind === "sha";
   const createsTracking =
-    input.target.kind === "remoteBranch"
+    input.mode === "switch" && input.target.kind === "remoteBranch"
       ? { branch: stripRemotePrefix(input.target.name), upstream: input.target.name }
       : undefined;
 

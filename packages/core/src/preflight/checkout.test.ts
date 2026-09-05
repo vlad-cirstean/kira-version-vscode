@@ -6,6 +6,7 @@ import type { DirtyPath } from "./types.ts";
 function base(overrides: Partial<Parameters<typeof classifyCheckout>[0]> = {}) {
   return {
     target: { kind: "branch" as const, name: "topic" },
+    mode: "switch" as const,
     dirty: [] as readonly DirtyPath[],
     rewritten: [] as readonly string[],
     targetTreePaths: null,
@@ -221,6 +222,45 @@ describe("classifyCheckout — targets", () => {
     );
     expect(result.detaches).toBe(false);
     expect(result.createsTracking).toEqual({ branch: "topic", upstream: "origin/topic" });
+  });
+});
+
+describe("classifyCheckout — mode: switch vs. explicit detach", () => {
+  test("a local branch target with mode 'detach' ⇒ detaches, even though kind is 'branch'", () => {
+    const result = classifyCheckout(
+      base({ target: { kind: "branch", name: "main" }, mode: "detach" }),
+    );
+    expect(result.detaches).toBe(true);
+  });
+
+  test("a remote-branch target with mode 'detach' ⇒ detaches AND creates no tracking branch", () => {
+    const result = classifyCheckout(
+      base({ target: { kind: "remoteBranch", name: "origin/topic" }, mode: "detach" }),
+    );
+    expect(result.detaches).toBe(true);
+    expect(result.createsTracking).toBeUndefined();
+  });
+
+  test("a tag target still detaches even if mode were somehow 'switch' (git itself refuses otherwise)", () => {
+    const result = classifyCheckout(
+      base({ target: { kind: "tag", name: "v1.0" }, mode: "switch" }),
+    );
+    expect(result.detaches).toBe(true);
+  });
+
+  test("a sha target still detaches with mode 'switch'", () => {
+    const result = classifyCheckout(
+      base({ target: { kind: "sha", name: "deadbeef" }, mode: "switch" }),
+    );
+    expect(result.detaches).toBe(true);
+  });
+
+  test("row-menu 'checkout this commit' shape: sha target, mode 'detach' ⇒ detaches, no tracking", () => {
+    const result = classifyCheckout(
+      base({ target: { kind: "sha", name: "deadbeef" }, mode: "detach" }),
+    );
+    expect(result.detaches).toBe(true);
+    expect(result.createsTracking).toBeUndefined();
   });
 });
 
