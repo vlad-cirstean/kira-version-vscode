@@ -105,6 +105,158 @@ describe("classifyGitError", () => {
     expect(classifyGitError(["cherry-pick", "264650c"], 1, stderr).kind).toBe("Conflict");
   });
 
+  // P6/W6: this was P1's inherited gap (probe P8) — "could not revert" did not match the old
+  // `/could not apply|CONFLICT \(/` pattern, so a conflicting revert classified as `Unknown`.
+  test("Conflict — a real REVERT conflict (P1's inherited gap, probe P8)", () => {
+    const stderr = [
+      "error: could not revert dce0c49... side change",
+      "hint: After resolving the conflicts, mark them with",
+      'hint: "git add/rm <pathspec>", then run',
+      'hint: "git revert --continue".',
+      'hint: You can instead skip this commit with "git revert --skip".',
+      'hint: To abort and get back to the state before "git revert",',
+      'hint: run "git revert --abort".',
+    ].join("\n");
+    expect(classifyGitError(["revert", "--no-edit", "dce0c49"], 1, stderr).kind).toBe("Conflict");
+  });
+
+  test("AlreadyExists — a branch by that name already exists", () => {
+    const stderr = "fatal: a branch named 'feature' already exists\n";
+    expect(classifyGitError(["branch", "feature"], 128, stderr).kind).toBe("AlreadyExists");
+  });
+
+  test("AlreadyExists — a tag by that name already exists", () => {
+    const stderr = "fatal: tag 'v1' already exists\n";
+    expect(classifyGitError(["tag", "v1"], 128, stderr).kind).toBe("AlreadyExists");
+  });
+
+  test("AlreadyExists beats NonFastForward — a diverged tag push rejected as 'already exists'", () => {
+    const stderr = [
+      "To ../errprobe-remote.git",
+      " ! [rejected]        t1 -> t1 (already exists)",
+      "error: failed to push some refs to '../errprobe-remote.git'",
+      "hint: Updates were rejected because the tag already exists in the remote.",
+    ].join("\n");
+    const error = classifyGitError(["push", "origin", "t1"], 1, stderr);
+    expect(error.kind).toBe("AlreadyExists");
+    expect(error.kind).not.toBe("NonFastForward");
+  });
+
+  test("NotFullyMerged — deleting an unmerged branch without -D", () => {
+    const stderr = [
+      "error: the branch 'unmerged' is not fully merged.",
+      "If you are sure you want to delete it, run 'git branch -D unmerged'",
+    ].join("\n");
+    expect(classifyGitError(["branch", "-d", "unmerged"], 1, stderr).kind).toBe("NotFullyMerged");
+  });
+
+  test("WorktreeConflict — switching to a branch checked out in a linked worktree", () => {
+    const stderr = "fatal: 'feature' is already used by worktree at '/tmp/errprobe-wt'\n";
+    expect(classifyGitError(["switch", "feature"], 128, stderr).kind).toBe("WorktreeConflict");
+  });
+
+  test("WorktreeConflict — deleting a branch checked out in a linked worktree", () => {
+    const stderr = "error: cannot delete branch 'feature' used by worktree at '/tmp/errprobe-wt'\n";
+    expect(classifyGitError(["branch", "-D", "feature"], 1, stderr).kind).toBe("WorktreeConflict");
+  });
+
+  test("UntrackedWouldBeOverwritten — a plain checkout, plural 'files'", () => {
+    const stderr = [
+      "error: The following untracked working tree files would be overwritten by checkout:",
+      "\tadded-on-topic.txt",
+      "Please move or remove them before you switch branches.",
+      "Aborting",
+    ].join("\n");
+    expect(classifyGitError(["switch", "topic"], 1, stderr).kind).toBe("UntrackedWouldBeOverwritten");
+  });
+
+  test("UntrackedWouldBeOverwritten — --discard-changes, singular 'file', different verb ('merge')", () => {
+    const stderr = "error: Untracked working tree file 'added-on-topic.txt' would be overwritten by merge.\n";
+    expect(
+      classifyGitError(["switch", "--discard-changes", "topic"], 128, stderr).kind,
+    ).toBe("UntrackedWouldBeOverwritten");
+  });
+
+  test("OperationInProgress — switch refused while merging/rebasing/cherry-picking/reverting", () => {
+    expect(
+      classifyGitError(["switch", "main"], 128, "fatal: cannot switch branch while merging\n").kind,
+    ).toBe("OperationInProgress");
+    expect(
+      classifyGitError(["switch", "main"], 128, "fatal: cannot switch branch while rebasing\n").kind,
+    ).toBe("OperationInProgress");
+    expect(
+      classifyGitError(["switch", "main"], 128, "fatal: cannot switch branch while cherry-picking\n")
+        .kind,
+    ).toBe("OperationInProgress");
+    expect(
+      classifyGitError(["switch", "main"], 128, "fatal: cannot switch branch while reverting\n").kind,
+    ).toBe("OperationInProgress");
+  });
+
+  test("OperationInProgress — --continue with no operation running (three real shapes)", () => {
+    expect(
+      classifyGitError(
+        ["merge", "--continue"],
+        128,
+        "fatal: There is no merge in progress (MERGE_HEAD missing).\n",
+      ).kind,
+    ).toBe("OperationInProgress");
+    expect(
+      classifyGitError(
+        ["revert", "--continue"],
+        128,
+        "error: no cherry-pick or revert in progress\nfatal: revert failed\n",
+      ).kind,
+    ).toBe("OperationInProgress");
+    expect(
+      classifyGitError(["rebase", "--continue"], 128, "fatal: No rebase in progress?\n").kind,
+    ).toBe("OperationInProgress");
+  });
+
+  test("RemoteRefMissing — remote-delete a tag not on the remote", () => {
+    const stderr = [
+      "error: unable to delete 'nosuchtag': remote ref does not exist",
+      "error: failed to push some refs to '../errprobe-remote.git'",
+    ].join("\n");
+    expect(classifyGitError(["push", "origin", "--delete", "nosuchtag"], 1, stderr).kind).toBe(
+      "RemoteRefMissing",
+    );
+  });
+
+  test("RemoteRefMissing — pushing a local ref that does not exist", () => {
+    const stderr = [
+      "error: src refspec nosuchbranch does not match any",
+      "error: failed to push some refs to '../errprobe-remote.git'",
+    ].join("\n");
+    expect(classifyGitError(["push", "origin", "nosuchbranch"], 1, stderr).kind).toBe(
+      "RemoteRefMissing",
+    );
+  });
+
+  test("NotFound — reference is not a tree (detach on a bad sha)", () => {
+    const stderr = "fatal: reference is not a tree: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n";
+    expect(
+      classifyGitError(["switch", "--detach", "deadbeef"], 128, stderr).kind,
+    ).toBe("NotFound");
+  });
+
+  test("NotFound — no branch named (rename on a name that doesn't exist)", () => {
+    const stderr = "fatal: no branch named 'nope'\n";
+    expect(classifyGitError(["branch", "-m", "nope", "nope2"], 128, stderr).kind).toBe("NotFound");
+  });
+
+  test("NotFound — tag not found (delete on a name that doesn't exist)", () => {
+    const stderr = "error: tag 'nope' not found.\n";
+    expect(classifyGitError(["tag", "-d", "nope"], 1, stderr).kind).toBe("NotFound");
+  });
+
+  test("NotFound — bad object (revert on a bad sha)", () => {
+    const stderr = "fatal: bad object deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n";
+    expect(
+      classifyGitError(["revert", "--no-edit", "deadbeef"], 128, stderr).kind,
+    ).toBe("NotFound");
+  });
+
   test("Unknown — an unrecognised stderr keeps its text intact", () => {
     const stderr = "fatal: something this classifier has never seen before\n";
     const error = classifyGitError(["frobnicate"], 1, stderr);

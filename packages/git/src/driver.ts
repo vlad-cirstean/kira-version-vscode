@@ -51,6 +51,15 @@ export function buildGitEnv(): Record<string, string> {
   env.GIT_TERMINAL_PROMPT = "0";
   env.GIT_OPTIONAL_LOCKS = "0";
   env.GIT_PAGER = "cat";
+  // P6/W6: a driver that can block on an interactive editor is a driver that can hang. Probe
+  // P6: with no GIT_EDITOR, `git merge --continue` (no TTY) fails rc=1 with "There was a
+  // problem with the editor 'editor'" and — worse — leaves MERGE_HEAD in place, so the
+  // operation is never actually finished. `GIT_EDITOR=true` makes the same continue commit
+  // cleanly, rc=0, using git's own default commit message. Any op that can reach a
+  // commit-message editor (merge/cherry-pick/revert's `--continue`, `tag -a` without `-m`)
+  // gets this, not a per-call flag — a hang here is a driver bug regardless of which
+  // subcommand triggers it.
+  env.GIT_EDITOR = "true";
   // Error classification (errors.ts) pattern-matches stderr; a translated git otherwise gets
   // every error classified Unknown. Porcelain/plumbing formats are untranslated by contract
   // (verified for real in W13's V1), so this should not perturb parsed output.

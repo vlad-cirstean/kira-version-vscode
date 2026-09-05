@@ -616,6 +616,10 @@ Every spawn goes through one `GitDriver`. Non-negotiable rules:
   so background reads never fight the user's terminal for `index.lock`.
 - **`GIT_TERMINAL_PROMPT=0`** always. Git must never block on an invisible TTY prompt. Auth
   goes through the askpass path in §7.4 or fails fast with a typed error.
+- **`GIT_EDITOR=true`** always (P6). Git must never block on an invisible commit-message editor
+  either — `git <op> --continue` (merge/cherry-pick/revert) and an unmessaged `tag -a` both
+  reach one; with no TTY and no `GIT_EDITOR`, the spawn fails and leaves the operation in
+  progress rather than completing it.
 - **No `git pull`** (see §7.3), **no `git log --graph`** (see §5.2), **no `git checkout` where
   `git switch`/`git restore` is clearer**.
 - **Streaming, not buffering.** `git log` output is consumed as a stream with an incremental

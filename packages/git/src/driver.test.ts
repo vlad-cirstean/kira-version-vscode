@@ -93,6 +93,9 @@ describe("openGitDriver — argv and env", () => {
     expect(env?.GIT_OPTIONAL_LOCKS).toBe("0");
     expect(env?.GIT_PAGER).toBe("cat");
     expect(env?.LC_ALL).toBe("C");
+    // P6/W6: without this, `git <op> --continue` (no TTY) fails and leaves the operation in
+    // progress (probe P6) — a driver bug, not a per-call concern.
+    expect(env?.GIT_EDITOR).toBe("true");
   });
 });
 
