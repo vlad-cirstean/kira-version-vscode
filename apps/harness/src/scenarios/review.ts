@@ -228,10 +228,39 @@ export const review: Scenario = {
         ],
       },
     ],
-    [shaOf("feat5")]: [simpleDetail("feat5.ts")],
+    // Two files, not `simpleDetail`'s one — `review.spec.ts`'s (W16) own "arrow keys move between
+    // files with the diff following" needs a row with more than one file to move between.
+    [shaOf("feat5")]: [
+      {
+        body: "",
+        trailers: [],
+        signature: { status: "N", signer: "" },
+        files: [
+          {
+            kind: "modified",
+            path: "feat5.ts",
+            originalPath: undefined,
+            similarity: undefined,
+            additions: 1,
+            deletions: 1,
+            isBinary: false,
+          },
+          {
+            kind: "modified",
+            path: "feat5b.ts",
+            originalPath: undefined,
+            similarity: undefined,
+            additions: 1,
+            deletions: 1,
+            isBinary: false,
+          },
+        ],
+      },
+    ],
     [shaOf("feat6")]: [simpleDetail("feat6.ts")],
   },
   diffs: {
+    [diffKey(shaOf("feat5"), "feat5b.ts")]: simpleDiff("feat5b.ts"),
     [diffKey(shaOf("feat1"), "feat1.ts")]: simpleDiff("feat1.ts"),
     [diffKey(shaOf("feat2"), "feat2.ts")]: simpleDiff("feat2.ts"),
     [diffKey(shaOf("side1"), "side1.ts")]: simpleDiff("side1.ts"),

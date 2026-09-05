@@ -45,6 +45,9 @@ declare global {
       /** P7 W15/W16: the most recent `review.open` call the mock bridge recorded — see
        *  `mockBridge.ts`'s own `RecordedReviewOpen` doc comment. */
       readonly lastReviewOpen: RecordedReviewOpen | undefined;
+      /** P7 W16: `sha`'s own call count to `commit.detail` — see `mockBridge.ts`'s own
+       *  `MockHandlers.getCommitDetailCallCount` doc comment. */
+      getCommitDetailCallCount(sha: string): number;
     };
   }
 }
@@ -147,9 +150,15 @@ const themeParam = params.get("theme") ?? "vscode-dark";
 // P7 W15: `?view=review` alongside `?scenario=` — no second Playwright project, the same page at
 // a different root (`main.ts`'s own `mount({view})` seam, W9). `?branch=` is this harness's own
 // convenience for the cold-bootstrap arm (D40) — a deep link straight into a resolved branch,
-// without a spec needing `window.__kiraHarness.pushReviewTarget` for the common case.
+// without a spec needing `window.__kiraHarness.pushReviewTarget` for the common case. `?openRepo=1`
+// (W16) is the same idea for §6.8 state 1's *other* half — "a repo is already open, no branch
+// chosen yet" (the in-view picker), as distinct from `noActiveRepo` ("open a repository first") —
+// a real host reaches the former whenever the workspace already has a repo open (the common case)
+// and the latter only when it does not; the harness needs an explicit switch for each since it has
+// no workspace of its own to have already opened one.
 const viewParam = params.get("view") === "review" ? "review" : "graph";
 const branchParam = params.get("branch");
+const openRepoParam = params.get("openRepo") === "1";
 
 applyThemeKind(isThemeKind(themeParam) ? themeParam : "vscode-dark");
 
@@ -195,6 +204,9 @@ window.__kiraHarness = {
   get lastReviewOpen(): RecordedReviewOpen | undefined {
     return transport.getLastReviewOpen();
   },
+  getCommitDetailCallCount(sha: string): number {
+    return transport.getCommitDetailCallCount(sha);
+  },
 };
 
 if (viewParam === "review") {
@@ -221,10 +233,13 @@ if (viewParam === "review") {
   // session with nothing more to do. The harness has no such shared service — `createMockBridge`
   // starts a fresh, empty `sessions` map on every page load, and this deep link is the only page
   // load that will ever ask for this repoId — so it must open the session itself before mounting,
-  // exactly as the graph branch below gets one open through `App.vue`'s own `bootstrap()`.
+  // exactly as the graph branch below gets one open through `App.vue`'s own `bootstrap()`. A
+  // target implies the repo must be open; `?openRepo=1` asks for the same thing with no branch —
+  // `bootstrap()`'s own `repo.list` call then finds `activeRepoId` set and renders the in-view
+  // picker (§6.8 state 1) rather than `noActiveRepo`'s "open a repository first".
   void (async () => {
-    if (target) {
-      await transport.request("repo.open", { path: target.repoId });
+    if (target || openRepoParam) {
+      await transport.request("repo.open", { path: target?.repoId ?? "" });
     }
     mount(container, {
       transport,

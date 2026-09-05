@@ -13,6 +13,7 @@ import { noCapabilities } from "./noCapabilities.ts";
 import { pagedBranch } from "./pagedBranch.ts";
 import { rebasing } from "./rebasing.ts";
 import { review } from "./review.ts";
+import { reviewPaged } from "./reviewPaged.ts";
 import { reviewAsk } from "./reviewAsk.ts";
 import { reviewMerged } from "./reviewMerged.ts";
 import { reviewUpstream } from "./reviewUpstream.ts";
@@ -48,11 +49,13 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
  *  whoever already knows the name. Each entry is a function, not a value, so importing this
  *  module never pays a hidden scenario's own build cost — only calling `loadScenario` with its
  *  exact name does. `ceiling`'s caller is expected to be `tests/perf/graphUi.ts` (W15);
- *  `pagedBranch`'s (P4 W13) is `graph.spec.ts`'s own "screenshot after a Load more" scenario —
- *  both are single-purpose fixtures nobody browsing scenarios by hand needs to stumble on. */
+ *  `pagedBranch`'s (P4 W13) is `graph.spec.ts`'s own "screenshot after a Load more" scenario;
+ *  `reviewPaged`'s (P7 W16) is `review.spec.ts`'s own "Load more" test — all three are
+ *  single-purpose fixtures nobody browsing scenarios by hand needs to stumble on. */
 const HIDDEN_SCENARIOS: Readonly<Record<string, () => Scenario>> = {
   ceiling,
   pagedBranch,
+  reviewPaged,
   conflictedNoResolve: () => conflictedNoResolve,
 };
 

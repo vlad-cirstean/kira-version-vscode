@@ -859,6 +859,11 @@ interface MockHandlers {
   getLastUndo(): RecordedUndo | undefined;
   /** P7 W15/W16's own hook — see `RecordedReviewOpen`'s doc comment. */
   getLastReviewOpen(): RecordedReviewOpen | undefined;
+  /** `docs/plans/P7.md` W16's "a collapsed-then-re-expanded row does not re-request" — `sha`'s
+   *  own call count to `commit.detail`, so a spec can assert it stays at 1 across a
+   *  toggle/re-toggle instead of inferring "no re-fetch" from the absence of a visible symptom.
+   *  Keyed by sha alone (globally unique within one scenario's `topology()`), not by repoId. */
+  getCommitDetailCallCount(sha: string): number;
   /** P6 W19: `conflicted.ts`'s own doc comment already flagged this gap — "Continue re-enables
    *  once the mock's `op.run`/`status.get` loop reflects [conflicts] resolved, which this
    *  scenario cannot fake without a real index". This is that fake: marks one conflicted path
@@ -880,6 +885,7 @@ function createHandlers(
   let lastOp: RecordedOp | undefined;
   let lastUndo: RecordedUndo | undefined;
   let lastReviewOpen: RecordedReviewOpen | undefined;
+  const commitDetailCallCounts = new Map<string, number>();
 
   const appInit: RequestHandler<"app.init"> = async () => ({
     host: "harness",
@@ -1026,6 +1032,7 @@ function createHandlers(
 
   const commitDetail: RequestHandler<"commit.detail"> = async ({ repoId, sha, parentIndex }) => {
     requireSession(sessions, repoId);
+    commitDetailCallCounts.set(sha, (commitDetailCallCounts.get(sha) ?? 0) + 1);
     const record = scenario.commits.find((c) => c.sha === sha);
     if (!record) throw new Error(`mock bridge: commit.detail: unknown sha '${sha}'`);
     const index = parentIndex ?? 0;
@@ -1330,6 +1337,7 @@ function createHandlers(
     getLastOp: () => lastOp,
     getLastUndo: () => lastUndo,
     getLastReviewOpen: () => lastReviewOpen,
+    getCommitDetailCallCount: (sha) => commitDetailCallCounts.get(sha) ?? 0,
     resolveOneConflictedPath,
   };
 }
@@ -1358,6 +1366,9 @@ export interface MockBridge extends Transport {
   /** P7 W15/W16: the most recent `review.open` call the mock recorded — `main.ts` exposes this
    *  as `window.__kiraHarness.lastReviewOpen`. See `RecordedReviewOpen`'s own doc comment. */
   getLastReviewOpen(): RecordedReviewOpen | undefined;
+  /** `docs/plans/P7.md` W16's own hook — see `MockHandlers.getCommitDetailCallCount`'s doc
+   *  comment. `main.ts` exposes this as `window.__kiraHarness.getCommitDetailCallCount`. */
+  getCommitDetailCallCount(sha: string): number;
   /** P6 W19: `main.ts` exposes this as `window.__kiraHarness.resolveOneConflictedPath` — see
    *  `MockHandlers`'s own doc comment on why this exists. */
   resolveOneConflictedPath(): boolean;
@@ -1382,6 +1393,7 @@ export function createMockBridge(scenarioName: string): MockBridge {
     getLastOp,
     getLastUndo,
     getLastReviewOpen,
+    getCommitDetailCallCount,
     resolveOneConflictedPath,
   } = createHandlers(scenario, (repoId, kind) => emitChanged(repoId, kind));
   const server = createRpcServer(serverChannel, serverHandlers);
@@ -1403,6 +1415,7 @@ export function createMockBridge(scenarioName: string): MockBridge {
     getLastOp,
     getLastUndo,
     getLastReviewOpen,
+    getCommitDetailCallCount,
     resolveOneConflictedPath,
     pushReviewTarget(repoId: string, branch: string): void {
       server.emit("review.target", { repoId, branch });
