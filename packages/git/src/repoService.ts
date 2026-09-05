@@ -13,6 +13,8 @@
 import { existsSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import type {
+  BaseCandidate,
+  BaseResolutionReason,
   CheckoutPreflight,
   CommitDetail,
   CommitStore,
@@ -32,8 +34,8 @@ import type {
   RefKind,
   RefRecord,
   RepoIdentity,
-  RevertPreflight,
   RevertPrediction,
+  RevertPreflight,
   Settings,
   StatusResult,
   StatusSummary,
@@ -42,12 +44,13 @@ import type {
 } from "@kira-version/core";
 import {
   assertDefined,
+  CommitStore as CommitStoreImpl,
   classifyCheckout,
   classifyInProgress,
   classifyRevert,
-  CommitStore as CommitStoreImpl,
   describeInProgress,
   dirtyPathsFrom,
+  resolveBase,
   summarizeStatus,
   UNDO_POLICY,
   UndoSlot,
@@ -95,8 +98,11 @@ import { parseRefRecord, REFS_FORMAT, REFS_RECORD_DELIMITER } from "./parse/refs
 import type { RefsSnapshot } from "./queries.ts";
 import {
   commitDetail,
-  predictMerge,
+  countRange,
+  detectDefaultBranch,
   refsSnapshot as fetchRefsSnapshot,
+  mergeBase,
+  predictMerge,
   revertMergeParents,
   status,
 } from "./queries.ts";
@@ -132,6 +138,38 @@ export interface GraphChunkPayload {
   readonly remaining: number;
   readonly exhausted: boolean;
   readonly commits: PackedCommitChunk;
+}
+
+// ---------------------------------------------------------------------------------------
+// P7 — Branch review's wire-shaped types (see the module doc comment for why local, not ipc's).
+// ---------------------------------------------------------------------------------------
+
+/** A `<base>..<branch>` two-dot range, both short ref names (§6.8/D30). */
+export interface CommitRange {
+  readonly base: string;
+  readonly branch: string;
+}
+
+/** §6.8's four mutually-exclusive states, decided before the first row is painted — see
+ *  `docs/plans/P7.md`'s "Base resolution has four outcomes" for why an empty walk cannot answer
+ *  this question on its own. */
+export type ReviewRangeState =
+  | { readonly kind: "ready"; readonly commitCount: number }
+  | { readonly kind: "empty" }
+  | { readonly kind: "unrelated" }
+  | { readonly kind: "ask" };
+
+export interface BaseResolution {
+  readonly branch: string;
+  /** `null` iff `reason === "none"`. */
+  readonly base: string | null;
+  readonly reason: BaseResolutionReason;
+  readonly range: ReviewRangeState;
+  readonly candidates: readonly BaseCandidate[];
+}
+
+function rangeEquals(a: CommitRange, b: CommitRange): boolean {
+  return a.base === b.base && a.branch === b.branch;
 }
 
 /**
@@ -514,6 +552,39 @@ interface RepoSession {
   refsCache: RefsResult | undefined;
   /** P6/W8 (§7.12): one undo record per session, replacing itself on every op the executor runs. */
   readonly undo: UndoSlot;
+  /** P7 W4 — Branch review's own, deliberately ephemeral second walk. `undefined` when no review
+   *  is open for this repo. Never a `RepoSession`: it has no driver, watcher, caches or undo slot
+   *  of its own — see `docs/plans/P7.md`'s "the streaming machinery is a singleton" for why this
+   *  is exactly six fields and not a second copy of the object above it. */
+  reviewWalk: ReviewWalk | undefined;
+  /** The most recent `resolveReviewBase`'s `ready` outcome, so opening the review walk right
+   *  after doesn't re-run `rev-list --count` for the same range a second time in the same
+   *  second. Cleared implicitly whenever a *different* range is resolved (nothing reads a stale
+   *  entry: `#ensureReviewWalk` only consults it when the ranges still match). */
+  lastReviewResolution: { readonly range: CommitRange; readonly commitCount: number } | undefined;
+}
+
+/**
+ * P7 W4: exactly the fields a walk needs to append rows and pack chunks, whether that walk is
+ * the panel's own scoped one (a `RepoSession` satisfies this structurally, unchanged) or a
+ * `ReviewWalk` — `#emitRange` is written against this rather than against `RepoSession` so one
+ * implementation serves both walks without either being able to reach the other's fields.
+ */
+interface WalkLike {
+  readonly store: CommitStore;
+  dictionaryMarks: Map<number, number>;
+  nextSeq: number;
+  lastRemaining: number;
+  readonly logSession: LogSession;
+}
+
+/** P7 W4 — Branch review's own walk. Deliberately not a `RepoSession`: no driver of its own (it
+ *  borrows the session's), no watcher, no caches, no undo slot, no head — the honest statement
+ *  of what a second walk actually is (`docs/plans/P7.md`'s own phrasing). */
+interface ReviewWalk extends WalkLike {
+  /** What this walk IS — the key `#ensureReviewWalk` uses to decide "same range?" before
+   *  deciding whether to reuse it or dispose and rebuild. */
+  readonly range: CommitRange;
 }
 
 function initialDictionaryMarks(): Map<number, number> {
@@ -596,11 +667,29 @@ export class RepoService {
     for (const subscription of session.subscriptions) subscription.dispose();
     session.watcher.dispose();
     session.logSession.dispose();
+    session.reviewWalk?.logSession.dispose();
     session.driver.dispose();
   }
 
-  status(repoId: string): { loaded: number; remaining: number; exhausted: boolean } {
+  /** §6.8's own `range`-less `status()` and its ranged sibling, in one method: `range` present
+   *  reports the review walk's own counters (a zeroed status if none is open for exactly this
+   *  range yet — the caller opens one via `streamGraph`/`loadMore` before this could matter). */
+  status(
+    repoId: string,
+    range?: CommitRange,
+  ): { loaded: number; remaining: number; exhausted: boolean } {
     const session = this.#requireSession(repoId);
+    if (range) {
+      const walk = session.reviewWalk;
+      if (!walk || !rangeEquals(walk.range, range)) {
+        return { loaded: 0, remaining: 0, exhausted: false };
+      }
+      return {
+        loaded: walk.store.rowCount,
+        remaining: walk.lastRemaining,
+        exhausted: walk.logSession.exhausted,
+      };
+    }
     return {
       loaded: session.store.rowCount,
       remaining: session.lastRemaining,
@@ -612,11 +701,22 @@ export class RepoService {
     repoId: string,
     opts: {
       resumeThroughRow?: number;
+      /** P7 W4: present ⇒ walk `<base>..<branch>` against this repo's own separate review walk
+       *  instead of its `graph.scope` rev set. `resumeThroughRow` is ignored entirely in this
+       *  branch — a ranged walk has no cache to resume from (§5.4's exclusion, made structural,
+       *  `docs/plans/P7.md`'s own section by that name). */
+      range?: CommitRange;
       onChunk: (chunk: GraphChunkPayload) => Promise<void>;
       signal?: AbortSignal;
     },
   ): Promise<void> {
     const session = this.#requireSession(repoId);
+
+    if (opts.range) {
+      await this.#streamReviewGraph(session, opts.range, opts.onChunk, opts.signal);
+      return;
+    }
+
     await this.#ensureFresh(session);
 
     // Clamped, not trusted verbatim: a caller-supplied `resumeThroughRow` from before a stale
@@ -635,6 +735,7 @@ export class RepoService {
       const to = Math.min(cursor + CHUNK_ROWS, cachedThrough);
       dictionaryBase = await this.#emitRange(
         session,
+        session.repoId,
         cursor,
         to,
         dictionaryBase,
@@ -658,6 +759,7 @@ export class RepoService {
       const to = Math.min(cursor + CHUNK_ROWS, session.store.rowCount);
       dictionaryBase = await this.#emitRange(
         session,
+        session.repoId,
         cursor,
         to,
         dictionaryBase,
@@ -668,8 +770,59 @@ export class RepoService {
     }
   }
 
-  async loadMore(repoId: string, pages = 1, signal?: AbortSignal): Promise<void> {
+  /** The ranged half of `streamGraph` (P7 W4). Never consults `staleReason`/`#ensureFresh` — the
+   *  review walk is not part of the graph's invalidation story (see open question 5's
+   *  resolution: a mid-review `refsChanged` re-resolves quietly in the background instead, which
+   *  is the review view's own job, not this method's). Always emits from row 0 with
+   *  `source: "git"`; a re-open of the *same* range replays what the walk's store already holds
+   *  rather than re-spawning (the ordinary `loadMore`-then-reopen round trip, not §5.4
+   *  rehydration — the walk is dropped whole on `endReview`/hide). */
+  async #streamReviewGraph(
+    session: RepoSession,
+    range: CommitRange,
+    onChunk: (chunk: GraphChunkPayload) => Promise<void>,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const walk = this.#ensureReviewWalk(session, range);
+    if (walk.store.rowCount === 0 && !walk.logSession.exhausted) {
+      await this.#readReviewPage(session, walk, signal);
+    }
+
+    let cursor = 0;
+    let dictionaryBase = 0;
+    while (cursor < walk.store.rowCount) {
+      if (signal?.aborted) return;
+      const to = Math.min(cursor + CHUNK_ROWS, walk.store.rowCount);
+      dictionaryBase = await this.#emitRange(
+        walk,
+        session.repoId,
+        cursor,
+        to,
+        dictionaryBase,
+        "git",
+        onChunk,
+      );
+      cursor = to;
+    }
+  }
+
+  async loadMore(
+    repoId: string,
+    pages = 1,
+    signal?: AbortSignal,
+    range?: CommitRange,
+  ): Promise<void> {
     const session = this.#requireSession(repoId);
+
+    if (range) {
+      const walk = this.#ensureReviewWalk(session, range);
+      for (let i = 0; i < pages && !walk.logSession.exhausted; i++) {
+        if (signal?.aborted) return;
+        await this.#readReviewPage(session, walk, signal);
+      }
+      return;
+    }
+
     await this.#ensureFresh(session);
     for (let i = 0; i < pages && !session.logSession.exhausted; i++) {
       if (signal?.aborted) return;
@@ -1414,6 +1567,8 @@ export class RepoService {
       head: identity.head,
       refsCache: undefined,
       undo: new UndoSlot(),
+      reviewWalk: undefined,
+      lastReviewResolution: undefined,
     };
 
     session.subscriptions.push(watcher.onSignal((signal) => this.#handleSignal(session, signal)));
@@ -1428,7 +1583,7 @@ export class RepoService {
 
   #openLogSession(identity: RepoIdentity): LogSession {
     return openLogSession(this.#git(), this.#deps.runner, identity.root, {
-      scope: this.#deps.settings["kiraVersion.graph.scope"],
+      walk: { kind: "scope", scope: this.#deps.settings["kiraVersion.graph.scope"] },
       pageSize: this.#deps.settings["kiraVersion.graph.pageSize"],
     });
   }
@@ -1459,6 +1614,11 @@ export class RepoService {
     this.#resetSession(session);
   }
 
+  /** Resets exactly the panel's own walk state. Deliberately does NOT touch `session.reviewWalk`
+   *  (P7/D38): a `refsChanged`/`refresh()` invalidation of the graph's own scoped walk must never
+   *  disturb an independently-open review walk on the same repo, and vice versa — the two are
+   *  invalidated by entirely separate paths (`#handleSignal`'s `staleReason` here; the review
+   *  view's own quiet re-resolve, per open question 5, for the review walk). */
   #resetSession(session: RepoSession): void {
     session.store.clear();
     session.dictionaryMarks = initialDictionaryMarks();
@@ -1492,33 +1652,193 @@ export class RepoService {
   /** Packs and emits exactly one chunk, `[from, to)`, using the caller-supplied dictionary base
    *  for that specific row range — never a session-wide running cursor (W2's fix) — and records
    *  the resulting size as `to`'s mark. Returns the next base, so a caller walking forward
-   *  through several ranges can thread it without a second map lookup. */
+   *  through several ranges can thread it without a second map lookup. Written against `WalkLike`
+   *  rather than `RepoSession` (P7 W4) so the panel's own walk and a `ReviewWalk` share this one
+   *  implementation; `repoId` is threaded separately since only `RepoSession` itself carries it. */
   async #emitRange(
-    session: RepoSession,
+    walk: WalkLike,
+    repoId: string,
     from: number,
     to: number,
     dictionaryBase: number,
     source: "git" | "cache",
     onChunk: (chunk: GraphChunkPayload) => Promise<void>,
   ): Promise<number> {
-    const commits = session.store.packSlice(from, to, dictionaryBase);
+    const commits = walk.store.packSlice(from, to, dictionaryBase);
     const nextBase = dictionaryBase + commits.dictionary.length;
-    session.dictionaryMarks.set(to, nextBase);
+    walk.dictionaryMarks.set(to, nextBase);
     // Cached internally by `LogSession` after its first call ("run once per refresh") — this
     // does not spawn a process on every chunk, or on a cache-only replay after the first stream.
-    const remaining = await session.logSession.remaining();
-    session.lastRemaining = remaining;
+    const remaining = await walk.logSession.remaining();
+    walk.lastRemaining = remaining;
     await onChunk({
-      repoId: session.repoId,
-      seq: session.nextSeq++,
+      repoId,
+      seq: walk.nextSeq++,
       from,
       to,
       source,
       remaining,
-      exhausted: session.logSession.exhausted,
+      exhausted: walk.logSession.exhausted,
       commits,
     });
     return nextBase;
+  }
+
+  /** P7 W4 — returns the open review walk for `range`, reusing it if already open for exactly
+   *  this `<base>..<branch>` pair, else disposing whatever was open (a different range, or none)
+   *  and starting a fresh one. `precomputedTotal` is threaded from `resolveReviewBase`'s own
+   *  `rev-list --count` when it was computed for this exact range moments ago — the ordinary
+   *  case (`resolveReviewBase` then `streamGraph`/`loadMore` in the same round trip) never pays
+   *  for a second count spawn. */
+  #ensureReviewWalk(session: RepoSession, range: CommitRange): ReviewWalk {
+    const existing = session.reviewWalk;
+    if (existing && rangeEquals(existing.range, range)) return existing;
+    if (existing) existing.logSession.dispose();
+
+    const precomputedTotal =
+      session.lastReviewResolution && rangeEquals(session.lastReviewResolution.range, range)
+        ? session.lastReviewResolution.commitCount
+        : undefined;
+
+    const logSession = openLogSession(this.#git(), this.#deps.runner, session.identity.root, {
+      walk: { kind: "range", base: range.base, branch: range.branch },
+      pageSize: this.#deps.settings["kiraVersion.graph.pageSize"],
+      ...(precomputedTotal !== undefined ? { precomputedTotal } : {}),
+    });
+
+    const walk: ReviewWalk = {
+      range,
+      logSession,
+      store: new CommitStoreImpl(),
+      dictionaryMarks: initialDictionaryMarks(),
+      nextSeq: 0,
+      lastRemaining: 0,
+    };
+    session.reviewWalk = walk;
+    return walk;
+  }
+
+  /** P7 W4 — one page of a review walk, mirroring `#readPageIntoStore`'s own stale-retry shape
+   *  but scoped to `walk` alone: a review walk's own staleness (the narrowed guard on `range`,
+   *  §6.8 W3) never touches `session.staleReason` or the panel's own `logSession`/`store` — this
+   *  is exactly the isolation D38 requires. On `stale`, the walk is dropped and rebuilt fresh
+   *  (from row 0 — a review walk has no `--skip` cache to preserve across that boundary, same as
+   *  a full `#resetSession` for the panel's own walk) and the caller's page is retried once
+   *  against the new one. */
+  async #readReviewPage(
+    session: RepoSession,
+    walk: ReviewWalk,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const outcome = await walk.logSession.readPage(
+      (record) => walk.store.append(record),
+      signal ? { signal } : {},
+    );
+    if (outcome.kind === "stale") {
+      walk.logSession.dispose();
+      session.reviewWalk = undefined;
+      const fresh = this.#ensureReviewWalk(session, walk.range);
+      await fresh.logSession.readPage(
+        (record) => fresh.store.append(record),
+        signal ? { signal } : {},
+      );
+      fresh.lastRemaining = await fresh.logSession.remaining();
+      return;
+    }
+    walk.lastRemaining = await walk.logSession.remaining();
+  }
+
+  /** P7 W4 — probes whether rule 1 (the branch's own upstream) already resolves before ever
+   *  spawning `detectDefaultBranch`: a cheap, git-free call to `resolveBase` with `originHead:
+   *  undefined` first, and only when that falls through (`reason !== "upstream"`) does the real,
+   *  spawn-bearing resolution run — "one spawn, only when rule 1 falls through" (§6.8). Both calls
+   *  share the same `candidates` setting, so the real call's `candidates` list is always complete
+   *  even though the probe's own is deliberately built with an empty one (a probe result is never
+   *  returned to a caller, so its candidate list is never observed). */
+  async #naturalResolution(
+    session: RepoSession,
+    branchRef: RefRecord,
+    refsResult: RefsResult,
+  ): Promise<{
+    readonly base: string | null;
+    readonly reason: BaseResolutionReason;
+    readonly candidates: readonly BaseCandidate[];
+  }> {
+    const baseCandidatesSetting = this.#deps.settings["kiraVersion.review.baseCandidates"];
+    const probe = resolveBase({
+      branch: branchRef,
+      branches: refsResult.branches,
+      remoteBranches: refsResult.remoteBranches,
+      originHead: undefined,
+      candidates: [],
+    });
+    const originHead =
+      probe.reason === "upstream" ? undefined : await detectDefaultBranch(session.driver);
+    return resolveBase({
+      branch: branchRef,
+      branches: refsResult.branches,
+      remoteBranches: refsResult.remoteBranches,
+      originHead,
+      candidates: baseCandidatesSetting,
+    });
+  }
+
+  /** `review.resolveBase` (§6.8): the whole of the four-outcome decision — which base, why, and
+   *  whether the resulting range is `ready`/`empty`/`unrelated`/`ask` — computed fresh on every
+   *  call, before any row is painted. `base` overrides the natural resolution (an explicit pick
+   *  from `BaseSelector`) without disturbing `candidates`, which always reflects the branch's own
+   *  natural list regardless of what the caller ultimately picked. A `ready` outcome's commit
+   *  count is remembered on the session (`lastReviewResolution`) so `#ensureReviewWalk`'s first
+   *  open for the same range skips a redundant `rev-list --count`. */
+  async resolveReviewBase(repoId: string, branch: string, base?: string): Promise<BaseResolution> {
+    const session = this.#requireSession(repoId);
+    const refsResult = await this.refs(repoId);
+    const branchRef =
+      refsResult.branches.find((r) => r.shortName === branch) ??
+      refsResult.remoteBranches.find((r) => r.shortName === branch);
+
+    if (!branchRef) {
+      return { branch, base: null, reason: "none", range: { kind: "ask" }, candidates: [] };
+    }
+
+    const natural = await this.#naturalResolution(session, branchRef, refsResult);
+    const resolvedBase = base !== undefined ? base : natural.base;
+    const reason: BaseResolutionReason = base !== undefined ? "override" : natural.reason;
+    const candidates = natural.candidates;
+
+    if (resolvedBase === null) {
+      return { branch, base: null, reason, range: { kind: "ask" }, candidates };
+    }
+
+    const [mergeBaseSha, commitCount] = await Promise.all([
+      mergeBase(session.driver, resolvedBase, branch),
+      countRange(session.driver, resolvedBase, branch),
+    ]);
+
+    if (mergeBaseSha === null) {
+      return { branch, base: resolvedBase, reason, range: { kind: "unrelated" }, candidates };
+    }
+    if (commitCount === 0) {
+      return { branch, base: resolvedBase, reason, range: { kind: "empty" }, candidates };
+    }
+    session.lastReviewResolution = { range: { base: resolvedBase, branch }, commitCount };
+    return {
+      branch,
+      base: resolvedBase,
+      reason,
+      range: { kind: "ready", commitCount },
+      candidates,
+    };
+  }
+
+  /** Ends a branch review: disposes the review walk (if any) and clears the slot. Idempotent, and
+   *  a silent no-op — never a throw — for a `repoId` with no open session at all, mirroring
+   *  `refresh()`'s own precedent: by the time this is called the panel may already be closing. */
+  endReview(repoId: string): void {
+    const session = this.#sessions.get(repoId);
+    if (!session) return;
+    session.reviewWalk?.logSession.dispose();
+    session.reviewWalk = undefined;
   }
 
   #armEvictTimer(session: RepoSession): void {
@@ -1536,6 +1856,11 @@ export class RepoService {
   #evict(session: RepoSession): void {
     session.evictTimer = undefined;
     this.#resetSession(session);
+    // P7/D38: a review's own view (the sidebar) is a *separate* webview from the panel this
+    // eviction timer is armed by — hiding the panel must not silently leave a review walk running
+    // forever in the background, so it is disposed here alongside everything else this evicts.
+    session.reviewWalk?.logSession.dispose();
+    session.reviewWalk = undefined;
     session.watcher.pause();
     this.#logger.log("debug", "evicted hidden repo", { repoId: session.repoId });
   }

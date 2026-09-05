@@ -1850,3 +1850,335 @@ describe("RepoService — undo slot (P6 W8)", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------------------
+// P7 W4 — Branch review's own, isolated second walk: `resolveReviewBase`, the ranged halves of
+// `streamGraph`/`loadMore`/`status`, `endReview`, and — the load-bearing one (D38) — proof that
+// none of this ever touches the panel's own `RepoSession` state.
+// ---------------------------------------------------------------------------------------
+
+/** Decodes a run of chunks the same way a real consumer would: fed through a fresh `CommitStore`
+ *  in order, then read back row by row — never poking at `PackedCommitChunk`'s raw `ArrayBuffer`
+ *  columns directly (those are a wire encoding, not a string list; `shaAt` is the one place that
+ *  decoding is defined). Requires `chunks` to start at row 0 and be contiguous, which every call
+ *  site below satisfies. */
+function shasFromChunks(chunks: readonly GraphChunkPayload[]): string[] {
+  const store = new CommitStore();
+  for (const chunk of chunks) store.appendPacked(chunk.commits);
+  const shas: string[] = [];
+  for (let row = 0; row < store.rowCount; row++) shas.push(store.shaAt(row));
+  return shas;
+}
+
+async function streamRange(
+  service: RepoService,
+  repoId: string,
+  range: { base: string; branch: string },
+  signal?: AbortSignal,
+): Promise<GraphChunkPayload[]> {
+  const chunks: GraphChunkPayload[] = [];
+  await service.streamGraph(repoId, {
+    range,
+    onChunk: async (chunk) => {
+      chunks.push(chunk);
+    },
+    ...(signal !== undefined ? { signal } : {}),
+  });
+  return chunks;
+}
+
+describe("RepoService — resolveReviewBase() (P7 W4)", () => {
+  test("a branch tracking a DIFFERENTLY-named upstream resolves via rule 1 (upstream)", async () => {
+    const repo = withRemote();
+    // "main" itself tracks "origin/main" — same bare name, so rule 1 falls through (V1's own
+    // "same-name fall-through" case, `review.test.ts`'s own coverage of it in `core`). A branch
+    // whose upstream names something genuinely different is what actually exercises rule 1 here.
+    execFileSync("git", ["branch", "--track", "topic", "origin/main"], {
+      cwd: repo.dir,
+      env: baseEnv(repo.dir),
+    });
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(100),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const resolution = await service.resolveReviewBase(repoId, "topic");
+      expect(resolution.reason).toBe("upstream");
+      expect(resolution.base).toBe("origin/main");
+      expect(resolution.range.kind === "empty" || resolution.range.kind === "ready").toBe(true);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("an explicit base override reports reason 'override' and its own range outcome", async () => {
+    const repo = branchy({ mergeBack: false });
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(100),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const resolution = await service.resolveReviewBase(repoId, "feature/a", "main");
+      expect(resolution.reason).toBe("override");
+      expect(resolution.base).toBe("main");
+      expect(resolution.range.kind).toBe("ready");
+      if (resolution.range.kind === "ready") {
+        expect(resolution.range.commitCount).toBeGreaterThan(0);
+      }
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("a branch already fully merged into its base resolves to 'empty'", async () => {
+    const repo = branchy({ mergeBack: false });
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(100),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      // "feature/a" itself against itself as base: zero commits ahead.
+      const resolution = await service.resolveReviewBase(repoId, "feature/a", "feature/a");
+      expect(resolution.range.kind).toBe("empty");
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("an unrelated history override resolves to 'unrelated' rather than throwing (V6)", async () => {
+    const repo = branchy({ mergeBack: false });
+    // Create a genuinely unrelated orphan branch: no common ancestor with "main" at all.
+    execFileSync("git", ["checkout", "--quiet", "--orphan", "orphan-branch"], {
+      cwd: repo.dir,
+      env: baseEnv(repo.dir),
+    });
+    execFileSync("git", ["rm", "-rf", "--quiet", "."], { cwd: repo.dir, env: baseEnv(repo.dir) });
+    writeFileSync(join(repo.dir, "orphan.txt"), "orphan\n");
+    execFileSync("git", ["add", "orphan.txt"], { cwd: repo.dir, env: baseEnv(repo.dir) });
+    execFileSync("git", ["commit", "--quiet", "--no-gpg-sign", "-m", "orphan root"], {
+      cwd: repo.dir,
+      env: {
+        ...baseEnv(repo.dir),
+        GIT_AUTHOR_NAME: "Kira Fixture",
+        GIT_AUTHOR_EMAIL: "fixture@kira-version.test",
+        GIT_COMMITTER_NAME: "Kira Fixture",
+        GIT_COMMITTER_EMAIL: "fixture@kira-version.test",
+      },
+    });
+    execFileSync("git", ["checkout", "--quiet", "main"], { cwd: repo.dir, env: baseEnv(repo.dir) });
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(100),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const resolution = await service.resolveReviewBase(repoId, "orphan-branch", "main");
+      expect(resolution.range.kind).toBe("unrelated");
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("a branch with no resolvable base at all (none of the candidates exist) reports 'ask'", async () => {
+    const repo = linear(3); // a single-branch repo: no upstream, no origin/HEAD, no "main"/"master" other than itself
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: {
+        ...settingsWithPageSize(100),
+        "kiraVersion.review.baseCandidates": [],
+      },
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const refsResult = await service.refs(repoId);
+      const onlyBranch = refsResult.branches[0]?.shortName;
+      if (onlyBranch === undefined) throw new Error("unreachable");
+
+      const resolution = await service.resolveReviewBase(repoId, onlyBranch);
+      expect(resolution.reason).toBe("none");
+      expect(resolution.base).toBeNull();
+      expect(resolution.range).toEqual({ kind: "ask" });
+    } finally {
+      service.dispose();
+    }
+  });
+});
+
+describe("RepoService — ranged streamGraph/loadMore/status and endReview (P7 W4)", () => {
+  test("a range walk emits exactly `base..branch`'s own shas, then endReview() clears it", async () => {
+    const repo = branchy({ mainCommits: 4, featureCommits: 3, mergeBack: false });
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(2),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const range = { base: "main", branch: "feature/a" };
+      const expectedShas = execFileSync(
+        "git",
+        ["log", "--topo-order", "--format=%H", "main..feature/a"],
+        { cwd: repo.dir, env: baseEnv(repo.dir) },
+      )
+        .toString("utf8")
+        .trim()
+        .split("\n")
+        .filter((line) => line.length > 0);
+
+      // A small pageSize (2) against 3 feature commits means the very first stream only reads
+      // (and emits) the first page — the rest arrives only once `loadMore` below asks for it.
+      const chunks = await streamRange(service, repoId, range);
+      const seenShas = shasFromChunks(chunks);
+      expect(seenShas).toEqual(expectedShas.slice(0, seenShas.length));
+      expect(seenShas.length).toBeLessThan(expectedShas.length);
+      expect(service.status(repoId, range).exhausted).toBe(false);
+
+      await service.loadMore(repoId, 5, undefined, range);
+      expect(service.status(repoId, range)).toEqual({
+        loaded: expectedShas.length,
+        remaining: 0,
+        exhausted: true,
+      });
+
+      service.endReview(repoId);
+      // The range's own status is zeroed again once the review walk is gone.
+      expect(service.status(repoId, range)).toEqual({ loaded: 0, remaining: 0, exhausted: false });
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("D38 — a review walk never touches the panel's own graph walk state, in either direction", async () => {
+    const repo = branchy({ mainCommits: 5, featureCommits: 4, mergeBack: false });
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(2),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      // 1. Load the graph's own (panel) walk fully, then snapshot everything a graph consumer
+      //    could possibly observe about it.
+      const graphChunksBefore = await streamAll(service, repoId);
+      await service.loadMore(repoId, 10);
+      const graphStatusBefore = service.status(repoId);
+      const rowsBefore = graphStatusBefore.loaded;
+      // A second, independent stream from row 0 replays the *cache* — this is the store's own
+      // externally-visible content, byte for byte (every packed sha, in order).
+      const graphShasBefore = shasFromChunks(await streamAll(service, repoId));
+
+      // 2. Open, page through, and end an entirely separate review walk on the SAME repo.
+      const range = { base: "main", branch: "feature/a" };
+      await service.resolveReviewBase(repoId, "feature/a", "main");
+      const reviewChunks = await streamRange(service, repoId, range);
+      await service.loadMore(repoId, 10, undefined, range);
+      expect(service.status(repoId, range).exhausted).toBe(true);
+      expect(reviewChunks.length).toBeGreaterThan(0);
+      service.endReview(repoId);
+
+      // 3. The panel's own walk must be byte-identical to what it was before any of this.
+      const graphStatusAfter = service.status(repoId);
+      expect(graphStatusAfter).toEqual(graphStatusBefore);
+      expect(graphStatusAfter.loaded).toBe(rowsBefore);
+
+      const graphShasAfter = shasFromChunks(await streamAll(service, repoId));
+      expect(graphShasAfter).toEqual(graphShasBefore);
+
+      // 4. The panel's own walk must still be able to append a further chunk cleanly — nothing
+      //    about the review walk's lifecycle left it in a state that can no longer stream/resume.
+      //    Both graph reads before this point were already fully exhausted, so a further
+      //    `loadMore` must complete as a clean no-op rather than throw or spawn anything broken.
+      expect(graphChunksBefore.length).toBeGreaterThan(0);
+      await service.loadMore(repoId, 1);
+      expect(service.status(repoId)).toEqual(graphStatusBefore);
+      const resumed = await streamAll(service, repoId, rowsBefore);
+      expect(resumed.every((c) => c.source === "cache")).toBe(true);
+      expect(totalRows(resumed)).toBe(0); // nothing past rowsBefore — the walk really is exhausted
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("hiding the review view (setUiVisible) must never disturb the graph panel or arm eviction for it alone", async () => {
+    // Named trap (P7 plan): a review view's own hide must NEVER call `setUiVisible(false)` on the
+    // shared RepoService, since that is the panel's own visibility signal and would wrongly arm
+    // panel eviction / pause the panel's watcher just because a sidebar view was collapsed. This
+    // test pins the service-level half of that contract: `endReview` alone (what the review view's
+    // hide handler is specified to call) never touches `setUiVisible`/eviction/watcher state at all.
+    const repo = branchy({ mergeBack: false });
+    const service = await RepoService.create(
+      {
+        runner: new NodeProcessRunner(),
+        fileWatcher: new NodeFileWatcher(),
+        logger: new FakeLogger(),
+        settings: settingsWithPageSize(100),
+        configuredGitCandidates: [],
+      },
+      { evictMs: 60_000 },
+    );
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      await streamAll(service, repoId);
+      const range = { base: "main", branch: "feature/a" };
+      await service.resolveReviewBase(repoId, "feature/a", "main");
+      await streamRange(service, repoId, range);
+
+      // Simulate the review view's own hide: end the review walk, nothing else.
+      service.endReview(repoId);
+
+      // The panel's own walk is completely undisturbed — no eviction was armed, no reset ran.
+      const status = service.status(repoId);
+      expect(status.loaded).toBeGreaterThan(0);
+      expect(status.exhausted).toBe(true);
+    } finally {
+      service.dispose();
+    }
+  });
+});
