@@ -172,6 +172,224 @@ export interface PackedCommitChunk {
 }
 
 // ---------------------------------------------------------------------------------------
+// P6 — refs, status, pre-flight and operations. Structural copies of `packages/core`'s own
+// (`model/ref.ts`, `model/operation.ts`, `model/status.ts`, `preflight/types.ts`, `undo/slot.ts`),
+// kept honest by `tests/unit/ipc/wireConformance.test.ts` rather than an import (B3).
+// ---------------------------------------------------------------------------------------
+
+export type RefKind = "branch" | "remoteBranch" | "tag";
+
+export interface RefTrack {
+  readonly ahead: number;
+  readonly behind: number;
+}
+
+/** The tagger identity and message subject of an *annotated* tag — `undefined` for a lightweight
+ *  one (never an empty annotation: `%(contents:subject)` on a lightweight tag returns the
+ *  pointed-at commit's subject, which would read as an annotation that is not there). */
+export interface TagAnnotation {
+  readonly tagger: string;
+  readonly date: number; // unix seconds
+  readonly subject: string;
+}
+
+export interface RefRow {
+  readonly refname: string; // refs/heads/main
+  readonly kind: RefKind;
+  readonly shortName: string; // main, origin/main, v1.2.0
+  /** For an annotated tag: the TAG OBJECT's sha — which is what undo needs (probe P3). */
+  readonly objectId: string;
+  readonly peeledObjectId: string | undefined; // %(*objectname); annotated tags only
+  readonly upstream: string | undefined;
+  readonly track: RefTrack | "gone" | undefined;
+  readonly committerDate: number;
+  readonly isHead: boolean;
+  /** D12. Absolute path of the worktree holding this branch checked out, when that worktree is
+   *  NOT this session's own. `undefined` for every other ref, including the branch checked out
+   *  here — `%(worktreepath)` is populated for both and the service subtracts its own toplevel. */
+  readonly checkedOutIn: string | undefined;
+  /** Present iff this is an annotated tag. */
+  readonly annotation: TagAnnotation | undefined;
+}
+
+export type InProgressKind =
+  | "merge"
+  | "cherryPick"
+  | "revert"
+  | "rebase"
+  | "bisect"
+  | "unmergedOnly";
+
+export interface InProgressOperation {
+  readonly kind: InProgressKind;
+  /** MERGE_HEAD / CHERRY_PICK_HEAD / REVERT_HEAD, or rebase's `onto`. */
+  readonly otherSha: string | undefined;
+  /** rebase only: `rebase-merge/head-name`, e.g. `refs/heads/side`. */
+  readonly headName: string | undefined;
+  readonly conflictedPaths: readonly string[];
+  /** True only where `git <op> --continue` exists AND v1 offers it — false for rebase (§9) and
+   *  bisect. */
+  readonly canContinue: boolean;
+  readonly canAbort: boolean;
+  /** `.git/sequencer/` present: a multi-commit revert or cherry-pick mid-run, where --abort is
+   *  what delivers §7.10's all-or-nothing. */
+  readonly isSequence: boolean;
+  /** Continue is *enabled* only when this is 0 (§7.11). Kept separate from
+   *  `conflictedPaths.length` so a host that caps the path list cannot accidentally enable it. */
+  readonly unmergedCount: number;
+}
+
+export interface StatusSummary {
+  readonly head: HeadState;
+  readonly upstream:
+    | { readonly name: string; readonly ahead: number; readonly behind: number }
+    | undefined;
+  readonly counts: {
+    readonly staged: number;
+    readonly unstaged: number;
+    readonly untracked: number;
+    readonly unmerged: number;
+  };
+  readonly isClean: boolean;
+  /** Bounded (W8's 200-entry display cap). §7.5 requires naming the exact files; it does not
+   *  require naming ten thousand of them. `dirtyTruncated` says the list was cut. */
+  readonly dirtyPaths: readonly string[];
+  readonly dirtyTruncated: boolean;
+  readonly inProgress: InProgressOperation | null;
+}
+
+export type CheckoutBlocker =
+  | { readonly kind: "blockedByTracked"; readonly paths: readonly string[] }
+  | { readonly kind: "blockedByUntracked"; readonly paths: readonly string[] }
+  | { readonly kind: "inProgressOperation"; readonly operation: InProgressOperation }
+  | { readonly kind: "worktreeConflict"; readonly branch: string; readonly worktreePath: string };
+
+export interface CheckoutPreflight {
+  readonly target: { readonly kind: RefKind | "sha"; readonly name: string };
+  /** True when the result is a detached HEAD: a tag, a raw sha, or an explicitly detached
+   *  checkout of a remote-tracking ref. */
+  readonly detaches: boolean;
+  /** Set when the only way to land ON A BRANCH is to create one tracking a remote — the DWIM
+   *  case (probe P7), surfaced as an explicit choice instead of happening silently. */
+  readonly createsTracking: { readonly branch: string; readonly upstream: string } | undefined;
+  /** D \ T: the local changes that will survive the switch. Empty on a clean tree. */
+  readonly carried: readonly string[];
+  readonly blockers: readonly CheckoutBlocker[];
+  /** "clean" = nothing local at all. "cleanCarry" = §7.5's carry case; still no prompt, but the
+   *  confirmation copy differs and the UI announces what carried. */
+  readonly verdict: "clean" | "cleanCarry" | "blocked";
+  /** Which routes the UI may offer for a `blockedByTracked` verdict. P6 emits `["discard"]` (or
+   *  `[]` when an untracked block is also present); P9 adds `"stashAndCarry"`. */
+  readonly routes: readonly ("discard" | "stashAndCarry")[];
+}
+
+export interface RevertParentChoice {
+  readonly parentNumber: number; // 1-based, as `-m` takes it
+  readonly sha: string;
+  readonly subject: string;
+}
+
+export interface RevertPreflight {
+  readonly shas: readonly string[];
+  /** Non-empty ⇒ the user MUST pick before the op is offered (§7.10: "rather than guessing
+   *  -m 1"). One entry per merge commit among `shas` whose mainline is not already resolved. */
+  readonly mainlineRequired: readonly {
+    readonly sha: string;
+    readonly parents: readonly RevertParentChoice[];
+  }[];
+  readonly dirtyPaths: readonly string[];
+  readonly inProgress: InProgressOperation | null;
+  /** §7.10's merge-tree prediction. Scoped to `shas[0]` — `predictedFor` says so, and the UI
+   *  quotes it when `shas.length > 1`. `unknown` when the prediction itself could not run. */
+  readonly prediction:
+    | { readonly kind: "clean" }
+    | { readonly kind: "conflicts"; readonly paths: readonly string[] }
+    | { readonly kind: "unknown"; readonly reason: string };
+  readonly predictedFor: string | null;
+  /** §7.10: allowed, with a note. Not a blocker. */
+  readonly detachedHead: boolean;
+  readonly verdict: "clean" | "willConflict" | "blocked";
+  readonly blockers: readonly ("dirtyWorktree" | "inProgressOperation" | "mainlineRequired")[];
+}
+
+export type OpRequest =
+  | {
+      readonly kind: "checkout";
+      readonly target: string;
+      readonly mode: "switch" | "detach";
+      /** §7.5's "discard" route: `git switch --discard-changes`. Cannot clear an untracked
+       *  block (probe P9) — the UI never offers it for one. */
+      readonly discardLocalChanges: boolean;
+    }
+  | {
+      readonly kind: "branchCreate";
+      readonly name: string;
+      readonly startPoint: string;
+      readonly checkout: boolean;
+      readonly track: string | undefined;
+    }
+  | { readonly kind: "branchDelete"; readonly name: string; readonly force: boolean }
+  | { readonly kind: "branchRename"; readonly from: string; readonly to: string }
+  | {
+      readonly kind: "tagCreate";
+      readonly name: string;
+      readonly target: string;
+      /** Present ⇒ annotated (`-a -m`). Absent ⇒ lightweight. On `force`, an annotated tag MUST
+       *  re-supply this or `-f` downgrades it to lightweight (probe P3). */
+      readonly message: string | undefined;
+      readonly force: boolean;
+    }
+  | { readonly kind: "tagDelete"; readonly name: string }
+  | { readonly kind: "tagPush"; readonly remote: string; readonly names: readonly string[] | "all" }
+  | { readonly kind: "tagDeleteRemote"; readonly remote: string; readonly name: string }
+  | {
+      readonly kind: "revert";
+      readonly shas: readonly string[];
+      readonly mainline: number | undefined;
+      readonly noCommit: boolean;
+    }
+  | { readonly kind: "opContinue" }
+  | { readonly kind: "opAbort" };
+
+export type OpErrorKind =
+  | "AuthFailed"
+  | "NonFastForward"
+  | "Conflict"
+  | "DirtyWorktree"
+  | "UntrackedWouldBeOverwritten"
+  | "LockHeld"
+  | "NotFound"
+  | "AlreadyExists"
+  | "NotFullyMerged"
+  | "WorktreeConflict"
+  | "OperationInProgress"
+  | "RemoteRefMissing"
+  | "HookRejected"
+  | "Unknown";
+
+export interface UndoSlotSnapshot {
+  readonly id: string;
+  /** "Deleted branch feature" — §7.12's "labelled with what it will undo". */
+  readonly label: string;
+  /** "was d657c6e" — §7.12's "captured recovery sha is shown alongside the button, so the user
+   *  can recover manually even after the slot is cleared". */
+  readonly recoverySha: string;
+  readonly createdAt: number;
+}
+
+export interface OpResult {
+  readonly ok: boolean;
+  readonly error: { readonly kind: OpErrorKind; readonly message: string } | undefined;
+  /** The slot AFTER this op: a new record for an undoable op, `null` for any other (which clears
+   *  it — §7.12's "performing another operation clears the undo slot"). */
+  readonly undo: UndoSlotSnapshot | null;
+  /** Read back after the op, success or failure — the reconcile step, closing the window before
+   *  the watcher's debounce. */
+  readonly head: HeadState;
+  readonly inProgress: InProgressOperation | null;
+}
+
+// ---------------------------------------------------------------------------------------
 // Discriminated unions the UI renders explicitly rather than infers.
 // ---------------------------------------------------------------------------------------
 
@@ -205,12 +423,15 @@ export type Contract = {
         contractVersion: number;
         settings: SettingsSnapshot;
         git: GitStatus;
-        /** An optional capability the UI feature-detects rather than assumes (§3.3). P6 adds a
-         *  conflict-resolution capability here; nothing in P5 branches on host kind. */
+        /** An optional capability the UI feature-detects rather than assumes (§3.3). Nothing in
+         *  P5 or P6 branches on host kind. */
         capabilities: {
           readonly openInEditor: boolean;
           readonly goToFile: boolean;
           readonly clipboard: boolean;
+          /** §7.11's "Resolve in VS Code". `true` under VS Code, `false` in the harness's
+           *  default posture (D15: reveal the host's own SCM surface, never our own merge UI). */
+          readonly resolveConflict: boolean;
         };
       };
     };
@@ -308,6 +529,48 @@ export type Contract = {
      *  message. */
     "clipboard.write": {
       params: { text: string; label: string };
+      result: Record<string, never>;
+    };
+    // ---- P6: refs, status, pre-flight, operations -----------------------------------------
+    "refs.list": {
+      params: { repoId: string };
+      /** Two spawns: heads+remotes `--sort=-committerdate`, tags `--sort=-v:refname` (§7.9's
+       *  version-aware sort, which git does correctly and JS does not). */
+      result: {
+        branches: readonly RefRow[];
+        remoteBranches: readonly RefRow[];
+        tags: readonly RefRow[];
+        head: HeadState;
+      };
+    };
+    "status.get": {
+      params: { repoId: string };
+      result: StatusSummary;
+    };
+    "preflight.checkout": {
+      params: { repoId: string; target: string; mode: "switch" | "detach" };
+      result: CheckoutPreflight;
+    };
+    "preflight.revert": {
+      params: { repoId: string; shas: readonly string[]; mainline?: number };
+      result: RevertPreflight;
+    };
+    "op.run": {
+      params: { repoId: string; op: OpRequest };
+      result: OpResult;
+    };
+    "undo.peek": {
+      params: { repoId: string };
+      result: { slot: UndoSlotSnapshot | null };
+    };
+    "undo.run": {
+      params: { repoId: string; id: string };
+      result: OpResult;
+    };
+    /** §7.11's "Resolve in VS Code": reveal the SCM view and open the first unmerged file in the
+     *  three-way merge editor. Only ever called when `capabilities.resolveConflict` is true. */
+    "editor.resolveConflict": {
+      params: { repoId: string; path: string };
       result: Record<string, never>;
     };
   };

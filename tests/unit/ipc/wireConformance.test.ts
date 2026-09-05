@@ -23,12 +23,29 @@ import type {
   DiffLine as CoreDiffLine,
   FileDiffBody as CoreFileDiffBody,
 } from "../../../packages/core/src/model/diff.ts";
+import type {
+  InProgressOperation as CoreInProgressOperation,
+  OpRequest as CoreOpRequest,
+  OpResult as CoreOpResult,
+  UndoSlotSnapshot as CoreUndoSlotSnapshot,
+} from "../../../packages/core/src/model/operation.ts";
+import type {
+  RefRecord as CoreRefRecord,
+  TagAnnotation as CoreTagAnnotation,
+} from "../../../packages/core/src/model/ref.ts";
 import type { HeadState as CoreHeadState } from "../../../packages/core/src/model/repo.ts";
+import type { StatusSummary as CoreStatusSummary } from "../../../packages/core/src/model/status.ts";
+import type {
+  CheckoutPreflight as CoreCheckoutPreflight,
+  RevertPreflight as CoreRevertPreflight,
+} from "../../../packages/core/src/preflight/types.ts";
 import {
   type Settings as CoreSettings,
   defaultSettings,
 } from "../../../packages/core/src/settings/schema.ts";
+import type { GitErrorKind as CoreGitErrorKind } from "../../../packages/git/src/errors.ts";
 import type {
+  CheckoutPreflight as WireCheckoutPreflight,
   CommitIdentity as WireCommitIdentity,
   CommitTrailer as WireCommitTrailer,
   DecorationRef as WireDecorationRef,
@@ -37,8 +54,17 @@ import type {
   FileChange as WireFileChange,
   FileDiffBody as WireFileDiffBody,
   HeadState as WireHeadState,
+  InProgressOperation as WireInProgressOperation,
+  OpErrorKind as WireOpErrorKind,
+  OpRequest as WireOpRequest,
+  OpResult as WireOpResult,
+  RefRow as WireRefRow,
+  RevertPreflight as WireRevertPreflight,
   SettingsSnapshot as WireSettingsSnapshot,
   SignatureStatus as WireSignatureStatus,
+  StatusSummary as WireStatusSummary,
+  TagAnnotation as WireTagAnnotation,
+  UndoSlotSnapshot as WireUndoSlotSnapshot,
 } from "../../../packages/ipc/src/contract.ts";
 
 /** Never called — its only job is to make the assignments inside it part of the compiled
@@ -175,5 +201,171 @@ describe("ipc wire conformance", () => {
     const body: CoreFileDiffBody = { kind: "tooLarge", bytes: 2_000_000, limitBytes: 1_000_000 };
     const wire: WireFileDiffBody = body;
     expect(wire).toEqual(body);
+  });
+
+  // ---- P6 W9: refs, status, pre-flight, operations --------------------------------------
+
+  test("RefRow: assignable both ways against core's RefRecord, minus the wire-irrelevant objectType", () => {
+    // `RefRecord.objectType` (`"commit" | "tag" | "tree" | "blob"`) is never sent across the
+    // wire — a tag's annotated-ness is already carried by `annotation`'s presence — so this
+    // compares against `RefRecord` with that one field omitted, deliberately, rather than the
+    // whole type: every OTHER field drifting on either side still fails `tsc`.
+    assertBothWays<WireRefRow, Omit<CoreRefRecord, "objectType">>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const record: CoreRefRecord = {
+      refname: "refs/heads/main",
+      kind: "branch",
+      shortName: "main",
+      objectId: "abc1234abc1234abc1234abc1234abc1234abc1",
+      objectType: "commit",
+      peeledObjectId: undefined,
+      upstream: undefined,
+      track: undefined,
+      committerDate: 0,
+      isHead: true,
+      checkedOutIn: undefined,
+      annotation: undefined,
+    };
+    const { objectType: _objectType, ...wire } = record;
+    const asWire: WireRefRow = wire;
+    expect(asWire).toEqual(wire);
+  });
+
+  test("TagAnnotation: core and ipc's wire copy are assignable both ways", () => {
+    assertBothWays<WireTagAnnotation, CoreTagAnnotation>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const annotation: CoreTagAnnotation = { tagger: "T <t@t.com>", date: 0, subject: "release" };
+    const wire: WireTagAnnotation = annotation;
+    expect(wire).toEqual(annotation);
+  });
+
+  test("StatusSummary: core and ipc's wire copy are assignable both ways", () => {
+    assertBothWays<WireStatusSummary, CoreStatusSummary>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const summary: CoreStatusSummary = {
+      head: { kind: "branch", name: "main" },
+      upstream: undefined,
+      counts: { staged: 0, unstaged: 0, untracked: 0, unmerged: 0 },
+      isClean: true,
+      dirtyPaths: [],
+      dirtyTruncated: false,
+      inProgress: null,
+    };
+    const wire: WireStatusSummary = summary;
+    expect(wire).toEqual(summary);
+  });
+
+  test("InProgressOperation: core and ipc's wire copy are assignable both ways", () => {
+    assertBothWays<WireInProgressOperation, CoreInProgressOperation>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const op: CoreInProgressOperation = {
+      kind: "revert",
+      otherSha: "abc1234",
+      headName: undefined,
+      conflictedPaths: ["a.txt"],
+      canContinue: true,
+      canAbort: true,
+      isSequence: false,
+      unmergedCount: 1,
+    };
+    const wire: WireInProgressOperation = op;
+    expect(wire).toEqual(op);
+  });
+
+  test("CheckoutPreflight: core and ipc's wire copy are assignable both ways", () => {
+    assertBothWays<WireCheckoutPreflight, CoreCheckoutPreflight>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const preflight: CoreCheckoutPreflight = {
+      target: { kind: "branch", name: "topic" },
+      detaches: false,
+      createsTracking: undefined,
+      carried: [],
+      blockers: [],
+      verdict: "clean",
+      routes: [],
+    };
+    const wire: WireCheckoutPreflight = preflight;
+    expect(wire).toEqual(preflight);
+  });
+
+  test("RevertPreflight: core and ipc's wire copy are assignable both ways", () => {
+    assertBothWays<WireRevertPreflight, CoreRevertPreflight>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const preflight: CoreRevertPreflight = {
+      shas: ["abc1234"],
+      mainlineRequired: [],
+      dirtyPaths: [],
+      inProgress: null,
+      prediction: { kind: "clean" },
+      predictedFor: "abc1234",
+      detachedHead: false,
+      verdict: "clean",
+      blockers: [],
+    };
+    const wire: WireRevertPreflight = preflight;
+    expect(wire).toEqual(preflight);
+  });
+
+  test("OpRequest: core and ipc's wire copy are assignable both ways", () => {
+    assertBothWays<WireOpRequest, CoreOpRequest>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const op: CoreOpRequest = { kind: "opContinue" };
+    const wire: WireOpRequest = op;
+    expect(wire).toEqual(op);
+  });
+
+  test("OpResult: core and ipc's wire copy are assignable both ways", () => {
+    assertBothWays<WireOpResult, CoreOpResult>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const result: CoreOpResult = {
+      ok: true,
+      error: undefined,
+      undo: null,
+      head: { kind: "branch", name: "main" },
+      inProgress: null,
+    };
+    const wire: WireOpResult = result;
+    expect(wire).toEqual(result);
+  });
+
+  test("UndoSlotSnapshot: core and ipc's wire copy are assignable both ways", () => {
+    assertBothWays<WireUndoSlotSnapshot, CoreUndoSlotSnapshot>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const slot: CoreUndoSlotSnapshot = {
+      id: "1",
+      label: "Deleted branch feature",
+      recoverySha: "abc1234",
+      createdAt: 0,
+    };
+    const wire: WireUndoSlotSnapshot = slot;
+    expect(wire).toEqual(slot);
+  });
+
+  test("OpErrorKind is a structural copy of GitErrorKind minus nothing and plus nothing (W9)", () => {
+    assertBothWays<WireOpErrorKind, CoreGitErrorKind>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const kind: CoreGitErrorKind = "Conflict";
+    const wire: WireOpErrorKind = kind;
+    expect(wire).toBe(kind);
   });
 });
