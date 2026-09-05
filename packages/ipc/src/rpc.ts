@@ -5,7 +5,8 @@
  * the harness's mock cannot diverge on semantics; each contributes only a ~ten-line
  * `MessageChannelLike` adapter.
  */
-import { dedupeTransferList, encode } from "./codec.ts";
+import type { BufferEncoding } from "./codec.ts";
+import { decode, dedupeTransferList, encode } from "./codec.ts";
 import type {
   EventKey,
   EventPayload,
@@ -26,8 +27,14 @@ import {
 
 /** The one thing every transport (real or mock) implements: post a message, optionally with a
  *  transfer list, and be told about incoming ones. Everything above this — correlation,
- *  credits, cancellation — is `rpc.ts`'s job, not the channel's. */
+ *  credits, cancellation — is `rpc.ts`'s job, not the channel's. `bufferEncoding` (D34,
+ *  `docs/plans/P15.md`) is what this channel's `post`/`onMessage` can actually carry: `"native"`
+ *  keeps every buffer as a real `ArrayBuffer`, transferred rather than cloned; `"base64"` is for
+ *  a channel where nothing binary survives (VS Code's `WebviewView`, P15's W1 finding) — declared
+ *  by the transport, never inferred, so getting it wrong is a config bug in one file rather than
+ *  a webview that silently renders `{}`. */
 export interface MessageChannelLike {
+  readonly bufferEncoding: BufferEncoding;
   post(message: unknown, transfer?: readonly ArrayBuffer[]): void;
   onMessage(handler: (message: unknown) => void): () => void;
   close(): void;
@@ -96,13 +103,13 @@ function toWireError(error: unknown): WireError {
 
 function post(channel: MessageChannelLike, frame: Frame): void {
   const envelope = wrapVersioned(frame);
-  const { payload, transfer } = encode(envelope);
+  const { payload, transfer } = encode(envelope, channel.bufferEncoding);
   channel.post(payload, dedupeTransferList(transfer));
 }
 
 function receive(channel: MessageChannelLike, handleFrame: (frame: Frame) => void): () => void {
   return channel.onMessage((raw) => {
-    const envelope = raw as VersionedEnvelope<Frame>;
+    const envelope = decode<VersionedEnvelope<Frame>>(raw, channel.bufferEncoding);
     handleFrame(unwrapVersioned(envelope));
   });
 }
@@ -190,7 +197,7 @@ export function createRpcClient(channel: MessageChannelLike): Transport {
           if (entry.done) return;
           await entry.onChunk(frame.chunk);
           if (entry.done) return;
-          channel.post(wrapVersioned<Frame>({ t: "credit", id: frame.id, n: 1 }));
+          post(channel, { t: "credit", id: frame.id, n: 1 });
         });
         return;
       }

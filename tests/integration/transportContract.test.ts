@@ -43,6 +43,7 @@ function createInMemoryChannelPair(): readonly [MessageChannelLike, MessageChann
   let closedB = false;
 
   const a: MessageChannelLike = {
+    bufferEncoding: "native",
     post(message, transfer) {
       if (closedA) return;
       const cloned = transfer
@@ -61,6 +62,7 @@ function createInMemoryChannelPair(): readonly [MessageChannelLike, MessageChann
     },
   };
   const b: MessageChannelLike = {
+    bufferEncoding: "native",
     post(message, transfer) {
       if (closedB) return;
       const cloned = transfer

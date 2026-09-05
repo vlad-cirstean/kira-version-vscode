@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { BufferEncoding } from "./codec.ts";
 import type { PackedCommitChunk, StreamChunkOf } from "./contract.ts";
 import {
   createRpcClient,
@@ -26,14 +27,19 @@ function deferred<T = void>(): {
 }
 
 /** A real in-memory pipe: posting on one end synchronously invokes the other end's handler,
- *  after a `structuredClone` (with transfer, if given) so buffer-detach semantics are real. */
-function createInMemoryChannelPair(): readonly [MessageChannelLike, MessageChannelLike] {
+ *  after a `structuredClone` (with transfer, if given) so buffer-detach semantics are real.
+ *  `bufferEncoding` defaults to `"native"` — the one field W3 adds to this fake channel; pass
+ *  `"base64"` to model a channel like VS Code's `WebviewView` that cannot carry buffers. */
+function createInMemoryChannelPair(
+  bufferEncoding: BufferEncoding = "native",
+): readonly [MessageChannelLike, MessageChannelLike] {
   let handlerA: ((message: unknown) => void) | undefined;
   let handlerB: ((message: unknown) => void) | undefined;
   let closedA = false;
   let closedB = false;
 
   const a: MessageChannelLike = {
+    bufferEncoding,
     post(message, transfer) {
       if (closedA) return;
       const cloned = transfer
@@ -52,6 +58,7 @@ function createInMemoryChannelPair(): readonly [MessageChannelLike, MessageChann
     },
   };
   const b: MessageChannelLike = {
+    bufferEncoding,
     post(message, transfer) {
       if (closedB) return;
       const cloned = transfer
@@ -365,6 +372,35 @@ describe("ipc rpc — streams", () => {
 
     expect(cancelledIds).toEqual(["r1"]);
     expect(secondReceived).toEqual([0, 1, 2, 3, 4]);
+
+    client.dispose();
+    server.dispose();
+  });
+
+  test('a channel declaring "base64" round-trips a graph.stream chunk with real buffer content (W3)', async () => {
+    const [a, b] = createInMemoryChannelPair("base64");
+    const shas = new ArrayBuffer(20);
+    new Uint8Array(shas).fill(0x7a);
+    const handlers = stubHandlers(
+      {},
+      {
+        "graph.stream": async (_params, { emit }) => {
+          await emit({ ...chunkFor(0), commits: { ...emptyPackedChunk(), shas } });
+        },
+      },
+    );
+    const server = createRpcServer(a, handlers);
+    const client = createRpcClient(b);
+
+    const received: StreamChunkOf<"graph.stream">[] = [];
+    await client.stream("graph.stream", { repoId: "r1" }, (chunk) => {
+      received.push(chunk as StreamChunkOf<"graph.stream">);
+    });
+
+    expect(received).toHaveLength(1);
+    const commits = received[0]?.commits;
+    expect(commits?.shas.byteLength).toBe(20);
+    expect(new Uint8Array(commits?.shas ?? new ArrayBuffer(0)).every((b) => b === 0x7a)).toBe(true);
 
     client.dispose();
     server.dispose();
