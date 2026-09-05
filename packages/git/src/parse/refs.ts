@@ -126,7 +126,11 @@ export function parseRefRecord(record: Uint8Array, withSubject = false): RefReco
     // (probe P3) and must never be stored as this tag's own annotation.
     annotation:
       isTag && taggerName && taggerName.length > 0
-        ? { tagger: taggerName, date: Number(taggerDate ?? 0), subject: withSubject ? (subject ?? "") : "" }
+        ? {
+            tagger: taggerName,
+            date: Number(taggerDate ?? 0),
+            subject: withSubject ? (subject ?? "") : "",
+          }
         : undefined,
   };
 }

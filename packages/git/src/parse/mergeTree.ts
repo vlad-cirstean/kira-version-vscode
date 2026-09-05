@@ -21,7 +21,11 @@ import { assert } from "@kira-version/core";
 
 // `--no-optional-locks` is not included here: driver.ts (W7) adds it structurally to every
 // read, so a caller of this args builder does not need to remember it too.
-export function mergeTreeArgs(base: string, other: string, opts?: { readonly mergeBase?: string }): string[] {
+export function mergeTreeArgs(
+  base: string,
+  other: string,
+  opts?: { readonly mergeBase?: string },
+): string[] {
   const mergeBaseArg = opts?.mergeBase !== undefined ? [`--merge-base=${opts.mergeBase}`] : [];
   return ["merge-tree", "--write-tree", "--messages", "--name-only", ...mergeBaseArg, base, other];
 }

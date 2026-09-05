@@ -228,7 +228,9 @@ describe("canRunOp — the gate (§7.11)", () => {
 });
 
 describe("describeInProgress", () => {
-  function op(partial: Partial<InProgressOperation> & Pick<InProgressOperation, "kind">): InProgressOperation {
+  function op(
+    partial: Partial<InProgressOperation> & Pick<InProgressOperation, "kind">,
+  ): InProgressOperation {
     return {
       otherSha: undefined,
       headName: undefined,

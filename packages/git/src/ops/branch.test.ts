@@ -53,11 +53,7 @@ describe("branchRenameArgs", () => {
 
 describe("undo-capture reads", () => {
   test("branchRevParseArgs: rev-parse --verify refs/heads/<name>", () => {
-    expect(branchRevParseArgs("feature")).toEqual([
-      "rev-parse",
-      "--verify",
-      "refs/heads/feature",
-    ]);
+    expect(branchRevParseArgs("feature")).toEqual(["rev-parse", "--verify", "refs/heads/feature"]);
   });
 
   test("branchConfigRegexpArgs: config --get-regexp ^branch\\.<name>\\.", () => {

@@ -25,12 +25,7 @@ describe("tagCreateArgs — §7.9's whole table", () => {
   });
 
   test("move (lightweight): -f, no message", () => {
-    expect(tagCreateArgs("v1", "def5678", { force: true })).toEqual([
-      "tag",
-      "-f",
-      "v1",
-      "def5678",
-    ]);
+    expect(tagCreateArgs("v1", "def5678", { force: true })).toEqual(["tag", "-f", "v1", "def5678"]);
   });
 
   test("move (annotated): -f -a -m <msg> — probe P3's re-supply requirement", () => {

@@ -3,7 +3,10 @@ import type { InProgressOperation } from "./operation.ts";
 import type { StatusEntry, StatusResult } from "./status.ts";
 import { dirtyPathsFrom, summarizeStatus } from "./status.ts";
 
-function result(entries: StatusEntry[], branch: Partial<StatusResult["branch"]> = {}): StatusResult {
+function result(
+  entries: StatusEntry[],
+  branch: Partial<StatusResult["branch"]> = {},
+): StatusResult {
   return {
     branch: {
       oid: "abc1234abc1234abc1234abc1234abc1234abc1",
@@ -101,7 +104,10 @@ describe("summarizeStatus", () => {
   });
 
   test("head: detached — oid becomes the sha", () => {
-    const summary = summarizeStatus(result([], { head: { kind: "detached" }, oid: "deadbeef" }), null);
+    const summary = summarizeStatus(
+      result([], { head: { kind: "detached" }, oid: "deadbeef" }),
+      null,
+    );
     expect(summary.head).toEqual({ kind: "detached", sha: "deadbeef" });
   });
 

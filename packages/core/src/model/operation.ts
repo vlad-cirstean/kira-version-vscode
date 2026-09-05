@@ -9,7 +9,13 @@
 /** `HeadState` is already `core`'s own (`model/repo.ts`) — not re-declared here. */
 import type { HeadState } from "./repo.ts";
 
-export type InProgressKind = "merge" | "cherryPick" | "revert" | "rebase" | "bisect" | "unmergedOnly";
+export type InProgressKind =
+  | "merge"
+  | "cherryPick"
+  | "revert"
+  | "rebase"
+  | "bisect"
+  | "unmergedOnly";
 
 export interface InProgressOperation {
   readonly kind: InProgressKind;

@@ -119,7 +119,9 @@ describe("classifyRevert — prediction folds into verdict", () => {
   });
 
   test("an unknown prediction does not by itself block or willConflict", () => {
-    const result = classifyRevert(base({ prediction: { kind: "unknown", reason: "spawn failed" } }));
+    const result = classifyRevert(
+      base({ prediction: { kind: "unknown", reason: "spawn failed" } }),
+    );
     expect(result.verdict).toBe("clean");
   });
 

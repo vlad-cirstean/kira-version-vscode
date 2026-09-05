@@ -14,11 +14,17 @@ import type { TagCreatePreflight } from "./types.ts";
  * text the user typed. A leading `-` and an empty string are rejected for the ordinary reason: git
  * itself would otherwise read either as an option.
  */
-export function validateRefName(name: string): { readonly valid: boolean; readonly error: string | undefined } {
+export function validateRefName(name: string): {
+  readonly valid: boolean;
+  readonly error: string | undefined;
+} {
   if (name.length === 0) return { valid: false, error: "Name cannot be empty." };
   if (name.startsWith("-")) return { valid: false, error: "Name cannot start with '-'." };
   if (name.includes("@{")) {
-    return { valid: false, error: "Name cannot contain '@{' (reserved by git's reflog shorthand)." };
+    return {
+      valid: false,
+      error: "Name cannot contain '@{' (reserved by git's reflog shorthand).",
+    };
   }
   return { valid: true, error: undefined };
 }

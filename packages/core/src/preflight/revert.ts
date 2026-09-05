@@ -34,7 +34,11 @@ export function classifyRevert(input: {
   if (input.dirtyPaths.length > 0) blockers.push("dirtyWorktree");
 
   const verdict: RevertPreflight["verdict"] =
-    blockers.length > 0 ? "blocked" : input.prediction.kind === "conflicts" ? "willConflict" : "clean";
+    blockers.length > 0
+      ? "blocked"
+      : input.prediction.kind === "conflicts"
+        ? "willConflict"
+        : "clean";
 
   return {
     shas: input.shas,
