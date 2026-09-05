@@ -13,13 +13,15 @@ export default defineConfig({
   retries: 0,
   reporter: [["list"]],
   // P6a W7: a percentage tracks the machine instead of encoding this container's core count (a
-  // hardcoded `4` would be wrong on anyone else's box). Measured on this 4-vCPU container, on
-  // the pre-W5/W6 workload: 2 workers (Playwright's own default of half the logical CPUs) — 140.5s
-  // wall, 263s of test CPU-time; 4 workers — 109.6s wall, 416s of CPU-time. Going 2→4 cut wall
-  // time 22% but inflated total CPU-time 58% — this container saturates at 4 Chromium workers and
-  // each test gets slower under the added contention. Re-measured post-W5/W6 (their ~92s of
-  // CPU-time removed first, since that's worth more than the extra contention): see
-  // docs/plans/P6a-test-perf.md's Findings for the numbers that decided this stays at "100%".
+  // hardcoded `4` would be wrong on anyone else's box). Re-measured on this 4-vCPU container after
+  // W5 (built-app webServer) and W6 (scoped axe scans) landed, three fresh `--project=harness`
+  // runs each: 2 workers (Playwright's default of half the logical CPUs) — 76.9s wall, ~59.2s of
+  // test CPU-time (user+sys); 4 workers ("100%") — 53.6-56.2s wall (avg ~55.2s), ~61.1-66.0s of
+  // CPU-time (avg ~63.5s). Going 2→4 still cuts wall time (~28%) but now only inflates CPU-time by
+  // ~7%, not the 58% measured pre-W5/W6 — most of what made 4-way contention expensive was the dev
+  // server's per-test module-fanout cost (I/O/network-bound, not CPU-bound), which W5's built-app
+  // change removed. With the trade-off this much cheaper now, "100%" stays the right default; see
+  // docs/plans/P6a-test-perf.md's Findings for the full numbers.
   workers: "100%",
   use: {
     viewport: { width: 1000, height: 500 },
