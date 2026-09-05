@@ -67,7 +67,12 @@ export {
   branchRenameArgs,
   branchRevParseArgs,
 } from "./ops/branch.ts";
-export { rewrittenPathsArgs, switchArgs, switchDetachArgs } from "./ops/checkout.ts";
+export {
+  rewrittenPathsArgs,
+  switchArgs,
+  switchCreateTrackingArgs,
+  switchDetachArgs,
+} from "./ops/checkout.ts";
 export { abortArgs, continueArgs, readInProgressStateFiles } from "./ops/conflict.ts";
 export { revertArgs } from "./ops/revert.ts";
 export {
@@ -87,13 +92,15 @@ export {
 } from "./parse/refs.ts";
 export { parseStashRecord, STASH_FORMAT, stashListArgs } from "./parse/stash.ts";
 export { parseStatus, statusArgs } from "./parse/status.ts";
-export type { CommitDetailOptions, LogQueryOptions } from "./queries.ts";
+export type { CommitDetailOptions, LogQueryOptions, RefsSnapshot } from "./queries.ts";
 export {
   commitDetail,
   countCommits,
   log,
   predictMerge,
   refs,
+  refsSnapshot,
+  revertMergeParents,
   stashList,
   status,
 } from "./queries.ts";
