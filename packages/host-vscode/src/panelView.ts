@@ -53,7 +53,11 @@ export class KiraGraphViewProvider implements vscode.WebviewViewProvider {
       enableScripts: true,
       localResourceRoots: [vscode.Uri.joinPath(extensionUri, "..", "..", "dist", "ui")],
     };
-    webviewView.webview.html = renderHtml({ webview: webviewView.webview, extensionUri });
+    webviewView.webview.html = renderHtml({
+      webview: webviewView.webview,
+      extensionUri,
+      view: "graph",
+    });
 
     const channel = createWebviewChannel(webviewView.webview);
     const handlers = createRepoHandlers({

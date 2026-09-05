@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none">
+  <title>Branch Review</title>
+  <path d="M6 4v16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+  <path d="M6 8c0 3 3 3 5.5 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none"/>
+  <circle cx="6" cy="4" r="1.8" fill="currentColor"/>
+  <circle cx="6" cy="20" r="1.8" fill="currentColor"/>
+  <circle cx="13.5" cy="11" r="1.8" fill="currentColor"/>
+  <path d="M17.5 9.5h3M17.5 11.5h2.2M17.5 13.5h3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+</svg>

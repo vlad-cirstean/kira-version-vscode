@@ -71,13 +71,25 @@ function nonce(): string {
   return out;
 }
 
+/** The target the review view should open on a cold resolve — see `reviewView.ts`'s own doc
+ *  comment for the three-entry-point flow this is one arm of (§6.8, D40). `null` when the
+ *  palette command (or a first-ever resolve with nothing pending) revealed the view: it renders
+ *  its own "pick a branch" ask-state rather than being handed one. */
+export interface ReviewTarget {
+  readonly repoId: string;
+  readonly branch: string;
+}
+
 export interface RenderHtmlOptions {
   readonly webview: vscode.Webview;
   readonly extensionUri: vscode.Uri;
+  readonly view: "graph" | "review";
+  /** Only meaningful when `view === "review"`; ignored (and should be omitted) for the graph. */
+  readonly target?: ReviewTarget | null;
 }
 
 export function renderHtml(opts: RenderHtmlOptions): string {
-  const { webview, extensionUri } = opts;
+  const { webview, extensionUri, view, target } = opts;
   const distUi = vscode.Uri.joinPath(extensionUri, "..", "..", "dist", "ui");
   const assets = resolveUiAssets(webview, distUi);
   const csNonce = nonce();
@@ -88,6 +100,8 @@ export function renderHtml(opts: RenderHtmlOptions): string {
     host: "vscode" as const,
     contractVersion: CONTRACT_VERSION,
     repo: process.env["KIRA_REPO"] ?? null,
+    view,
+    target: view === "review" ? (target ?? null) : null,
   };
 
   const styleLinks = assets.styleUris
@@ -103,8 +117,10 @@ export function renderHtml(opts: RenderHtmlOptions): string {
     // P4 W4: the layout module worker (`packages/ui/src/graph/layoutClient.ts`) is constructed
     // via `new Worker(new URL(...), { type: "module" })`; Vite's built module-worker bundling
     // for that form loads through a `blob:` URL in a webview, not the extension's own origin, so
-    // both sources are needed. V1 confirms this holds on a real webview.
-    `worker-src ${webview.cspSource} blob:`,
+    // both sources are needed. V1 confirms this holds on a real webview. The review document
+    // does not need this — it runs no layout worker (§6.8/D41) — but CSP is otherwise identical
+    // between the two views and one `renderHtml` covers both rather than forking the document.
+    ...(view === "graph" ? [`worker-src ${webview.cspSource} blob:`] : []),
   ].join("; ");
 
   return `<!doctype html>

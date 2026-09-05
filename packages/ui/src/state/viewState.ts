@@ -115,3 +115,22 @@ export class InMemoryViewStateStore implements ViewStateStore {
     this.#raw = raw;
   }
 }
+
+/**
+ * The review view's own `ViewStateStore` (P7 W9, §6.8/D41): `read()` always answers `null`,
+ * `write()` discards whatever it is handed. §6.8's lifecycle is explicit that the review view
+ * "persists no view state through `setState`, is not rehydrated from the host cache on reveal"
+ * — a named class rather than an inline `{ read: () => null, write: () => {} }` literal at each
+ * of its two call sites (`webview/main.ts`, `apps/harness/src/main.ts`) because "this view
+ * persists nothing" is a design statement worth a name a reader can grep for, not an
+ * implementation detail to infer from an object shape.
+ */
+export class NullViewStateStore implements ViewStateStore {
+  read(): PersistedViewState | null {
+    return null;
+  }
+
+  write(_state: PersistedViewState): void {
+    // Deliberately discarded — see the class doc comment.
+  }
+}
