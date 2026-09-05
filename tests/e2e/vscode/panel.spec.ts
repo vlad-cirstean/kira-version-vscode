@@ -260,7 +260,9 @@ test.describe("vscode panel", () => {
         });
       const row0 = frame.locator('.slick-row[data-row="0"]');
       await expect(row0.locator(".kv-cell-sha")).toHaveText(newestSha.slice(0, 7));
-      await expect(row0.locator(".kv-message-subject")).toHaveText(`commit ${repo.commits.length - 1}`);
+      await expect(row0.locator(".kv-message-subject")).toHaveText(
+        `commit ${repo.commits.length - 1}`,
+      );
     } finally {
       await app.close();
     }
