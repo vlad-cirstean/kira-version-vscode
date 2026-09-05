@@ -1,12 +1,136 @@
+import type { CommitRecord, DecorationRef } from "@kira-version/core";
+import type { CheckoutPreflight, RefRow } from "@kira-version/ipc";
+import { topology } from "./topology.ts";
 import type { Scenario } from "./types.ts";
 
 /**
- * Stub: this scenario has no behaviour to show until the phase that models a dirty
- * working tree lands. Fails loudly if selected rather than rendering something misleading
- * (§3.5's "fail loudly rather than half-work", applied to dev scaffolding too).
+ * `docs/plans/P6.md` W18: a real dirty working tree — replaces the P0 `Proxy` stub. Exercises
+ * §7.5's checkout pre-flight in full: four branches, one per verdict the classifier can produce,
+ * so `CheckoutDialog.vue`/`BranchPicker.vue` each have something real to demonstrate rather than
+ * every click falling through to `mockBridge.ts`'s own generic default.
  */
-export const dirty: Scenario = new Proxy({} as Scenario, {
-  get(): never {
-    throw new Error("scenario 'dirty' is not implemented yet — it is a P0 stub.");
+const COMMIT_SPEC = ["root", "main:root", "feature-clean:main", "feature-carry:main"];
+const commits = topology(COMMIT_SPEC);
+
+const DECORATIONS: Readonly<Record<string, readonly DecorationRef[]>> = {
+  main: [{ kind: "branch", name: "main", isHead: true }],
+  "feature-clean": [{ kind: "branch", name: "feature-clean", isHead: false }],
+  "feature-carry": [{ kind: "branch", name: "feature-carry", isHead: false }],
+};
+
+function decorate(records: readonly CommitRecord[]): CommitRecord[] {
+  return records.map((record) => {
+    const decoration = DECORATIONS[record.subject];
+    return decoration ? { ...record, decoration } : record;
+  });
+}
+
+const decorated = decorate(commits);
+function shaOf(subject: string): string {
+  const commit = decorated.find((c) => c.subject === subject);
+  if (!commit) throw new Error(`dirty scenario: no commit named '${subject}'`);
+  return commit.sha;
+}
+
+function branchRow(name: string, isHead: boolean, objectId = shaOf(name)): RefRow {
+  return {
+    refname: `refs/heads/${name}`,
+    kind: "branch",
+    shortName: name,
+    objectId,
+    peeledObjectId: undefined,
+    upstream: undefined,
+    track: undefined,
+    committerDate: 1_700_003_600,
+    isHead,
+    checkedOutIn: undefined,
+    annotation: undefined,
+  };
+}
+
+const DIRTY_PATHS = ["src/tracked.ts", "README.md"];
+const UNTRACKED_PATHS = ["src/scratch.ts"];
+
+// §7.5's four verdicts, keyed by the branch a click asks to check out — `mockBridge.ts`'s
+// `preflight.checkout` reads this map first and only falls back to its own default classifier
+// for a target this scenario does not name.
+const preflightByTarget: Readonly<Record<string, CheckoutPreflight>> = {
+  "feature-clean": {
+    target: { kind: "branch", name: "feature-clean" },
+    detaches: false,
+    createsTracking: undefined,
+    carried: [],
+    blockers: [],
+    verdict: "clean",
+    routes: [],
   },
-});
+  "feature-carry": {
+    target: { kind: "branch", name: "feature-carry" },
+    detaches: false,
+    createsTracking: undefined,
+    carried: DIRTY_PATHS,
+    blockers: [],
+    verdict: "cleanCarry",
+    routes: [],
+  },
+  "feature-blocked-tracked": {
+    target: { kind: "branch", name: "feature-blocked-tracked" },
+    detaches: false,
+    createsTracking: undefined,
+    carried: [],
+    blockers: [{ kind: "blockedByTracked", paths: DIRTY_PATHS }],
+    verdict: "blocked",
+    routes: ["discard"],
+  },
+  "feature-blocked-untracked": {
+    target: { kind: "branch", name: "feature-blocked-untracked" },
+    detaches: false,
+    createsTracking: undefined,
+    carried: [],
+    blockers: [{ kind: "blockedByUntracked", paths: UNTRACKED_PATHS }],
+    verdict: "blocked",
+    routes: [],
+  },
+};
+
+export const dirty: Scenario = {
+  name: "dirty",
+  git: { kind: "ok", path: "/usr/bin/git", version: "2.43.0" },
+  repoOpen: {
+    kind: "ok",
+    repo: {
+      repoId: "/repos/dirty",
+      root: "/repos/dirty",
+      gitDir: "/repos/dirty/.git",
+      commonDir: "/repos/dirty/.git",
+      isBare: false,
+      isLinkedWorktree: false,
+      head: { kind: "branch", name: "main" },
+    },
+  },
+  commits: decorated,
+  refs: {
+    branches: [
+      branchRow("main", true),
+      branchRow("feature-clean", false),
+      branchRow("feature-carry", false),
+      // These two exist only as pre-flight targets above — `feature-blocked-tracked`'s and
+      // `feature-blocked-untracked`'s own `objectId` resolve to `main`'s tip rather than each
+      // needing its own commit; the fixture only needs a real ref for the branch picker to
+      // list, not a distinct history.
+      branchRow("feature-blocked-tracked", false, shaOf("main")),
+      branchRow("feature-blocked-untracked", false, shaOf("main")),
+    ],
+    remoteBranches: [],
+    tags: [],
+  },
+  status: {
+    upstream: undefined,
+    counts: { staged: 1, unstaged: 1, untracked: 1, unmerged: 0 },
+    isClean: false,
+    dirtyPaths: DIRTY_PATHS,
+    dirtyTruncated: false,
+    inProgress: null,
+  },
+  preflight: { checkout: preflightByTarget },
+};

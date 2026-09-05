@@ -10,7 +10,10 @@ import { hugeRepo } from "./hugeRepo.ts";
 import { merge } from "./merge.ts";
 import { noCapabilities } from "./noCapabilities.ts";
 import { pagedBranch } from "./pagedBranch.ts";
+import { rebasing } from "./rebasing.ts";
+import { tags } from "./tags.ts";
 import { tooOld } from "./tooOld.ts";
+import { worktrees } from "./worktrees.ts";
 import type { Scenario } from "./types.ts";
 
 const SCENARIOS: Readonly<Record<string, Scenario>> = {
@@ -25,6 +28,9 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
   merge,
   goToFile,
   noCapabilities,
+  rebasing,
+  worktrees,
+  tags,
 };
 
 /** Loadable by exact name via `?scenario=<name>` but deliberately left out of `SCENARIOS` above
