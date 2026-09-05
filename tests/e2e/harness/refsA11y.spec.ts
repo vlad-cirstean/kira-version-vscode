@@ -24,6 +24,15 @@ const THEME_KINDS = [
   "vscode-high-contrast-light",
 ] as const;
 
+// P6a W6 — see a11y.spec.ts's own doc comment for the full reasoning and the premise probe this
+// rests on (recorded in docs/plans/P6a-test-perf.md's Findings). One theme per surface runs the
+// full (default) axe ruleset; the other three run only its `cat.color`-tagged rules, minus
+// `color-contrast-enhanced` — a11y.spec.ts's own `COLOR_ONLY_DISABLED_RULES` comment says why
+// (that AAA rule ships `enabled: false` in axe-core and a tag-based runOnly ignores that default,
+// so leaving it in would check three themes against a stricter ruleset than the full scan does).
+const FULL_SCAN_THEME: (typeof THEME_KINDS)[number] = "vscode-dark";
+const COLOR_ONLY_DISABLED_RULES = ["color-contrast-enhanced"];
+
 async function ready(page: Page): Promise<void> {
   await page.getByTestId("connection-state").waitFor();
 }
@@ -50,8 +59,15 @@ function isKnownRowSelectedContrastFalsePositive(violationId: string, target: st
   );
 }
 
-async function unexpectedSeriousViolations(page: Page): Promise<string[]> {
-  const results = await new AxeBuilder({ page }).analyze();
+async function unexpectedSeriousViolations(
+  page: Page,
+  kind: (typeof THEME_KINDS)[number],
+): Promise<string[]> {
+  const builder = new AxeBuilder({ page });
+  const results = await (kind === FULL_SCAN_THEME
+    ? builder
+    : builder.withTags(["cat.color"]).disableRules(COLOR_ONLY_DISABLED_RULES)
+  ).analyze();
   return results.violations
     .filter((v) => v.impact === "serious" || v.impact === "critical")
     .flatMap((v) =>
@@ -61,25 +77,32 @@ async function unexpectedSeriousViolations(page: Page): Promise<string[]> {
     );
 }
 
+/** Appended to every axe test's name so a reader can tell which scan ran the full ruleset. */
+function scanLabel(kind: (typeof THEME_KINDS)[number]): string {
+  return kind === FULL_SCAN_THEME ? "full ruleset" : "color-contrast only";
+}
+
 test.describe("axe: refs & checkout surfaces, no serious/critical violations", () => {
   for (const kind of THEME_KINDS) {
-    test(`open branch picker: ${kind}`, async ({ page }) => {
+    test(`open branch picker: ${kind} (${scanLabel(kind)})`, async ({ page }) => {
       await page.goto(`/?scenario=tags&theme=${kind}`);
       await ready(page);
       await openPicker(page);
-      expect(await unexpectedSeriousViolations(page)).toEqual([]);
+      expect(await unexpectedSeriousViolations(page, kind)).toEqual([]);
     });
 
-    test(`open row context menu: ${kind}`, async ({ page }) => {
+    test(`open row context menu: ${kind} (${scanLabel(kind)})`, async ({ page }) => {
       await page.goto(`/?scenario=dirty&theme=${kind}`);
       await ready(page);
       const row = page.locator(".slick-row", { hasText: "main" }).first();
       await row.click({ button: "right" });
       await expect(page.locator('[role="menu"]')).toBeVisible();
-      expect(await unexpectedSeriousViolations(page)).toEqual([]);
+      expect(await unexpectedSeriousViolations(page, kind)).toEqual([]);
     });
 
-    test(`CheckoutDialog open (blocked-by-tracked): ${kind}`, async ({ page }) => {
+    test(`CheckoutDialog open (blocked-by-tracked): ${kind} (${scanLabel(kind)})`, async ({
+      page,
+    }) => {
       await page.goto(`/?scenario=dirty&theme=${kind}`);
       await ready(page);
       await openPicker(page);
@@ -88,10 +111,12 @@ test.describe("axe: refs & checkout surfaces, no serious/critical violations", (
         .locator(".kv-branch-row-main")
         .click();
       await expect(page.locator('[aria-labelledby="kv-checkout-dialog-title"]')).toBeVisible();
-      expect(await unexpectedSeriousViolations(page)).toEqual([]);
+      expect(await unexpectedSeriousViolations(page, kind)).toEqual([]);
     });
 
-    test(`RevertDialog open (predicted conflict): ${kind}`, async ({ page }) => {
+    test(`RevertDialog open (predicted conflict): ${kind} (${scanLabel(kind)})`, async ({
+      page,
+    }) => {
       await page.goto(`/?scenario=merge&theme=${kind}`);
       await ready(page);
       const row = page.locator(".slick-row", { hasText: "side-a" }).first();
@@ -100,10 +125,10 @@ test.describe("axe: refs & checkout surfaces, no serious/critical violations", (
       await expect(page.locator('[aria-labelledby="kv-revert-dialog-title"]')).toContainText(
         "This will likely conflict in:",
       );
-      expect(await unexpectedSeriousViolations(page)).toEqual([]);
+      expect(await unexpectedSeriousViolations(page, kind)).toEqual([]);
     });
 
-    test(`TagDialog open (force-move warning): ${kind}`, async ({ page }) => {
+    test(`TagDialog open (force-move warning): ${kind} (${scanLabel(kind)})`, async ({ page }) => {
       await page.goto(`/?scenario=tags&theme=${kind}`);
       await ready(page);
       const row = page.locator(".slick-row", { hasText: "main" }).first();
@@ -113,24 +138,24 @@ test.describe("axe: refs & checkout surfaces, no serious/critical violations", (
       await modal.locator("input[type='text']").fill("v1.0.0");
       await modal.getByRole("checkbox", { name: "Replace it" }).click();
       await expect(modal).toContainText("silently downgrade it to lightweight");
-      expect(await unexpectedSeriousViolations(page)).toEqual([]);
+      expect(await unexpectedSeriousViolations(page, kind)).toEqual([]);
     });
 
-    test(`BranchDialog open: ${kind}`, async ({ page }) => {
+    test(`BranchDialog open: ${kind} (${scanLabel(kind)})`, async ({ page }) => {
       await page.goto(`/?scenario=dirty&theme=${kind}`);
       await ready(page);
       const row = page.locator(".slick-row", { hasText: "main" }).first();
       await row.click({ button: "right" });
       await page.getByRole("menuitem", { name: "Create branch here…" }).click();
       await expect(page.locator('[aria-labelledby="kv-branch-dialog-title"]')).toBeVisible();
-      expect(await unexpectedSeriousViolations(page)).toEqual([]);
+      expect(await unexpectedSeriousViolations(page, kind)).toEqual([]);
     });
 
-    test(`conflict banner: ${kind}`, async ({ page }) => {
+    test(`conflict banner: ${kind} (${scanLabel(kind)})`, async ({ page }) => {
       await page.goto(`/?scenario=conflicted&theme=${kind}`);
       await ready(page);
       await expect(page.getByTestId("conflict-banner")).toBeVisible();
-      expect(await unexpectedSeriousViolations(page)).toEqual([]);
+      expect(await unexpectedSeriousViolations(page, kind)).toEqual([]);
     });
   }
 });

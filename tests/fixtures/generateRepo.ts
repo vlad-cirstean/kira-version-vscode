@@ -11,7 +11,16 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -20,6 +29,17 @@ const STEP_SECONDS = 3600;
 const AUTHOR_NAME = "Kira Fixture";
 const AUTHOR_EMAIL = "fixture@kira-version.test";
 const CACHE_DIR = join(import.meta.dir, ".cache");
+
+/**
+ * P6a W3 — every cache key (this file's small shapes below, and large()/largeBranchy()'s own
+ * cacheKey()) folds this in, so editing any shape's generation logic invalidates every cached
+ * template automatically. Replaces large()'s old hand-bumped "v2" string, which was a footgun:
+ * edit a shape and forget to bump it, and every test silently runs against the stale repo.
+ */
+const SOURCE_HASH = createHash("sha256")
+  .update(readFileSync(import.meta.filename))
+  .digest("hex")
+  .slice(0, 16);
 
 export interface GeneratedRepo {
   /** Absolute path to the generated working copy (or bare repo, for the withRemote() remote). */
@@ -144,19 +164,95 @@ function tempRepoDir(prefix: string): string {
 
 // ---------------------------------------------------------------------------------------
 // Shapes
+//
+// P6a W3 — most shapes below are built once per machine, into tests/fixtures/.cache/, and
+// copied per call via cachedShape() (the same content-addressed-cache-plus-atomic-install
+// mechanism large()/largeBranchy() already use further down, generalised to cache-then-*copy*
+// rather than cache-then-share: integration tests write to their repo — checkout, commit,
+// revert, delete refs — so every call still gets its own mutable copy at its own path, just a
+// `cpSync` away instead of a from-scratch `git init` + N spawns).
+//
+// Three shapes are deliberately excluded from caching (read them yourself before adding a
+// fourth):
+//   - withRemote() — clones from a bare repo at a mkdtemp path; `.git/config`'s
+//     `remote.origin.url` holds an absolute path into a directory the copy would not own.
+//   - withWorktree() — `git worktree add`s a second mkdtemp path; both `<worktree>/.git` and
+//     `<repo>/.git/worktrees/<name>/gitdir` hold absolute paths into each other.
+//   - inProgressRevert() was read and found copy-safe (its state is confined to
+//     `.git/{REVERT_HEAD,MERGE_MSG,sequencer/}` and the index — no absolute paths anywhere) and
+//     so *is* cached below, unlike the two above.
+// Rewriting the absolute paths inside a copied .git for the first two would be a fixture
+// generator reimplementing `git clone`/`git worktree add`; the failure mode is a green test
+// against a subtly wrong repository, which costs more than the few spawns saved.
 // ---------------------------------------------------------------------------------------
+
+/** Metadata sidecar lives *inside* `.git/`, not next to it — it rides along with the single
+ *  `mv` that installs the template, so the install stays one atomic rename (matching
+ *  large()/largeBranchy()'s own precedent) instead of two racing renames. It is never part of
+ *  the working tree, so no test's `git status --porcelain` ever sees it. */
+const CACHE_META_FILENAME = "kira-fixture-meta.json";
+
+// Small shapes live under their own subdirectory, separate from large()/largeBranchy()'s
+// CACHE_DIR entries below — so largeBranchy.test.ts's own clearLargeCache() calls (mid-test, to
+// re-verify determinism) invalidate only what they've always invalidated, not every small-shape
+// template test:integration relies on for speed.
+const SHAPE_CACHE_DIR = join(CACHE_DIR, "shapes");
+
+/**
+ * Builds `name(options)` once per machine (keyed on this file's own source, so editing a shape
+ * invalidates every cached copy of it automatically) and returns a fresh, independently mutable
+ * copy on every call. `build()` must construct its repo via `tempRepoDir()` as every shape below
+ * already does; its returned `dir` becomes the cache template on a miss and is discarded (via the
+ * same building-then-atomic-rename install large()/largeBranchy() use, so concurrent `bun test`
+ * processes racing the same key are safe) in favour of a `cpSync`'d copy on every call, hit or
+ * miss.
+ */
+function cachedShape<T extends GeneratedRepo>(name: string, options: unknown, build: () => T): T {
+  const key = createHash("sha256")
+    .update(`${SOURCE_HASH}:shape:${name}:${JSON.stringify(options)}`)
+    .digest("hex")
+    .slice(0, 16);
+  const cached = join(SHAPE_CACHE_DIR, key);
+  const metaPath = join(cached, ".git", CACHE_META_FILENAME);
+
+  if (!existsSync(metaPath)) {
+    const template = build();
+    execFileSync("git", ["repack", "-a", "-d", "--quiet"], {
+      cwd: template.dir,
+      env: baseEnv(template.dir),
+    });
+    // `dir` is per-copy, never part of the cached metadata — every other field here is either a
+    // sha or a relative path, both stable across a `cpSync`.
+    const { dir: _dir, ...meta } = template;
+    writeFileSync(join(template.dir, ".git", CACHE_META_FILENAME), JSON.stringify(meta));
+
+    mkdirSync(SHAPE_CACHE_DIR, { recursive: true });
+    const building = `${cached}.building-${process.pid}`;
+    rmSync(building, { recursive: true, force: true });
+    rmSync(cached, { recursive: true, force: true });
+    execFileSync("mv", [template.dir, building]);
+    execFileSync("mv", [building, cached]);
+  }
+
+  const dest = tempRepoDir(name);
+  cpSync(cached, dest, { recursive: true });
+  const meta = JSON.parse(readFileSync(metaPath, "utf8")) as Omit<T, "dir">;
+  return { ...meta, dir: dest } as T;
+}
 
 /** Trivial baseline: `n` commits on a single branch. For parser tests and smoke tests. */
 export function linear(n: number): GeneratedRepo {
-  const repo = new Repo(tempRepoDir("linear"));
-  repo.init("main");
-  const commits: string[] = [];
-  for (let i = 0; i < n; i++) {
-    repo.writeFile("file.txt", `line ${i}\n`);
-    repo.add("file.txt");
-    commits.push(repo.commit(`commit ${i}`));
-  }
-  return { dir: repo.dir, commits, refs: { main: repo.head() } };
+  return cachedShape("linear", { n }, () => {
+    const repo = new Repo(tempRepoDir("linear"));
+    repo.init("main");
+    const commits: string[] = [];
+    for (let i = 0; i < n; i++) {
+      repo.writeFile("file.txt", `line ${i}\n`);
+      repo.add("file.txt");
+      commits.push(repo.commit(`commit ${i}`));
+    }
+    return { dir: repo.dir, commits, refs: { main: repo.head() } };
+  });
 }
 
 export interface DetailWorkloadOptions {
@@ -180,51 +276,53 @@ export interface DetailWorkloadOptions {
  */
 export function detailWorkload(opts: DetailWorkloadOptions = {}): GeneratedRepo {
   const { commitCount = 20, manyFilesCount = 500 } = opts;
-  const repo = new Repo(tempRepoDir("detail-workload"));
-  repo.init("main");
-  const commits: string[] = [];
+  return cachedShape("detailWorkload", { commitCount, manyFilesCount }, () => {
+    const repo = new Repo(tempRepoDir("detail-workload"));
+    repo.init("main");
+    const commits: string[] = [];
 
-  repo.writeFile("README.md", "root\n");
-  repo.add("README.md");
-  commits.push(repo.commit("root"));
+    repo.writeFile("README.md", "root\n");
+    repo.add("README.md");
+    commits.push(repo.commit("root"));
 
-  repo.checkoutNew("feature/detail");
-  repo.writeFile("feature.txt", "feature work\n");
-  repo.add("feature.txt");
-  commits.push(repo.commit("feature commit"));
-  const featureSha = repo.head();
+    repo.checkoutNew("feature/detail");
+    repo.writeFile("feature.txt", "feature work\n");
+    repo.add("feature.txt");
+    commits.push(repo.commit("feature commit"));
+    const featureSha = repo.head();
 
-  repo.checkout("main");
-  repo.writeFile("main.txt", "main work\n");
-  repo.add("main.txt");
-  commits.push(repo.commit("main commit before merge"));
-
-  commits.push(repo.merge("Merge feature/detail into main", [featureSha])); // the one merge
-
-  // The one many-files commit — its first file (`generated/file-0000.ts`) carries 5,000 lines
-  // rather than one, so the same commit also supplies `fileDiffMs`'s own "one 5,000-line file".
-  mkdirSync(join(repo.dir, "generated"), { recursive: true });
-  for (let i = 0; i < manyFilesCount; i++) {
-    const lineCount = i === 0 ? 5000 : 1;
-    const lines = Array.from(
-      { length: lineCount },
-      (_, line) => `export const line${line} = ${i};`,
-    );
-    repo.writeFile(`generated/file-${String(i).padStart(4, "0")}.ts`, `${lines.join("\n")}\n`);
-  }
-  repo.add("generated");
-  commits.push(repo.commit(`add ${manyFilesCount} generated files`));
-
-  // Simple single-file edits fill out the rest of `commitCount`.
-  let i = 0;
-  while (commits.length < commitCount) {
-    repo.writeFile("main.txt", `main work ${i}\n`);
+    repo.checkout("main");
+    repo.writeFile("main.txt", "main work\n");
     repo.add("main.txt");
-    commits.push(repo.commit(`main commit ${i}`));
-    i++;
-  }
+    commits.push(repo.commit("main commit before merge"));
 
-  return { dir: repo.dir, commits, refs: { main: repo.head(), "feature/detail": featureSha } };
+    commits.push(repo.merge("Merge feature/detail into main", [featureSha])); // the one merge
+
+    // The one many-files commit — its first file (`generated/file-0000.ts`) carries 5,000 lines
+    // rather than one, so the same commit also supplies `fileDiffMs`'s own "one 5,000-line file".
+    mkdirSync(join(repo.dir, "generated"), { recursive: true });
+    for (let i = 0; i < manyFilesCount; i++) {
+      const lineCount = i === 0 ? 5000 : 1;
+      const lines = Array.from(
+        { length: lineCount },
+        (_, line) => `export const line${line} = ${i};`,
+      );
+      repo.writeFile(`generated/file-${String(i).padStart(4, "0")}.ts`, `${lines.join("\n")}\n`);
+    }
+    repo.add("generated");
+    commits.push(repo.commit(`add ${manyFilesCount} generated files`));
+
+    // Simple single-file edits fill out the rest of `commitCount`.
+    let i = 0;
+    while (commits.length < commitCount) {
+      repo.writeFile("main.txt", `main work ${i}\n`);
+      repo.add("main.txt");
+      commits.push(repo.commit(`main commit ${i}`));
+      i++;
+    }
+
+    return { dir: repo.dir, commits, refs: { main: repo.head(), "feature/detail": featureSha } };
+  });
 }
 
 export interface BranchyOptions {
@@ -237,60 +335,64 @@ export interface BranchyOptions {
 /** Lane layout: a main branch and one parallel feature branch, merged back. */
 export function branchy(opts: BranchyOptions = {}): GeneratedRepo {
   const { mainCommits = 3, featureCommits = 2, mergeBack = true } = opts;
-  const repo = new Repo(tempRepoDir("branchy"));
-  repo.init("main");
-  const commits: string[] = [];
+  return cachedShape("branchy", { mainCommits, featureCommits, mergeBack }, () => {
+    const repo = new Repo(tempRepoDir("branchy"));
+    repo.init("main");
+    const commits: string[] = [];
 
-  for (let i = 0; i < mainCommits; i++) {
-    repo.writeFile("main.txt", `main ${i}\n`);
+    for (let i = 0; i < mainCommits; i++) {
+      repo.writeFile("main.txt", `main ${i}\n`);
+      repo.add("main.txt");
+      commits.push(repo.commit(`main commit ${i}`));
+    }
+
+    repo.checkoutNew("feature/a");
+    for (let i = 0; i < featureCommits; i++) {
+      repo.writeFile("feature.txt", `feature ${i}\n`);
+      repo.add("feature.txt");
+      commits.push(repo.commit(`feature commit ${i}`));
+    }
+    const featureSha = repo.head();
+
+    repo.checkout("main");
+    repo.writeFile("main.txt", "main after branch\n");
     repo.add("main.txt");
-    commits.push(repo.commit(`main commit ${i}`));
-  }
+    commits.push(repo.commit("main commit after branch"));
 
-  repo.checkoutNew("feature/a");
-  for (let i = 0; i < featureCommits; i++) {
-    repo.writeFile("feature.txt", `feature ${i}\n`);
-    repo.add("feature.txt");
-    commits.push(repo.commit(`feature commit ${i}`));
-  }
-  const featureSha = repo.head();
-
-  repo.checkout("main");
-  repo.writeFile("main.txt", "main after branch\n");
-  repo.add("main.txt");
-  commits.push(repo.commit("main commit after branch"));
-
-  const refs: Record<string, string> = { main: repo.head(), "feature/a": featureSha };
-  if (mergeBack) {
-    commits.push(repo.merge("Merge feature/a into main", ["feature/a"]));
-    refs.main = repo.head();
-  }
-  return { dir: repo.dir, commits, refs };
+    const refs: Record<string, string> = { main: repo.head(), "feature/a": featureSha };
+    if (mergeBack) {
+      commits.push(repo.merge("Merge feature/a into main", ["feature/a"]));
+      refs.main = repo.head();
+    }
+    return { dir: repo.dir, commits, refs };
+  });
 }
 
 /** A merge commit with 3+ parents — the case naive layout algorithms get wrong. */
 export function octopus(): GeneratedRepo {
-  const repo = new Repo(tempRepoDir("octopus"));
-  repo.init("main");
-  const commits: string[] = [];
+  return cachedShape("octopus", {}, () => {
+    const repo = new Repo(tempRepoDir("octopus"));
+    repo.init("main");
+    const commits: string[] = [];
 
-  repo.writeFile("base.txt", "base\n");
-  repo.add("base.txt");
-  commits.push(repo.commit("base commit"));
-  const base = repo.head();
+    repo.writeFile("base.txt", "base\n");
+    repo.add("base.txt");
+    commits.push(repo.commit("base commit"));
+    const base = repo.head();
 
-  const branches = ["topic/a", "topic/b", "topic/c"];
-  for (const branch of branches) {
-    repo.checkoutNew(branch, base);
-    repo.writeFile(`${branch.replace("/", "-")}.txt`, `${branch}\n`);
-    repo.add(`${branch.replace("/", "-")}.txt`);
-    commits.push(repo.commit(`${branch} commit`));
-  }
+    const branches = ["topic/a", "topic/b", "topic/c"];
+    for (const branch of branches) {
+      repo.checkoutNew(branch, base);
+      repo.writeFile(`${branch.replace("/", "-")}.txt`, `${branch}\n`);
+      repo.add(`${branch.replace("/", "-")}.txt`);
+      commits.push(repo.commit(`${branch} commit`));
+    }
 
-  repo.checkout("main");
-  commits.push(repo.merge("Octopus merge", branches));
+    repo.checkout("main");
+    commits.push(repo.merge("Octopus merge", branches));
 
-  return { dir: repo.dir, commits, refs: { main: repo.head() } };
+    return { dir: repo.dir, commits, refs: { main: repo.head() } };
+  });
 }
 
 /**
@@ -298,41 +400,43 @@ export function octopus(): GeneratedRepo {
  * lowest common ancestors, so a naive merge-base lookup is ambiguous.
  */
 export function crissCross(): GeneratedRepo {
-  const repo = new Repo(tempRepoDir("criss-cross"));
-  repo.init("main");
-  const commits: string[] = [];
+  return cachedShape("crissCross", {}, () => {
+    const repo = new Repo(tempRepoDir("criss-cross"));
+    repo.init("main");
+    const commits: string[] = [];
 
-  // A common base, then two sibling commits B (main) and C (branch-b) both parented
-  // directly on A — not on each other — so a later cross-merge has two candidate lowest
-  // common ancestors instead of one.
-  repo.writeFile("shared.txt", "base\n");
-  repo.add("shared.txt");
-  const baseSha = repo.commit("base commit"); // A
-  commits.push(baseSha);
+    // A common base, then two sibling commits B (main) and C (branch-b) both parented
+    // directly on A — not on each other — so a later cross-merge has two candidate lowest
+    // common ancestors instead of one.
+    repo.writeFile("shared.txt", "base\n");
+    repo.add("shared.txt");
+    const baseSha = repo.commit("base commit"); // A
+    commits.push(baseSha);
 
-  repo.writeFile("a.txt", "a1\n");
-  repo.add("a.txt");
-  commits.push(repo.commit("a1")); // B, main tip
-  const bSha = repo.head();
+    repo.writeFile("a.txt", "a1\n");
+    repo.add("a.txt");
+    commits.push(repo.commit("a1")); // B, main tip
+    const bSha = repo.head();
 
-  repo.checkoutNew("branch-b", baseSha);
-  repo.writeFile("b.txt", "b1\n");
-  repo.add("b.txt");
-  commits.push(repo.commit("b1")); // C, branch-b tip
+    repo.checkoutNew("branch-b", baseSha);
+    repo.writeFile("b.txt", "b1\n");
+    repo.add("b.txt");
+    commits.push(repo.commit("b1")); // C, branch-b tip
 
-  // Cross-merge: main pulls in C (parents: B, C) ...
-  repo.checkout("main");
-  commits.push(repo.merge("main merges branch-b", ["branch-b"])); // D, parents [B, C]
+    // Cross-merge: main pulls in C (parents: B, C) ...
+    repo.checkout("main");
+    commits.push(repo.merge("main merges branch-b", ["branch-b"])); // D, parents [B, C]
 
-  // ... and branch-b pulls in B, not D (parents: C, B) — the criss-cross.
-  repo.checkout("branch-b");
-  commits.push(repo.merge("branch-b merges main@B", [bSha])); // E, parents [C, B]
+    // ... and branch-b pulls in B, not D (parents: C, B) — the criss-cross.
+    repo.checkout("branch-b");
+    commits.push(repo.merge("branch-b merges main@B", [bSha])); // E, parents [C, B]
 
-  return {
-    dir: repo.dir,
-    commits,
-    refs: { main: repo.refSha("main"), "branch-b": repo.head() },
-  };
+    return {
+      dir: repo.dir,
+      commits,
+      refs: { main: repo.refSha("main"), "branch-b": repo.head() },
+    };
+  });
 }
 
 export interface WithStashOptions {
@@ -341,21 +445,24 @@ export interface WithStashOptions {
 
 /** A repo with a stash entry on top of a couple of commits, including an -u variant. */
 export function withStash(opts: WithStashOptions = {}): GeneratedRepo {
-  const repo = new Repo(tempRepoDir("with-stash"));
-  repo.init("main");
-  const commits: string[] = [];
+  const includeUntracked = opts.includeUntracked ?? false;
+  return cachedShape("withStash", { includeUntracked }, () => {
+    const repo = new Repo(tempRepoDir("with-stash"));
+    repo.init("main");
+    const commits: string[] = [];
 
-  repo.writeFile("tracked.txt", "committed\n");
-  repo.add("tracked.txt");
-  commits.push(repo.commit("initial commit"));
+    repo.writeFile("tracked.txt", "committed\n");
+    repo.add("tracked.txt");
+    commits.push(repo.commit("initial commit"));
 
-  repo.writeFile("tracked.txt", "dirty change\n");
-  if (opts.includeUntracked) {
-    repo.writeFile("untracked.txt", "new file\n");
-  }
-  repo.stashPush("fixture stash", opts.includeUntracked ? { includeUntracked: true } : {});
+    repo.writeFile("tracked.txt", "dirty change\n");
+    if (includeUntracked) {
+      repo.writeFile("untracked.txt", "new file\n");
+    }
+    repo.stashPush("fixture stash", includeUntracked ? { includeUntracked: true } : {});
 
-  return { dir: repo.dir, commits, refs: { main: repo.head() } };
+    return { dir: repo.dir, commits, refs: { main: repo.head() } };
+  });
 }
 
 export interface ConflictingOptions {
@@ -365,29 +472,31 @@ export interface ConflictingOptions {
 /** A pair of branches guaranteed to conflict on a known file, for preflight/merge-tree tests. */
 export function conflicting(opts: ConflictingOptions = {}): GeneratedRepo {
   const path = opts.path ?? "conflict.txt";
-  const repo = new Repo(tempRepoDir("conflicting"));
-  repo.init("main");
-  const commits: string[] = [];
+  return cachedShape("conflicting", { path }, () => {
+    const repo = new Repo(tempRepoDir("conflicting"));
+    repo.init("main");
+    const commits: string[] = [];
 
-  repo.writeFile(path, "base line\n");
-  repo.add(path);
-  commits.push(repo.commit("base commit"));
+    repo.writeFile(path, "base line\n");
+    repo.add(path);
+    commits.push(repo.commit("base commit"));
 
-  repo.checkoutNew("branch-theirs");
-  repo.writeFile(path, "theirs line\n");
-  repo.add(path);
-  commits.push(repo.commit("theirs change"));
+    repo.checkoutNew("branch-theirs");
+    repo.writeFile(path, "theirs line\n");
+    repo.add(path);
+    commits.push(repo.commit("theirs change"));
 
-  repo.checkout("main");
-  repo.writeFile(path, "ours line\n");
-  repo.add(path);
-  commits.push(repo.commit("ours change"));
+    repo.checkout("main");
+    repo.writeFile(path, "ours line\n");
+    repo.add(path);
+    commits.push(repo.commit("ours change"));
 
-  return {
-    dir: repo.dir,
-    commits,
-    refs: { main: repo.head(), "branch-theirs": repo.refSha("branch-theirs") },
-  };
+    return {
+      dir: repo.dir,
+      commits,
+      refs: { main: repo.head(), "branch-theirs": repo.refSha("branch-theirs") },
+    };
+  });
 }
 
 export interface WithRemoteOptions {
@@ -478,42 +587,50 @@ export interface GeneratedRepoWithInProgressRevert extends GeneratedRepo {
  *  a change (the commit that gets reverted), then a *further* change to the same line — reverting
  *  the middle commit after the tip has moved the same line again is exactly what makes git unable
  *  to apply the inverse patch cleanly. */
+/**
+ * P6a W3: cached, unlike withRemote()/withWorktree() above — read directly, its in-progress
+ * state lives entirely in `.git/{REVERT_HEAD,MERGE_MSG,sequencer/}` and the index, none of which
+ * carries an absolute path, so a `cpSync`'d copy is a faithful, independently mutable conflict
+ * every time.
+ */
 export function inProgressRevert(): GeneratedRepoWithInProgressRevert {
   const path = "conflict.txt";
-  const repo = new Repo(tempRepoDir("in-progress-revert"));
-  repo.init("main");
-  const commits: string[] = [];
+  return cachedShape("inProgressRevert", {}, () => {
+    const repo = new Repo(tempRepoDir("in-progress-revert"));
+    repo.init("main");
+    const commits: string[] = [];
 
-  repo.writeFile(path, "base line\n");
-  repo.add(path);
-  commits.push(repo.commit("base commit"));
+    repo.writeFile(path, "base line\n");
+    repo.add(path);
+    commits.push(repo.commit("base commit"));
 
-  repo.writeFile(path, "changed by the commit we will revert\n");
-  repo.add(path);
-  const revertedSha = repo.commit("change to revert");
-  commits.push(revertedSha);
+    repo.writeFile(path, "changed by the commit we will revert\n");
+    repo.add(path);
+    const revertedSha = repo.commit("change to revert");
+    commits.push(revertedSha);
 
-  repo.writeFile(path, "changed again after that, on top\n");
-  repo.add(path);
-  commits.push(repo.commit("further change on the same line"));
+    repo.writeFile(path, "changed again after that, on top\n");
+    repo.add(path);
+    commits.push(repo.commit("further change on the same line"));
 
-  try {
-    repo.git(["revert", "--no-gpg-sign", "--no-edit", revertedSha]);
-    throw new Error("generateRepo.inProgressRevert(): revert did not conflict as designed");
-  } catch (error) {
-    // `execFileSync` throws on git's non-zero exit — the conflict this fixture exists to
-    // produce, not a real failure. Anything else (e.g. this file's own "did not conflict"
-    // throw above, which carries no `status`) rethrows rather than being swallowed.
-    if (!(error instanceof Error) || !("status" in error)) throw error;
-  }
+    try {
+      repo.git(["revert", "--no-gpg-sign", "--no-edit", revertedSha]);
+      throw new Error("generateRepo.inProgressRevert(): revert did not conflict as designed");
+    } catch (error) {
+      // `execFileSync` throws on git's non-zero exit — the conflict this fixture exists to
+      // produce, not a real failure. Anything else (e.g. this file's own "did not conflict"
+      // throw above, which carries no `status`) rethrows rather than being swallowed.
+      if (!(error instanceof Error) || !("status" in error)) throw error;
+    }
 
-  return {
-    dir: repo.dir,
-    commits,
-    refs: { main: repo.refSha("main") },
-    revertedSha,
-    conflictedPath: path,
-  };
+    return {
+      dir: repo.dir,
+      commits,
+      refs: { main: repo.refSha("main") },
+      revertedSha,
+      conflictedPath: path,
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------------------
@@ -525,6 +642,11 @@ export function inProgressRevert(): GeneratedRepoWithInProgressRevert {
 // repositories this fixture generates and owns, not a user's `.git`.
 // ---------------------------------------------------------------------------------------
 
+// Own subdirectory, sibling to SHAPE_CACHE_DIR above — so clearLargeCache() (called mid-test by
+// largeBranchy.test.ts's own determinism check) clears only what it always cleared, not every
+// small-shape template test:integration relies on for speed.
+const LARGE_CACHE_DIR = join(CACHE_DIR, "large");
+
 export interface LargeRepoOptions {
   /** `git commit-graph write --reachable --split` after generation (default true — see the
    *  module comment above). Set false to get the "no commit-graph" configuration W13/W15
@@ -534,7 +656,7 @@ export interface LargeRepoOptions {
 
 function cacheKey(prefix: string, n: number, opts: Required<LargeRepoOptions>): string {
   return createHash("sha256")
-    .update(`${prefix}:${n}:v2:graph=${opts.commitGraph}`)
+    .update(`${SOURCE_HASH}:${prefix}:${n}:graph=${opts.commitGraph}`)
     .digest("hex")
     .slice(0, 16);
 }
@@ -568,7 +690,7 @@ function buildFastImportStream(n: number): string {
 /** Builds `building` from a fast-import stream, repacks, optionally writes a commit-graph,
  *  then atomically installs it at `cached`. Shared by `large()` and `largeBranchy()`. */
 function buildAndInstall(cached: string, stream: string, opts: Required<LargeRepoOptions>): string {
-  mkdirSync(CACHE_DIR, { recursive: true });
+  mkdirSync(LARGE_CACHE_DIR, { recursive: true });
   const building = `${cached}.building-${process.pid}`;
   rmSync(building, { recursive: true, force: true });
   const repo = new Repo(building);
@@ -598,10 +720,13 @@ const DEFAULT_LARGE_REPO_OPTIONS: Required<LargeRepoOptions> = { commitGraph: tr
  * for 100k commits. Cached under tests/fixtures/.cache/, keyed by the generator inputs,
  * so it is built once per machine.
  */
+function largeCachePath(n: number, opts: Required<LargeRepoOptions>): string {
+  return join(LARGE_CACHE_DIR, cacheKey("large", n, opts));
+}
+
 export function large(n: number, opts: LargeRepoOptions = {}): GeneratedRepo {
   const resolved = { ...DEFAULT_LARGE_REPO_OPTIONS, ...opts };
-  const key = cacheKey("large", n, resolved);
-  const cached = join(CACHE_DIR, key);
+  const cached = largeCachePath(n, resolved);
 
   if (existsSync(join(cached, ".git"))) {
     const repo = new Repo(cached);
@@ -704,12 +829,20 @@ function buildLargeBranchyStream(n: number, branchCount: number, commitsPerRound
   return lines.join("\n");
 }
 
+function largeBranchyCachePath(
+  n: number,
+  branchCount: number,
+  commitsPerRound: number,
+  opts: Required<LargeRepoOptions>,
+): string {
+  return join(LARGE_CACHE_DIR, cacheKey(`largeBranchy:${branchCount}:${commitsPerRound}`, n, opts));
+}
+
 export function largeBranchy(n: number, opts: LargeBranchyOptions = {}): GeneratedRepo {
   const branchCount = opts.branchCount ?? 12;
   const commitsPerRound = opts.commitsPerRound ?? 200;
   const resolved = { commitGraph: opts.commitGraph ?? DEFAULT_LARGE_REPO_OPTIONS.commitGraph };
-  const key = cacheKey(`largeBranchy:${branchCount}:${commitsPerRound}`, n, resolved);
-  const cached = join(CACHE_DIR, key);
+  const cached = largeBranchyCachePath(n, branchCount, commitsPerRound, resolved);
 
   if (existsSync(join(cached, ".git"))) {
     const repo = new Repo(cached);
@@ -721,11 +854,57 @@ export function largeBranchy(n: number, opts: LargeBranchyOptions = {}): Generat
   return { dir: cached, commits: [], refs: { main: headSha } };
 }
 
-/** Removes every cached large()/largeBranchy() repo. Exposed for tests that need a clean cache. */
+/**
+ * Removes every cached large()/largeBranchy() repo (LARGE_CACHE_DIR only — the small shapes'
+ * own SHAPE_CACHE_DIR, cached by cachedShape() since P6a W3, is untouched, so this doesn't
+ * undo W3's win for whatever else is running). Exposed for tests that need a clean cache, and
+ * as the manual escape hatch a stale template (e.g. mid-`.building-<pid>` after a killed
+ * process) can't self-heal from. `clearFixtureCache()` below is the escape hatch for
+ * everything.
+ */
 export function clearLargeCache(): void {
-  if (existsSync(CACHE_DIR)) {
-    for (const entry of readdirSync(CACHE_DIR)) {
-      rmSync(join(CACHE_DIR, entry), { recursive: true, force: true });
+  clearCacheDir(LARGE_CACHE_DIR);
+}
+
+/**
+ * Removes only the one cache entry a specific `large(n, opts)` or `largeBranchy(n, opts)` call
+ * would use, leaving every other cached large repo (crucially, the 100k/PAGE_SIZE templates
+ * `historyPipeline.test.ts`/`packedChunk.test.ts` depend on for speed) untouched.
+ *
+ * P6a W3 finding: `largeBranchy.test.ts`'s determinism check needs a guaranteed-cold rebuild of
+ * its own small (n=300) repo, twice, and both self-test files want to clean up the small entries
+ * they create — neither actually needs `clearLargeCache()`'s indiscriminate full-directory wipe,
+ * which used to force the two integration tests above to pay a ~10s cold rebuild on every `bun
+ * run test` (test:unit's fixture self-tests always ran, and always wiped, before test:integration
+ * ever got a chance to read the cache). This is the scoped alternative those two self-tests use
+ * instead.
+ */
+export function clearLargeCacheEntry(
+  kind: "large" | "largeBranchy",
+  n: number,
+  opts: LargeBranchyOptions = {},
+): void {
+  const resolved = { commitGraph: opts.commitGraph ?? DEFAULT_LARGE_REPO_OPTIONS.commitGraph };
+  const cached =
+    kind === "large"
+      ? largeCachePath(n, resolved)
+      : largeBranchyCachePath(n, opts.branchCount ?? 12, opts.commitsPerRound ?? 200, resolved);
+  rmSync(cached, { recursive: true, force: true });
+}
+
+/** Removes every cached template of every kind — large()/largeBranchy()'s and the small shapes'
+ *  alike. The manual escape hatch for `generateRepo.ts` changes that a cache-key edit alone
+ *  can't invalidate (the key already folds in this file's own source hash — see SOURCE_HASH —
+ *  so that case should be rare). */
+export function clearFixtureCache(): void {
+  clearCacheDir(LARGE_CACHE_DIR);
+  clearCacheDir(SHAPE_CACHE_DIR);
+}
+
+function clearCacheDir(dir: string): void {
+  if (existsSync(dir)) {
+    for (const entry of readdirSync(dir)) {
+      rmSync(join(dir, entry), { recursive: true, force: true });
     }
   }
 }
