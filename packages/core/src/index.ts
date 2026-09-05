@@ -69,6 +69,13 @@ export type {
 } from "./model/operation.ts";
 export { canRunOp, classifyInProgress, describeInProgress } from "./model/operation.ts";
 export type { RefKind, RefRecord, RefTrack, TagAnnotation } from "./model/ref.ts";
+export type {
+  BaseCandidate,
+  BaseResolutionCore,
+  BaseResolutionReason,
+  ResolveBaseInput,
+} from "./model/review.ts";
+export { resolveBase } from "./model/review.ts";
 export type { HeadState, RepoIdentity } from "./model/repo.ts";
 export type { StashEntry } from "./model/stash.ts";
 export { isAnnotated, tagTargetCommit } from "./model/tag.ts";
