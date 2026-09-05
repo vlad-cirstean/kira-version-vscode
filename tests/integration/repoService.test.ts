@@ -1501,6 +1501,76 @@ describe("RepoService — runOp() executor (P6 W8)", () => {
     }
   });
 
+  test("branchDelete undo restores upstream tracking config, not just the ref (P6 W22 exit criteria)", async () => {
+    const repo = branchy();
+    const env = baseEnv(repo.dir);
+    // Arbitrary tracking config directly on the branch-to-be-deleted — undo's capture reads
+    // back whatever `branch.<name>.*` keys exist via `--get-regexp`, so this exercises the same
+    // path a real `--track`'d branch would, without needing a real remote wired up.
+    execFileSync("git", ["config", "branch.feature/a.remote", "origin"], {
+      cwd: repo.dir,
+      env,
+    });
+    execFileSync("git", ["config", "branch.feature/a.merge", "refs/heads/main"], {
+      cwd: repo.dir,
+      env,
+    });
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: settingsWithPageSize(10),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const del = await service.runOp(repoId, {
+        kind: "branchDelete",
+        name: "feature/a",
+        force: true,
+      });
+      expect(del.ok).toBe(true);
+
+      // Deleting the branch also deletes its config in real git — confirms the "before" state
+      // this test is actually exercising, not just asserting the replay blindly.
+      let configSurvivedDelete = true;
+      try {
+        execFileSync("git", ["config", "--get", "branch.feature/a.remote"], {
+          cwd: repo.dir,
+          env,
+          encoding: "utf8",
+        });
+      } catch {
+        configSurvivedDelete = false;
+      }
+      expect(configSurvivedDelete).toBe(false);
+
+      const undoId = del.undo?.id;
+      if (undoId === undefined) throw new Error("unreachable");
+      const undone = await service.undoRun(repoId, undoId);
+      expect(undone.ok).toBe(true);
+
+      const remote = execFileSync("git", ["config", "--get", "branch.feature/a.remote"], {
+        cwd: repo.dir,
+        env,
+        encoding: "utf8",
+      }).trim();
+      const merge = execFileSync("git", ["config", "--get", "branch.feature/a.merge"], {
+        cwd: repo.dir,
+        env,
+        encoding: "utf8",
+      }).trim();
+      expect(remote).toBe("origin");
+      expect(merge).toBe("refs/heads/main");
+    } finally {
+      service.dispose();
+    }
+  });
+
   test("tagDelete undo round-trips an annotated tag back to the same object", async () => {
     const repo = branchy();
     const env = {
