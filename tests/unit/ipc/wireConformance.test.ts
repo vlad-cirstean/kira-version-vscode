@@ -12,6 +12,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type {
+  CommitRecord,
   CommitIdentity as CoreCommitIdentity,
   DecorationRef as CoreDecorationRef,
   FileChange as CoreFileChange,
@@ -43,8 +44,12 @@ import {
   type Settings as CoreSettings,
   defaultSettings,
 } from "../../../packages/core/src/settings/schema.ts";
+import { CommitStore } from "../../../packages/core/src/store/commitStore.ts";
 import type { GitErrorKind as CoreGitErrorKind } from "../../../packages/git/src/errors.ts";
+import type { BufferEncoding } from "../../../packages/ipc/src/codec.ts";
+import { decode, encode } from "../../../packages/ipc/src/codec.ts";
 import type {
+  PackedCommitChunk,
   CheckoutPreflight as WireCheckoutPreflight,
   CommitIdentity as WireCommitIdentity,
   CommitTrailer as WireCommitTrailer,
@@ -66,6 +71,7 @@ import type {
   TagAnnotation as WireTagAnnotation,
   UndoSlotSnapshot as WireUndoSlotSnapshot,
 } from "../../../packages/ipc/src/contract.ts";
+import { topology } from "../../fixtures/topology.ts";
 
 /** Never called — its only job is to make the assignments inside it part of the compiled
  *  program, so a type mismatch is a `tsc` error rather than dead code eliminated before it
@@ -367,5 +373,136 @@ describe("ipc wire conformance", () => {
     const kind: CoreGitErrorKind = "Conflict";
     const wire: WireOpErrorKind = kind;
     expect(wire).toBe(kind);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// P15 W7 — a *runtime* round trip over the real transport boundary, per D37. Everything above
+// this line is compile-time only (`assertBothWays` bodies that never run, catching core/ipc
+// *shape* drift via `tsc`); this section catches drift in what actually crosses the wire —
+// encode -> the real boundary a channel of each `BufferEncoding` actually puts a message
+// through ("base64": `JSON.stringify`/`JSON.parse`; "native": `structuredClone`) -> decode ->
+// `appendPacked`. Built from a real `CommitStore`, not a hand-written literal, since a literal
+// could drift from what `packSlice` actually produces without anyone noticing.
+// ---------------------------------------------------------------------------------------
+
+const PACKED_COLUMNS = [
+  "shas",
+  "parentOffsets",
+  "parentShas",
+  "identityIds",
+  "times",
+  "subjectBytes",
+  "subjectOffsets",
+] as const;
+
+/** What a channel declaring `encoding` actually does to a message between `post` and the other
+ *  side's `onMessage` — mirrors `rpc.ts`'s `post`/`receive` exactly, so this is the same boundary
+ *  a real transport puts a `PackedCommitChunk` through, not an in-process stand-in for it. */
+function crossRealBoundary<T>(message: T, encoding: BufferEncoding): T {
+  const { payload, transfer } = encode(message, encoding);
+  const wire =
+    encoding === "native"
+      ? structuredClone(payload, { transfer: transfer as ArrayBuffer[] })
+      : JSON.parse(JSON.stringify(payload));
+  return decode<T>(wire, encoding);
+}
+
+/** A plain-number-array copy of every column — taken *before* a "native" round trip, since that
+ *  transfers (and so detaches) the chunk's own buffers; comparing against this snapshot rather
+ *  than against the original chunk after the fact is what makes the "native" case testable at
+ *  all here. */
+function snapshotColumns(
+  chunk: PackedCommitChunk,
+): Readonly<Record<(typeof PACKED_COLUMNS)[number], number[]>> {
+  const snapshot = {} as Record<(typeof PACKED_COLUMNS)[number], number[]>;
+  for (const column of PACKED_COLUMNS) snapshot[column] = Array.from(new Uint8Array(chunk[column]));
+  return snapshot;
+}
+
+function expectColumnsMatchSnapshot(
+  snapshot: Readonly<Record<(typeof PACKED_COLUMNS)[number], number[]>>,
+  chunk: PackedCommitChunk,
+): void {
+  for (const column of PACKED_COLUMNS) {
+    expect(Array.from(new Uint8Array(chunk[column]))).toEqual(snapshot[column]);
+  }
+}
+
+describe("ipc wire conformance — runtime round trip over the real boundary (P15 W7)", () => {
+  const records: readonly CommitRecord[] = topology([
+    "root",
+    "left:root",
+    "right:root",
+    "merge:left,right",
+  ]).map((record, i) => ({
+    ...record,
+    // Non-ASCII subject bytes (W2's edge case), a couple of scripts plus an emoji so the UTF-8
+    // encoding genuinely spans one, two, three and four-byte sequences.
+    subject: `${record.subject} — 日本語 émoji 🎉 (#${i})`,
+  }));
+
+  for (const encoding of ["native", "base64"] as const) {
+    test(`a real PackedCommitChunk survives '${encoding}' byte-identically and appendPacked accepts it`, () => {
+      const source = new CommitStore();
+      source.appendPage(records);
+      const chunk = source.packSlice(0, source.rowCount, 0);
+      const snapshot = snapshotColumns(chunk);
+
+      const result = crossRealBoundary(chunk, encoding);
+      expectColumnsMatchSnapshot(snapshot, result);
+
+      const receiver = new CommitStore();
+      const appended = receiver.appendPacked(result);
+      expect(appended.to).toBe(source.rowCount);
+      for (let row = 0; row < source.rowCount; row++) {
+        expect(receiver.shaAt(row)).toBe(source.shaAt(row));
+        expect(receiver.subjectAt(row)).toBe(source.subjectAt(row));
+        expect(Array.from(receiver.parentsOf(row))).toEqual(Array.from(source.parentsOf(row)));
+      }
+      // The non-ASCII subject specifically, not just "some subject" — this is the byte
+      // comparison that would fail if base64's UTF-8 handling silently mangled it.
+      expect(receiver.subjectAt(0)).toBe(source.subjectAt(0));
+      expect(receiver.subjectAt(0)).toContain("日本語 émoji 🎉");
+    });
+  }
+
+  test("a single root commit's empty parentShas survives both encodings", () => {
+    const source = new CommitStore();
+    source.appendPage(topology(["only-root"]));
+
+    for (const encoding of ["native", "base64"] as const) {
+      // A fresh packSlice per iteration: "native" transfers (and so detaches) its input, and a
+      // detached buffer cannot be encoded again on the next iteration.
+      const chunk = source.packSlice(0, source.rowCount, 0);
+      expect(chunk.parentShas.byteLength).toBe(0);
+
+      const result = crossRealBoundary(chunk, encoding);
+      expect(result.parentShas.byteLength).toBe(0);
+      const receiver = new CommitStore();
+      receiver.appendPacked(result);
+      expect(Array.from(receiver.parentsOf(0))).toEqual([]);
+    }
+  });
+
+  test('a chunk where the same buffer appears twice still round-trips under "base64" (native already throws, codec.test.ts)', () => {
+    const source = new CommitStore();
+    source.appendPage(records);
+    const chunk = source.packSlice(0, source.rowCount, 0);
+    // Not a shape `packSlice` itself ever produces (every field is freshly allocated) — a
+    // synthetic alias, forcing the exact case `dedupeTransferList` exists to catch under
+    // "native" and that "base64" has no concept of (its transfer list is always empty).
+    const aliased: PackedCommitChunk = { ...chunk, parentShas: chunk.shas };
+
+    const result = crossRealBoundary(aliased, "base64");
+    expect(new Uint8Array(result.shas)).toEqual(new Uint8Array(chunk.shas));
+    expect(new Uint8Array(result.parentShas)).toEqual(new Uint8Array(chunk.shas));
+  });
+
+  test('a Uint8Array (not a bare ArrayBuffer) survives the "base64" boundary as itself — the assumption toWireSafe used to carry, discharged rather than inherited', () => {
+    const view = new Uint8Array([0, 1, 2, 253, 254, 255]);
+    const result = crossRealBoundary({ view }, "base64");
+    expect(result.view).toBeInstanceOf(Uint8Array);
+    expect(Array.from(result.view)).toEqual(Array.from(view));
   });
 });
