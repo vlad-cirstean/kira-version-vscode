@@ -16,6 +16,7 @@ import type {
   SpawnRequest,
 } from "@kira-version/core";
 import { locateGit, type ResolvedGit } from "./discovery.ts";
+import type { CatFileSession } from "./driver.ts";
 
 export class FakeProcess implements SpawnedProcess {
   readonly stdout: AsyncIterable<Uint8Array>;
@@ -174,6 +175,21 @@ export async function fakeResolvedGit(version = "2.45.0"): Promise<ResolvedGit> 
   const resolution = await resultPromise;
   if (resolution.kind !== "ok") throw new Error(`unexpected resolution: ${resolution.kind}`);
   return resolution.git;
+}
+
+/** A `CatFileSession` that answers every request `missing` and spawns nothing — for a test
+ *  whose `GitDriver` needs *a* `catFile` to construct but never actually reads a blob through
+ *  it (P5 W3 widened the interface from a bare `Disposable`). */
+export function noopCatFileSession(): CatFileSession {
+  return {
+    dispose(): void {},
+    async read(oid: string) {
+      return { kind: "missing", oid } as const;
+    },
+    async check(oid: string) {
+      return { kind: "missing", oid } as const;
+    },
+  };
 }
 
 /**

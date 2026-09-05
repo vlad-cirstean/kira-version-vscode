@@ -61,6 +61,18 @@ async function collectOneShot(read: GitRead): Promise<Uint8Array> {
   return bytes;
 }
 
+/** Strips a single trailing `-z` record terminator, for an invocation that emits exactly one
+ *  NUL-terminated record (`show -s -z ...`) and is parsed as fixed fields rather than split
+ *  into multiple records via `splitZ` below — without this, the record's last field (the
+ *  commit subject, or the diff body) silently gains a trailing NUL byte, which prints as
+ *  invisible whitespace and fails an exact string comparison. Never applied to `numstatBytes`/
+ *  `nameStatusBytes` above: those go through `splitZ`, which only emits a record on actually
+ *  encountering a NUL and would instead *lose* the final record if this ran first. */
+function stripTrailingNul(bytes: Uint8Array): Uint8Array {
+  const last = bytes.length - 1;
+  return last >= 0 && bytes[last] === 0x00 ? bytes.subarray(0, last) : bytes;
+}
+
 // ---------------------------------------------------------------------------------------
 // log — the only streaming query. §5.1.1's long-lived paged session (P2) replaces the
 // paging mechanics; the record-yielding shape it exposes is this one.
@@ -194,19 +206,25 @@ function parseTrailerBlock(raw: string): CommitTrailer[] {
 async function fetchBodyAndSignature(
   driver: GitDriver,
   sha: string,
+  signal: AbortSignal | undefined,
 ): Promise<{
   signature: { status: SignatureStatus; signer: string };
   trailers: CommitTrailer[];
   body: string;
 }> {
-  const bytes = await collectOneShot(driver.read(showBodyAndSignatureArgs(sha)));
+  const bytes = stripTrailingNul(
+    await collectOneShot(driver.read(showBodyAndSignatureArgs(sha), signal ? { signal } : {})),
+  );
   const [statusRaw, signerRaw, trailersRaw, bodyRaw] = splitLimitedFields(bytes, 0x1f, 4).map(
     (field) => decoder.decode(field),
   );
   const trailers = parseTrailerBlock(trailersRaw ?? "");
   const body = splitTrailerBlock(bodyRaw ?? "", trailers);
   return {
-    signature: { status: (statusRaw as SignatureStatus | undefined) ?? "N", signer: signerRaw ?? "" },
+    signature: {
+      status: (statusRaw as SignatureStatus | undefined) ?? "N",
+      signer: signerRaw ?? "",
+    },
     trailers,
     body,
   };
@@ -241,6 +259,10 @@ export function combineFileChanges(
 export interface CommitDetailOptions {
   /** Which parent to diff against, for a merge commit — default: first parent (§4.4). */
   readonly parentIndex?: number;
+  /** Threaded to every `driver.read` this makes (W3) — a superseded request's processes must
+   *  actually die, not merely have their result discarded, so a fast keyboard run never queues
+   *  behind a request nobody wants any more. */
+  readonly signal?: AbortSignal;
 }
 
 export async function commitDetail(
@@ -249,16 +271,18 @@ export async function commitDetail(
   opts: CommitDetailOptions = {},
 ): Promise<CommitDetail> {
   const parentIndex = opts.parentIndex ?? 0;
-  const metadataBytes = await collectOneShot(driver.read(showMetadataArgs(sha)));
-  const metadata = parseLogRecord(metadataBytes);
+  const { signal } = opts;
+  const readOpts = signal ? { signal } : {};
+  const metadataBytes = await collectOneShot(driver.read(showMetadataArgs(sha), readOpts));
+  const metadata = parseLogRecord(stripTrailingNul(metadataBytes));
 
   const parentSha = metadata.parents[parentIndex];
   const from = parentSha; // undefined for a root commit — triggers --root below
 
   const [numstatBytes, nameStatusBytes, { signature, trailers, body }] = await Promise.all([
-    collectOneShot(driver.read(numstatArgs(from, sha))),
-    collectOneShot(driver.read(nameStatusArgs(from, sha))),
-    fetchBodyAndSignature(driver, sha),
+    collectOneShot(driver.read(numstatArgs(from, sha), readOpts)),
+    collectOneShot(driver.read(nameStatusArgs(from, sha), readOpts)),
+    fetchBodyAndSignature(driver, sha, signal),
   ]);
 
   const numstatRecords = splitZ(numstatBytes);

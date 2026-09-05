@@ -47,6 +47,87 @@ function isZeroOid(oid: string): boolean {
   return /^0+$/.test(oid);
 }
 
+// ---------------------------------------------------------------------------------------
+// argv builders (P5 W3). Live next to the parser they feed, same convention `diffTree.ts`
+// follows for its own two argv builders — `--no-optional-locks` is not included in either:
+// `driver.ts` adds it structurally to every read (W7), so a caller here does not repeat it,
+// and `worktreeDiffArgs`'s target (`git diff`, not `diff-tree`) would reject it as an unknown
+// option if it were (probe P6).
+// ---------------------------------------------------------------------------------------
+
+/**
+ * `diff-tree -r -p -M -C … <baseSha|--root> <sha> -- [<originalPath>] <path>` (§4.4, W3).
+ * `diff-tree` rather than a literal `git diff <base> <head> -- <path>`: `--root` handles a root
+ * commit natively (no hash-algorithm-dependent empty-tree oid to hard-code), and an explicit
+ * `<parent> <sha>` pair is exactly what the merge-parent selector needs. Both paths are passed
+ * when `originalPath` is set — probe P2: a per-file diff of a rename must name both paths in its
+ * pathspec or git renders it as a whole-file add.
+ */
+export function fileDiffArgs(
+  from: string | undefined,
+  to: string,
+  path: string,
+  originalPath: string | undefined,
+): string[] {
+  const base = [
+    "diff-tree",
+    "-r",
+    "-p",
+    "-M",
+    "-C",
+    "--no-commit-id",
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "-z",
+    "--unified=3",
+  ];
+  const rev = from === undefined ? ["--root", to] : [from, to];
+  const paths = originalPath !== undefined ? [originalPath, path] : [path];
+  return [...base, ...rev, "--", ...paths];
+}
+
+/**
+ * `git diff <rev> -- <path>` (§4.4, W3) — one revision, no second one, is git's native
+ * revision-against-working-tree form, so the comparison includes uncommitted changes with no
+ * temp file or stdin pipe (probe P6). `--no-renames`: the path is fixed on both sides by
+ * construction (the drift re-map's caller already knows which path it is asking about), so
+ * there is nothing for git to detect a rename *from*.
+ */
+export function worktreeDiffArgs(rev: string, path: string): string[] {
+  return [
+    "diff",
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--no-renames",
+    "-z",
+    "--unified=3",
+    rev,
+    "--",
+    path,
+  ];
+}
+
+/**
+ * Whether this file's post-image is `/dev/null` — git's output for a path it cannot see
+ * (deleted outright, or — probe P6 — a `worktreeDiff` against a path that is untracked or
+ * ignored, even though it exists on disk). Read off the header rather than inferred from the
+ * hunks: a normal deleted file's hunks (all `-` lines) are byte-for-byte indistinguishable from
+ * that case by content alone. `RepoService.worktreeDiff` (W3) is this function's only caller —
+ * it must not re-map "Go to file"'s cursor across a diff whose post-image does not exist;
+ * `fileDiff`'s own rendering of an ordinary deleted file is unaffected, since it never calls
+ * this and renders "text" hunks for a deletion exactly as it would for any other change.
+ */
+export function hasDeletedPostImage(bytes: Uint8Array): boolean {
+  const text = decoder.decode(bytes);
+  for (const line of text.split("\n")) {
+    if (line.startsWith("@@") || line.startsWith("Binary files ")) return false;
+    if (line.startsWith("deleted file mode ") || line.startsWith("+++ /dev/null")) return true;
+  }
+  return false;
+}
+
 /** D22: "a pointer file is recognisable from its first line" — sniffed in the patch itself
  *  rather than by re-reading the blob, which works for both sides of the diff at once. Prefers
  *  the first hunk's post-image (add/context) lines, since those are the file's current content;

@@ -16,6 +16,7 @@ import { locateGit } from "../../packages/git/src/discovery.ts";
 import { openGitDriver } from "../../packages/git/src/driver.ts";
 import { NodeProcessRunner } from "../../packages/git/src/nodeProcessRunner.ts";
 import { logArgs, parseLogRecord } from "../../packages/git/src/parse/log.ts";
+import { noopCatFileSession } from "../../packages/git/src/testFakes.ts";
 import { large } from "../fixtures/generateRepo.ts";
 
 const BASELINE_PATH = join(import.meta.dir, "parserThroughput.budget.json");
@@ -27,7 +28,7 @@ interface Measurement {
   readonly recordsPerSecond: number;
 }
 
-const noopCatFile = { dispose: () => {} };
+const noopCatFile = noopCatFileSession();
 
 async function measure(): Promise<Measurement> {
   const { dir } = large(COMMIT_COUNT);

@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { type CatFileSession, openGitDriver } from "./driver.ts";
 import { GitCancelled, GitError } from "./errors.ts";
-import { FakeProcessRunner, fakeResolvedGit, flushUntil } from "./testFakes.ts";
+import { FakeProcessRunner, fakeResolvedGit, flushUntil, noopCatFileSession } from "./testFakes.ts";
 
-const noopCatFile: CatFileSession = { dispose: () => {} };
+const noopCatFile: CatFileSession = noopCatFileSession();
 
 /** `read.done` only settles once `read.bytes` has been driven to completion (driver.ts's
  *  `read()` doc comment) — every test that checks `done` must drain `bytes` first, exactly as
@@ -266,7 +266,12 @@ describe("openGitDriver — invalidation", () => {
     const runner = new FakeProcessRunner();
     const git = await fakeResolvedGit();
     let catFileDisposed = false;
-    const catFile: CatFileSession = { dispose: () => (catFileDisposed = true) };
+    const catFile: CatFileSession = {
+      ...noopCatFileSession(),
+      dispose: () => {
+        catFileDisposed = true;
+      },
+    };
     const driver = openGitDriver(git, runner, "/repo", catFile);
 
     const first = driver.write(["tag", "a"]);

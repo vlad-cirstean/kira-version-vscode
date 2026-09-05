@@ -8,27 +8,19 @@
  * The wire protocol has no request ids: `<oid>\n` on stdin yields exactly one response, in
  * order. Requests are therefore serialized one at a time per process — pipelining would be
  * faster but adds nothing P1 needs and doubles the ways this state machine can be wrong.
+ *
+ * P5 W3 adds `check()`, exposing the already-open `--batch-check` process directly: turning a
+ * binary diff's two blob oids into byte sizes (`RepoService.fileDiff`) needs only the size, and
+ * routing that through `read()` would pay for a blob's content that is never displayed.
  */
 import type { ProcessRunner, SpawnedProcess } from "@kira-version/core";
 import type { ResolvedGit } from "./discovery.ts";
-import type { CatFileSession, Disposable } from "./driver.ts";
+import type { CatFileResult, CatFileSession, Disposable } from "./driver.ts";
 import { buildGitArgv, buildGitEnv } from "./driver.ts";
 
-export type CatFileResult =
-  | {
-      readonly kind: "found";
-      readonly oid: string;
-      readonly type: string;
-      readonly size: number;
-      readonly content: Uint8Array;
-    }
-  | { readonly kind: "missing"; readonly oid: string }
-  | {
-      readonly kind: "tooLarge";
-      readonly oid: string;
-      readonly type: string;
-      readonly size: number;
-    };
+// Re-exported so existing importers of `CatFileResult` from this file (and `index.ts`'s own
+// re-export) keep working — the type itself now lives in driver.ts, see that file's comment.
+export type { CatFileResult } from "./driver.ts";
 
 export interface CatFileSessionOptions {
   /** Above this size, `read()` returns `tooLarge` instead of allocating the blob — the
@@ -36,7 +28,9 @@ export interface CatFileSessionOptions {
   readonly maxBlobBytes?: number;
 }
 
-const DEFAULT_MAX_BLOB_BYTES = 10 * 1024 * 1024;
+/** P5 W3's `blob()` uses this to report `limitBytes` on a `tooLarge` result without repeating
+ *  the literal. */
+export const DEFAULT_MAX_BLOB_BYTES = 10 * 1024 * 1024;
 const MAX_CONSECUTIVE_FAILURES = 3;
 
 // ---------------------------------------------------------------------------------------
@@ -321,7 +315,7 @@ export function openCatFileSession(
   runner: ProcessRunner,
   repoRoot: string,
   opts: CatFileSessionOptions = {},
-): CatFileSession & { read(oid: string): Promise<CatFileResult> } {
+): CatFileSession {
   const maxBlobBytes = opts.maxBlobBytes ?? DEFAULT_MAX_BLOB_BYTES;
   const checkProcess = new PersistentBatchProcess(runner, git, repoRoot, "--batch-check");
   const batchProcess = new PersistentBatchProcess(runner, git, repoRoot, "--batch");
@@ -339,6 +333,9 @@ export function openCatFileSession(
         };
       }
       return batchProcess.request(oid);
+    },
+    check(oid: string): Promise<CatFileResult> {
+      return checkProcess.request(oid);
     },
     dispose(): void {
       checkProcess.dispose();

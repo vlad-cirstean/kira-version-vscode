@@ -14,6 +14,7 @@ import {
   stashList,
   status,
 } from "../../packages/git/src/queries.ts";
+import { noopCatFileSession } from "../../packages/git/src/testFakes.ts";
 import {
   branchy,
   conflicting,
@@ -25,7 +26,7 @@ import {
 } from "../fixtures/generateRepo.ts";
 
 const runner = new NodeProcessRunner();
-const noopCatFile = { dispose: () => {} };
+const noopCatFile = noopCatFileSession();
 
 async function driverFor(repoRoot: string) {
   const resolution = await locateGit({ runner });
