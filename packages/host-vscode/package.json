@@ -1,6 +1,7 @@
 {
   "name": "kira-version",
   "private": true,
+  "version": "0.0.0",
   "type": "module",
   "main": "../../dist/vscode/extension.js",
   "engines": {
