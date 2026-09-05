@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import type { RefRecord } from "./ref.ts";
 import { resolveBase } from "./review.ts";
 
-function ref(overrides: Partial<RefRecord> & Pick<RefRecord, "refname" | "shortName" | "kind">): RefRecord {
+function ref(
+  overrides: Partial<RefRecord> & Pick<RefRecord, "refname" | "shortName" | "kind">,
+): RefRecord {
   return {
     objectId: "0000000000000000000000000000000000000000",
     objectType: "commit",
@@ -22,7 +24,12 @@ function branch(shortName: string, overrides: Partial<RefRecord> = {}): RefRecor
 }
 
 function remoteBranch(shortName: string, overrides: Partial<RefRecord> = {}): RefRecord {
-  return ref({ refname: `refs/remotes/${shortName}`, shortName, kind: "remoteBranch", ...overrides });
+  return ref({
+    refname: `refs/remotes/${shortName}`,
+    shortName,
+    kind: "remoteBranch",
+    ...overrides,
+  });
 }
 
 describe("resolveBase — step 1: upstream", () => {
@@ -246,7 +253,9 @@ describe("resolveBase — the candidate shortlist: ordering and de-duplication",
       originHead: "origin/main",
       candidates: ["main"],
     });
-    expect(result.candidates).toEqual([{ ref: "origin/main", kind: "remoteBranch", reason: "upstream" }]);
+    expect(result.candidates).toEqual([
+      { ref: "origin/main", kind: "remoteBranch", reason: "upstream" },
+    ]);
   });
 
   test("current HEAD branch is added last, only when distinct from everything already listed", () => {
@@ -276,6 +285,8 @@ describe("resolveBase — the candidate shortlist: ordering and de-duplication",
       originHead: undefined,
       candidates: [],
     });
-    expect(result.candidates).toEqual([{ ref: "feature-x", kind: "branch", reason: "defaultBranch" }]);
+    expect(result.candidates).toEqual([
+      { ref: "feature-x", kind: "branch", reason: "defaultBranch" },
+    ]);
   });
 });

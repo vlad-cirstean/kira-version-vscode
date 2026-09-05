@@ -48,6 +48,7 @@ function toSettingsSnapshot(settings: Settings): SettingsSnapshot {
     "kiraVersion.graph.pageSize": settings["kiraVersion.graph.pageSize"],
     "kiraVersion.graph.scope": settings["kiraVersion.graph.scope"],
     "kiraVersion.log.level": settings["kiraVersion.log.level"],
+    "kiraVersion.review.baseCandidates": settings["kiraVersion.review.baseCandidates"],
   };
 }
 

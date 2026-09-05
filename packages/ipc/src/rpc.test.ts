@@ -140,6 +140,8 @@ function stubHandlers(
       "op.run": notImplemented,
       "undo.peek": notImplemented,
       "undo.run": notImplemented,
+      "review.resolveBase": notImplemented,
+      "review.open": notImplemented,
       ...requestOverrides,
     },
     streams: {

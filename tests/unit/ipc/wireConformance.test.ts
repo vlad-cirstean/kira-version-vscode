@@ -31,10 +31,15 @@ import type {
   UndoSlotSnapshot as CoreUndoSlotSnapshot,
 } from "../../../packages/core/src/model/operation.ts";
 import type {
+  RefKind as CoreRefKind,
   RefRecord as CoreRefRecord,
   TagAnnotation as CoreTagAnnotation,
 } from "../../../packages/core/src/model/ref.ts";
 import type { HeadState as CoreHeadState } from "../../../packages/core/src/model/repo.ts";
+import type {
+  BaseCandidate as CoreBaseCandidate,
+  BaseResolutionReason as CoreBaseResolutionReason,
+} from "../../../packages/core/src/model/review.ts";
 import type { StatusSummary as CoreStatusSummary } from "../../../packages/core/src/model/status.ts";
 import type {
   CheckoutPreflight as CoreCheckoutPreflight,
@@ -50,6 +55,8 @@ import type { BufferEncoding } from "../../../packages/ipc/src/codec.ts";
 import { decode, encode } from "../../../packages/ipc/src/codec.ts";
 import type {
   PackedCommitChunk,
+  BaseCandidate as WireBaseCandidate,
+  BaseResolutionReason as WireBaseResolutionReason,
   CheckoutPreflight as WireCheckoutPreflight,
   CommitIdentity as WireCommitIdentity,
   CommitTrailer as WireCommitTrailer,
@@ -373,6 +380,37 @@ describe("ipc wire conformance", () => {
     const kind: CoreGitErrorKind = "Conflict";
     const wire: WireOpErrorKind = kind;
     expect(wire).toBe(kind);
+  });
+
+  // ---- P7 W5: branch review's wire copies -----------------------------------------------
+  //
+  // `CommitRange`/`ReviewRangeState`/`BaseResolution` have no `core` counterpart to check
+  // against here: `core/src/model/review.ts`'s pure classifier answers only "which ref" (its
+  // own `BaseResolutionCore`), never the range's walkability — that is computed host-side in
+  // `packages/git/src/repoService.ts`, which may import both `core` and `ipc` and so is checked
+  // by the type-checker directly at every real call site, not by a structural copy here (B3
+  // only restricts `ipc` <-> `core`). `BaseResolutionReason` and `BaseCandidate` are the two
+  // pieces `core` and `ipc` really do both declare, so those are what this file mirrors.
+
+  test("BaseResolutionReason: core and ipc's wire copy are assignable both ways", () => {
+    assertBothWays<WireBaseResolutionReason, CoreBaseResolutionReason>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const reason: CoreBaseResolutionReason = "upstream";
+    const wire: WireBaseResolutionReason = reason;
+    expect(wire).toBe(reason);
+  });
+
+  test("BaseCandidate: core and ipc's wire copy are assignable both ways", () => {
+    assertBothWays<WireBaseCandidate, CoreBaseCandidate>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const kind: CoreRefKind = "branch";
+    const candidate: CoreBaseCandidate = { ref: "main", kind, reason: "defaultBranch" };
+    const wire: WireBaseCandidate = candidate;
+    expect(wire).toEqual(candidate);
   });
 });
 

@@ -1,9 +1,13 @@
 export type { BufferEncoding, EncodedMessage } from "./codec.ts";
 export { decode, dedupeTransferList, encode, VSCODE_WEBVIEW_BUFFER_ENCODING } from "./codec.ts";
 export type {
+  BaseCandidate,
+  BaseResolution,
+  BaseResolutionReason,
   CheckoutBlocker,
   CheckoutPreflight,
   CommitIdentity,
+  CommitRange,
   CommitTrailer,
   Contract,
   DecorationRef,
@@ -36,6 +40,7 @@ export type {
   ResultOf,
   RevertParentChoice,
   RevertPreflight,
+  ReviewRangeState,
   SettingsSnapshot,
   SignatureStatus,
   StatusSummary,

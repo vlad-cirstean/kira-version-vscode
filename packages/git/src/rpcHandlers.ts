@@ -31,6 +31,7 @@ import type {
 } from "@kira-version/core";
 import { mapLineAcrossDiff } from "@kira-version/core";
 import type {
+  BaseResolution,
   GoToFileOutcome,
   HostKind,
   RefRow,
@@ -69,6 +70,8 @@ export type RepoServicePort = Pick<
   | "runOp"
   | "undoPeek"
   | "undoRun"
+  | "resolveReviewBase"
+  | "endReview"
 >;
 
 export interface RepoHandlersDeps {
@@ -80,6 +83,10 @@ export interface RepoHandlersDeps {
   readonly logger: Logger;
   readonly editor: EditorIntegration;
   readonly clipboard: Clipboard;
+  /** P7 W6/W8: `review.open`'s only caller — reveals the review sidebar view on this branch
+   *  (`host-vscode`'s `reviewView.ts`). Absent in the harness (there is no view container to
+   *  reveal, D40) — `review.open` then resolves as a correct no-op rather than throwing. */
+  readonly revealReview?: (repoId: string, branch: string) => void;
 }
 
 /**
@@ -139,6 +146,7 @@ function toSettingsSnapshot(settings: Settings): SettingsSnapshot {
     "kiraVersion.graph.pageSize": settings["kiraVersion.graph.pageSize"],
     "kiraVersion.graph.scope": settings["kiraVersion.graph.scope"],
     "kiraVersion.log.level": settings["kiraVersion.log.level"],
+    "kiraVersion.review.baseCandidates": settings["kiraVersion.review.baseCandidates"],
   };
 }
 
@@ -236,12 +244,15 @@ export function createRepoHandlers(deps: RepoHandlersDeps): ServerHandlers {
     return {};
   };
 
-  const graphStatusImpl: RequestHandler<"graph.status"> = async ({ repoId }) =>
-    deps.service.status(repoId);
+  const graphStatusImpl: RequestHandler<"graph.status"> = async ({ repoId, range }) =>
+    deps.service.status(repoId, range);
 
-  const graphLoadMoreImpl: RequestHandler<"graph.loadMore"> = async ({ repoId, pages }, ctx) => {
-    if (deps.service.status(repoId).exhausted) return { started: false };
-    await deps.service.loadMore(repoId, pages, ctx.signal);
+  const graphLoadMoreImpl: RequestHandler<"graph.loadMore"> = async (
+    { repoId, pages, range },
+    ctx,
+  ) => {
+    if (deps.service.status(repoId, range).exhausted) return { started: false };
+    await deps.service.loadMore(repoId, pages, ctx.signal, range);
     return { started: true };
   };
 
@@ -250,11 +261,12 @@ export function createRepoHandlers(deps: RepoHandlersDeps): ServerHandlers {
   });
 
   const graphStreamImpl: StreamHandler<"graph.stream"> = async (
-    { repoId, resumeThroughRow },
+    { repoId, resumeThroughRow, range },
     ctx,
   ) => {
     await deps.service.streamGraph(repoId, {
       ...(resumeThroughRow !== undefined ? { resumeThroughRow } : {}),
+      ...(range !== undefined ? { range } : {}),
       onChunk: (chunk: GraphChunkPayload) => ctx.emit(chunk),
       signal: ctx.signal,
     });
@@ -391,6 +403,22 @@ export function createRepoHandlers(deps: RepoHandlersDeps): ServerHandlers {
     return {};
   };
 
+  // ---- P7 W6: Branch review -------------------------------------------------------------
+
+  const reviewResolveBaseImpl: RequestHandler<"review.resolveBase"> = async ({
+    repoId,
+    branch,
+    base,
+  }): Promise<BaseResolution> => deps.service.resolveReviewBase(repoId, branch, base);
+
+  /** D40: reveals the sidebar view on `branch`, or — in the harness, and any other host that
+   *  declares no `revealReview` — resolves as a correct no-op. There is no view container to
+   *  reveal outside a real host, so doing nothing here is the right answer, not a missing one. */
+  const reviewOpenImpl: RequestHandler<"review.open"> = async ({ repoId, branch }) => {
+    deps.revealReview?.(repoId, branch);
+    return {};
+  };
+
   return {
     requests: {
       "app.init": logged("app.init", appInitImpl),
@@ -414,6 +442,8 @@ export function createRepoHandlers(deps: RepoHandlersDeps): ServerHandlers {
       "undo.peek": logged("undo.peek", undoPeekImpl),
       "undo.run": logged("undo.run", undoRunImpl),
       "editor.resolveConflict": logged("editor.resolveConflict", editorResolveConflictImpl),
+      "review.resolveBase": logged("review.resolveBase", reviewResolveBaseImpl),
+      "review.open": logged("review.open", reviewOpenImpl),
     },
     streams: {
       "graph.stream": logged("graph.stream", graphStreamImpl),

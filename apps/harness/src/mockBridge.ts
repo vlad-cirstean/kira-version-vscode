@@ -1,8 +1,16 @@
-import type { DocumentRef, FileChange } from "@kira-version/core";
-import { CommitStore, defaultSettings, mapLineAcrossDiff, UNDO_POLICY } from "@kira-version/core";
+import type { CommitRecord, DocumentRef, FileChange, RefRecord } from "@kira-version/core";
+import {
+  CommitStore,
+  resolveBase as coreResolveBase,
+  defaultSettings,
+  mapLineAcrossDiff,
+  UNDO_POLICY,
+} from "@kira-version/core";
 import type {
+  BaseResolutionReason,
   CheckoutBlocker,
   CheckoutPreflight,
+  CommitRange,
   HeadState,
   InProgressOperation,
   MessageChannelLike,
@@ -14,6 +22,7 @@ import type {
   RequestHandler,
   RevertParentChoice,
   RevertPreflight,
+  ReviewRangeState,
   ServerHandlers,
   SettingsSnapshot,
   StatusSummary,
@@ -191,6 +200,72 @@ function updateIsHeadFlags(refs: RefsState, head: HeadState): void {
   for (const row of refs.branches) {
     (row as { isHead: boolean }).isHead = head.kind === "branch" && row.shortName === head.name;
   }
+}
+
+// ---------------------------------------------------------------------------------------
+// P7 W6/W15 — Branch review. `review.resolveBase` reuses `core`'s own `resolveBase` against
+// the mock's own ref rows (never a hand-rolled re-implementation of §6.8's policy — the plan's
+// own words on why: "so the harness agrees with the resolver, not with a copy of it"), and a
+// range's walkability is computed from `Scenario.commits`' real parent links rather than
+// invented, since every scenario already carries a real, if small, commit DAG.
+//
+// This is an interim, generic implementation — W15 replaces it with each scenario's own
+// declared `review` fixture (`docs/plans/P7.md`'s W15 section), which lets a scenario state an
+// exact `reason`/`range` outcome without needing a ref graph shaped just so to produce it. Until
+// then, this gives the harness a real, working resolver rather than a stub with no scenario to
+// exercise it yet.
+// ---------------------------------------------------------------------------------------
+
+/** `RefRow` (the wire shape `Scenario.refs` fixtures) has no `objectType` — `core`'s
+ *  `resolveBase` never reads it (only `shortName`/`upstream`/`isHead`/`kind`), so a filler value
+ *  here is never observed; kept as its own tiny function so that fact is documented once. */
+function toRefRecordLike(row: RefRow): RefRecord {
+  return { ...row, objectType: "commit" };
+}
+
+/** Every sha reachable from `tip` by following `parents` transitively (`tip` included) — the
+ *  mock's own `merge-base`/`rev-list --count <base>..<branch>` stand-in, computed directly over
+ *  `Scenario.commits`' real parent links rather than declared separately. */
+function ancestorShas(commits: readonly CommitRecord[], tip: string): Set<string> {
+  const bySha = new Map(commits.map((c) => [c.sha, c] as const));
+  const seen = new Set<string>();
+  const stack = [tip];
+  while (stack.length > 0) {
+    const sha = stack.pop() as string;
+    if (seen.has(sha)) continue;
+    seen.add(sha);
+    const record = bySha.get(sha);
+    if (record) stack.push(...record.parents);
+  }
+  return seen;
+}
+
+function resolveRefTipSha(refs: RefsState, name: string): string | undefined {
+  return findRef(refs, name)?.row.objectId;
+}
+
+/** §6.8's four-outcome decision's *range* half — the same question
+ *  `RepoService.resolveReviewBase`'s `merge-base`/`rev-list --count` pair answers host-side,
+ *  answered here from the DAG directly: `unrelated` when the two tips share no ancestor at all,
+ *  `empty` when the branch adds nothing over the base, else `ready` with the ordered range
+ *  (newest-first, matching `Scenario.commits`' own convention) and its count. */
+function computeReviewRange(
+  commits: readonly CommitRecord[],
+  refs: RefsState,
+  range: CommitRange,
+): { readonly records: readonly CommitRecord[]; readonly state: ReviewRangeState } {
+  const baseSha = resolveRefTipSha(refs, range.base);
+  const branchSha = resolveRefTipSha(refs, range.branch);
+  if (baseSha === undefined || branchSha === undefined) {
+    return { records: [], state: { kind: "unrelated" } };
+  }
+  const baseAncestors = ancestorShas(commits, baseSha);
+  const branchAncestors = ancestorShas(commits, branchSha);
+  const sharesAncestor = [...branchAncestors].some((sha) => baseAncestors.has(sha));
+  if (!sharesAncestor) return { records: [], state: { kind: "unrelated" } };
+  const records = commits.filter((c) => branchAncestors.has(c.sha) && !baseAncestors.has(c.sha));
+  if (records.length === 0) return { records, state: { kind: "empty" } };
+  return { records, state: { kind: "ready", commitCount: records.length } };
 }
 
 /** `preflight.checkout`'s default when the scenario states no exact fixture for this `target`
@@ -511,6 +586,7 @@ function toSettingsSnapshot(): SettingsSnapshot {
     "kiraVersion.graph.pageSize": settings["kiraVersion.graph.pageSize"],
     "kiraVersion.graph.scope": settings["kiraVersion.graph.scope"],
     "kiraVersion.log.level": settings["kiraVersion.log.level"],
+    "kiraVersion.review.baseCandidates": settings["kiraVersion.review.baseCandidates"],
   };
 }
 
@@ -601,6 +677,24 @@ interface RepoSession {
   status: StatusState;
   inProgress: InProgressOperation | null;
   pendingUndo: PendingUndo | null;
+  /** P7 W6/W15 — Branch review's own, isolated second walk(s), keyed by `<base>..<branch>`.
+   *  Deliberately not sharing `store`/`dictionaryMarks`/`nextSeq` with the fields above —
+   *  D38's isolation requirement, mirrored here from `RepoService`'s own `reviewWalk` slot. */
+  reviewWalks: Map<string, ReviewWalkState>;
+}
+
+/** P7 W6/W15 — one open review walk (`ReviewWalk`'s mock-side counterpart): its own `CommitStore`
+ *  and dictionary marks, paged over `records` (the full range, already resolved, newest-first) —
+ *  never the session's own `store`/`dictionaryMarks`. */
+interface ReviewWalkState {
+  readonly records: readonly CommitRecord[];
+  readonly store: CommitStore;
+  dictionaryMarks: Map<number, number>;
+  nextSeq: number;
+}
+
+function reviewWalkKey(range: CommitRange): string {
+  return `${range.base}..${range.branch}`;
 }
 
 function createSession(repoId: string, scenario: Scenario, head: HeadState): RepoSession {
@@ -615,7 +709,34 @@ function createSession(repoId: string, scenario: Scenario, head: HeadState): Rep
     status: cloneStatus(scenario.status),
     inProgress: scenario.status?.inProgress ?? null,
     pendingUndo: null,
+    reviewWalks: new Map(),
   };
+}
+
+/** Returns the open review walk for `range`, resolving and caching it on first use — mirrors
+ *  `RepoService.#ensureReviewWalk` (P7 W4): reused for the same range, never rebuilt mid-review. */
+function ensureReviewWalk(session: RepoSession, range: CommitRange): ReviewWalkState {
+  const key = reviewWalkKey(range);
+  const existing = session.reviewWalks.get(key);
+  if (existing) return existing;
+  const { records } = computeReviewRange(session.commits, session.refs, range);
+  const walk: ReviewWalkState = {
+    records,
+    store: new CommitStore(),
+    dictionaryMarks: initialDictionaryMarks(),
+    nextSeq: 0,
+  };
+  session.reviewWalks.set(key, walk);
+  return walk;
+}
+
+/** `readPageIntoStore`'s own review-walk counterpart — same page-at-a-time shape, over `walk.
+ *  records` instead of `session.commits`. */
+function readReviewPageIntoStore(walk: ReviewWalkState): void {
+  const loaded = walk.store.rowCount;
+  const count = Math.min(PAGE_SIZE, walk.records.length - loaded);
+  if (count <= 0) return;
+  walk.store.appendPage(walk.records.slice(loaded, loaded + count));
 }
 
 function requireSession(sessions: Map<string, RepoSession>, repoId: string): RepoSession {
@@ -654,6 +775,38 @@ async function emitRange(
   await emit({
     repoId: session.repoId,
     seq: session.nextSeq++,
+    from,
+    to,
+    source,
+    remaining,
+    exhausted: remaining === 0,
+    commits,
+  });
+  return nextBase;
+}
+
+/** `emitRange`'s own review-walk counterpart: same packing, over `walk` (its own `store`/
+ *  `dictionaryMarks`/`nextSeq`, its own `records.length` as "total") rather than `session`'s.
+ *  Kept as its own small function rather than sharing one implementation with `emitRange` — this
+ *  file's own module doc comment already states its philosophy ("mirroring … conceptually rather
+ *  than by shared code"); `repoService.ts`'s real `WalkLike` abstraction is what the production
+ *  code actually shares, this mock does not need to. */
+async function emitReviewRange(
+  repoId: string,
+  walk: ReviewWalkState,
+  from: number,
+  to: number,
+  dictionaryBase: number,
+  source: "git" | "cache",
+  emit: (chunk: StreamChunkOf<"graph.stream">) => Promise<void>,
+): Promise<number> {
+  const commits = walk.store.packSlice(from, to, dictionaryBase);
+  const nextBase = dictionaryBase + commits.dictionary.length;
+  walk.dictionaryMarks.set(to, nextBase);
+  const remaining = walk.records.length - walk.store.rowCount;
+  await emit({
+    repoId,
+    seq: walk.nextSeq++,
     from,
     to,
     source,
@@ -751,14 +904,26 @@ function createHandlers(
     return {};
   };
 
-  const graphStatus: RequestHandler<"graph.status"> = async ({ repoId }) => {
+  const graphStatus: RequestHandler<"graph.status"> = async ({ repoId, range }) => {
     const session = requireSession(sessions, repoId);
+    if (range) {
+      const walk = session.reviewWalks.get(reviewWalkKey(range));
+      if (!walk) return { loaded: 0, remaining: 0, exhausted: false };
+      const remaining = walk.records.length - walk.store.rowCount;
+      return { loaded: walk.store.rowCount, remaining, exhausted: remaining === 0 };
+    }
     const remaining = session.commits.length - session.store.rowCount;
     return { loaded: session.store.rowCount, remaining, exhausted: remaining === 0 };
   };
 
-  const graphLoadMore: RequestHandler<"graph.loadMore"> = async ({ repoId, pages }) => {
+  const graphLoadMore: RequestHandler<"graph.loadMore"> = async ({ repoId, pages, range }) => {
     const session = requireSession(sessions, repoId);
+    if (range) {
+      const walk = ensureReviewWalk(session, range);
+      if (walk.store.rowCount >= walk.records.length) return { started: false };
+      for (let i = 0; i < (pages ?? 1); i++) readReviewPageIntoStore(walk);
+      return { started: true };
+    }
     if (session.store.rowCount >= session.commits.length) return { started: false };
     for (let i = 0; i < (pages ?? 1); i++) readPageIntoStore(session);
     return { started: true };
@@ -781,8 +946,38 @@ function createHandlers(
   // comment): replay whatever this session's store already holds in `CHUNK_ROWS` chunks
   // (`source: "cache"`), then — only on this repo's very first stream, exactly as the real
   // service does — pull one page out of the scenario's fixture and stream the rows that adds.
-  const graphStream: StreamHandler<"graph.stream"> = async ({ repoId, resumeThroughRow }, ctx) => {
+  const graphStream: StreamHandler<"graph.stream"> = async (
+    { repoId, resumeThroughRow, range },
+    ctx,
+  ) => {
     const session = requireSession(sessions, repoId);
+
+    // P7 W6/W15 — the ranged half (`docs/plans/P7.md`'s "the ranged half of streamGraph"):
+    // `resumeThroughRow` is ignored entirely, exactly as the real service ignores it — a review
+    // walk has no cache to resume from. Always emits from row 0, `source: "git"`.
+    if (range) {
+      const walk = ensureReviewWalk(session, range);
+      if (walk.store.rowCount === 0 && walk.store.rowCount < walk.records.length) {
+        readReviewPageIntoStore(walk);
+      }
+      let cursor = 0;
+      let dictionaryBase = 0;
+      while (cursor < walk.store.rowCount) {
+        if (ctx.signal.aborted) return;
+        const to = Math.min(cursor + CHUNK_ROWS, walk.store.rowCount);
+        dictionaryBase = await emitReviewRange(
+          session.repoId,
+          walk,
+          cursor,
+          to,
+          dictionaryBase,
+          "git",
+          ctx.emit,
+        );
+        cursor = to;
+      }
+      return;
+    }
 
     // Clamped, not trusted verbatim (`RepoService.streamGraph`'s own comment): a caller-supplied
     // `resumeThroughRow` from before a client-side reset would otherwise point past the (still
@@ -966,6 +1161,51 @@ function createHandlers(
     };
   };
 
+  // ---- P7 W6/W15: Branch review -----------------------------------------------------------
+
+  const reviewResolveBase: RequestHandler<"review.resolveBase"> = async ({
+    repoId,
+    branch,
+    base,
+  }) => {
+    const session = requireSession(sessions, repoId);
+    const branchMatch = findRef(session.refs, branch);
+    if (!branchMatch || branchMatch.kind === "tag") {
+      return { branch, base: null, reason: "none", range: { kind: "ask" }, candidates: [] };
+    }
+
+    const branchRecord = toRefRecordLike(branchMatch.row);
+    const natural = coreResolveBase({
+      branch: branchRecord,
+      branches: session.refs.branches.map(toRefRecordLike),
+      remoteBranches: session.refs.remoteBranches.map(toRefRecordLike),
+      // The mock models no `origin/HEAD` equivalent (`RefsState` has no symbolic-ref slot) —
+      // resolution falls through step 1 straight to `candidates` when upstream does not apply,
+      // same as a real repo with no `origin/HEAD` set (V1).
+      originHead: undefined,
+      candidates: defaultSettings()["kiraVersion.review.baseCandidates"],
+    });
+
+    const resolvedBase = base !== undefined ? base : natural.base;
+    const reason: BaseResolutionReason = base !== undefined ? "override" : natural.reason;
+    const candidates = natural.candidates;
+
+    if (resolvedBase === null) {
+      return { branch, base: null, reason, range: { kind: "ask" }, candidates };
+    }
+    const { state } = computeReviewRange(session.commits, session.refs, {
+      base: resolvedBase,
+      branch,
+    });
+    return { branch, base: resolvedBase, reason, range: state, candidates };
+  };
+
+  /** D40: the harness has no second view container to reveal (W15's own note — "review.open
+   *  records the target and switches the mock's current review target" describes a later,
+   *  fuller mock; there is no second webview here yet for it to switch), so this resolves as a
+   *  correct no-op, exactly as a real host with no `revealReview` dependency would. */
+  const reviewOpen: RequestHandler<"review.open"> = async () => ({});
+
   const preflightCheckout: RequestHandler<"preflight.checkout"> = async ({
     repoId,
     target,
@@ -1061,6 +1301,8 @@ function createHandlers(
         "op.run": opRun,
         "undo.peek": undoPeek,
         "undo.run": undoRun,
+        "review.resolveBase": reviewResolveBase,
+        "review.open": reviewOpen,
       },
       streams: {
         "graph.stream": graphStream,

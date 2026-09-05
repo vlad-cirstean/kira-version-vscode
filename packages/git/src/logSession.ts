@@ -234,7 +234,12 @@ class LogSessionImpl implements LogSession {
       if (this.#loadedCount > 0) {
         // A fresh spawn resuming a previously paused-then-reclaimed session: refs must not
         // have moved, or `--skip`'s offset would silently point at the wrong record.
-        const current = await captureWalkSnapshot(this.#git, this.#runner, this.#repoRoot, this.#walk);
+        const current = await captureWalkSnapshot(
+          this.#git,
+          this.#runner,
+          this.#repoRoot,
+          this.#walk,
+        );
         if (!snapshotsEqual(current, this.#startRefSnapshot)) {
           return { kind: "stale", reason: "refsChanged" };
         }
