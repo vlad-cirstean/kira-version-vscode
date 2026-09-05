@@ -24,8 +24,7 @@ function commandExists(name: string): boolean {
 }
 
 const args = process.argv.slice(2);
-const needsXvfb =
-  process.platform === "linux" && !process.env.DISPLAY && commandExists("xvfb-run");
+const needsXvfb = process.platform === "linux" && !process.env.DISPLAY && commandExists("xvfb-run");
 
 const [command, commandArgs] = needsXvfb
   ? ["xvfb-run", ["-a", "bunx", "playwright", ...args]]

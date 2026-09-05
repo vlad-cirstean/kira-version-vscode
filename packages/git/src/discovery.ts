@@ -236,11 +236,7 @@ async function platformFallbackCandidates(
     // `await` (see docs/plans/P4c-linux-test-infra.md, W1) when PATH doesn't already have
     // git. No `xcode-select`-style gate here — unlike macOS's CLT shim, Linux's
     // `/usr/bin/git` is a real binary, not something that pops an install dialog when run.
-    return [
-      "/usr/bin/git",
-      "/usr/local/bin/git",
-      "/home/linuxbrew/.linuxbrew/bin/git",
-    ];
+    return ["/usr/bin/git", "/usr/local/bin/git", "/home/linuxbrew/.linuxbrew/bin/git"];
   }
   // win32 (and any other platform) is a named, unimplemented case (D27) — adding a platform
   // later is a new branch here, not a refactor of everything that calls this.
