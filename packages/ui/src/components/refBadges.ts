@@ -35,6 +35,13 @@ export interface BadgeSpec {
   readonly text: string;
   readonly isCurrentBranch: boolean;
   readonly dashed: boolean;
+  /** `docs/plans/P7.md` W14: set only for `branch`/`remoteBranch` — the two kinds
+   *  `CommitGrid.vue`'s ref-badge hit-test and `App.vue`'s ref context menu care about. A
+   *  tag/stash/HEAD badge has no review action and no rename/delete-from-the-graph menu, so it
+   *  carries neither field — the hit-test's own `[data-ref-kind]` selector is exactly this
+   *  distinction, made a DOM query rather than a second decoration check. */
+  readonly refKind: "branch" | "remoteBranch" | undefined;
+  readonly refName: string | undefined;
 }
 
 /** The text used both on the badge itself and in a `+N` overflow badge's title list — one
@@ -50,6 +57,8 @@ export function badgeSpecFor(ref: DecorationRef): BadgeSpec {
         text: ref.name,
         isCurrentBranch: ref.isHead,
         dashed: false,
+        refKind: "branch",
+        refName: ref.name,
       };
     case "remoteBranch":
       return {
@@ -59,6 +68,8 @@ export function badgeSpecFor(ref: DecorationRef): BadgeSpec {
         text: ref.name,
         isCurrentBranch: false,
         dashed: false,
+        refKind: "remoteBranch",
+        refName: ref.name,
       };
     case "tag":
       return {
@@ -68,6 +79,8 @@ export function badgeSpecFor(ref: DecorationRef): BadgeSpec {
         text: ref.name,
         isCurrentBranch: false,
         dashed: false,
+        refKind: undefined,
+        refName: undefined,
       };
     case "stash":
       return {
@@ -77,6 +90,8 @@ export function badgeSpecFor(ref: DecorationRef): BadgeSpec {
         text: "stash",
         isCurrentBranch: false,
         dashed: true,
+        refKind: undefined,
+        refName: undefined,
       };
     case "head":
       // Detached HEAD: §6.2's table describes the filled dot as a modifier on the *branch*
@@ -92,6 +107,8 @@ export function badgeSpecFor(ref: DecorationRef): BadgeSpec {
         text: "HEAD",
         isCurrentBranch: true,
         dashed: false,
+        refKind: undefined,
+        refName: undefined,
       };
   }
 }
@@ -131,6 +148,14 @@ function buildBadgeElement(spec: BadgeSpec): HTMLSpanElement {
   // The full name always lives in `title` (a mouse-hover affordance) independent of whether the
   // ~190px CSS truncation (kv-badge-label) actually clips this particular badge's text.
   badge.title = spec.text;
+
+  // `docs/plans/P7.md` W14: the one seam `CommitGrid.vue`'s `handleContextMenu` hit-tests for
+  // (`closest("[data-ref-kind]")`) — present only for `branch`/`remoteBranch` (see `BadgeSpec`'s
+  // own doc comment on why a tag/stash/HEAD badge carries neither).
+  if (spec.refKind !== undefined && spec.refName !== undefined) {
+    badge.dataset.refKind = spec.refKind;
+    badge.dataset.refName = spec.refName;
+  }
 
   const icon = document.createElement("span");
   icon.className = `codicon ${spec.icon} kv-badge-icon`;

@@ -201,9 +201,9 @@ describe("buildRefMenu", () => {
       knownRemotes: [],
       inProgress: inProgress({ kind: "rebase", headName: "refs/heads/other" }),
     });
-    expect(
-      sections.flatMap((s) => s.items).find((i) => i.id === "reviewBranch")?.disabled,
-    ).toBe(false);
+    expect(sections.flatMap((s) => s.items).find((i) => i.id === "reviewBranch")?.disabled).toBe(
+      false,
+    );
   });
 
   test("docs/plans/P7.md W14: a tag never offers reviewBranch", () => {
@@ -221,10 +221,7 @@ describe("buildRefMenu", () => {
 describe("buildReviewRowMenu", () => {
   test("docs/plans/P7.md W13: copy sha and copy message only, never checkout/branch/tag/revert", () => {
     const sections = buildReviewRowMenu(true);
-    expect(sections.flatMap((s) => s.items.map((i) => i.id))).toEqual([
-      "copySha",
-      "copyMessage",
-    ]);
+    expect(sections.flatMap((s) => s.items.map((i) => i.id))).toEqual(["copySha", "copyMessage"]);
   });
 
   test("absent (not disabled) when clipboard is unavailable", () => {

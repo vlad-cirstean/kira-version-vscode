@@ -132,6 +132,11 @@ async function onRefMenuSelect(id: string): Promise<void> {
     renaming.value = { name: row.shortName, value: row.shortName };
     return;
   }
+  if (id === "reviewBranch") {
+    closeForCheckout();
+    await props.ops.openReview(row.shortName);
+    return;
+  }
   if (id === "deleteRef") {
     if (row.kind === "tag") {
       await props.ops.tagDelete(row.shortName);

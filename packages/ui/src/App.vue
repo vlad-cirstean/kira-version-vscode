@@ -20,6 +20,7 @@ import CommitGrid from "./components/CommitGrid.vue";
 import ConflictBanner from "./components/ConflictBanner.vue";
 import BranchDialog from "./components/dialogs/BranchDialog.vue";
 import CheckoutDialog from "./components/dialogs/CheckoutDialog.vue";
+import RenameRefDialog from "./components/dialogs/RenameRefDialog.vue";
 import RevertDialog from "./components/dialogs/RevertDialog.vue";
 import TagDialog from "./components/dialogs/TagDialog.vue";
 import EmptyRepositoryPanel from "./components/EmptyRepositoryPanel.vue";
@@ -27,8 +28,9 @@ import GitBlockedPanel from "./components/GitBlockedPanel.vue";
 import LoadMoreButton from "./components/LoadMoreButton.vue";
 import NoRepositoryPanel from "./components/NoRepositoryPanel.vue";
 import DetailPane from "./components/DetailPane.vue";
+import { remoteCheckoutTarget } from "./components/refListModel.ts";
 import RowContextMenu from "./components/RowContextMenu.vue";
-import { buildRowMenu, type MenuSection } from "./components/rowMenuModel.ts";
+import { buildRefMenu, buildRowMenu, type MenuSection } from "./components/rowMenuModel.ts";
 import { DetailState } from "./state/detail.ts";
 import { type DetailActions, createDetailActions } from "./state/detailActions.ts";
 import { GraphViewState } from "./state/graphView.ts";
@@ -266,6 +268,89 @@ async function onCommitMenuSelect(id: string): Promise<void> {
     default:
       return;
   }
+}
+
+// ---------------------------------------------------------------------------------------
+// `docs/plans/P7.md` W14: the ref-badge context menu — a right-click that lands on a
+// `refBadges.ts` badge (`CommitGrid.vue`'s own hit-test) instead of bare row space opens this,
+// the same `buildRefMenu` table `BranchPicker.vue`'s dropdown already renders, titled with the
+// branch name so it "cannot be misread" (§6.8). Renaming has no inline row to swap into here (a
+// badge is a DOM fragment inside a commit's message cell, not a list item), so it opens
+// `RenameRefDialog.vue` instead of `BranchPicker.vue`'s own inline field.
+// ---------------------------------------------------------------------------------------
+const refContextMenuState = ref<
+  { kind: "branch" | "remoteBranch"; name: string; x: number; y: number } | undefined
+>(undefined);
+const renameRefDialogState = ref<{ open: boolean; currentName: string }>({
+  open: false,
+  currentName: "",
+});
+const forceDeleteRefCandidate = ref<{ name: string; x: number; y: number } | undefined>(undefined);
+
+function handleGridRefContextMenu(detail: {
+  kind: "branch" | "remoteBranch";
+  name: string;
+  x: number;
+  y: number;
+}): void {
+  refContextMenuState.value = detail;
+}
+
+const refMenuSections = computed<MenuSection[]>(() => {
+  const state = refContextMenuState.value;
+  if (!state) return [];
+  const isHead =
+    state.kind === "branch" &&
+    refsState.branches.value.some((row) => row.shortName === state.name && row.isHead);
+  return buildRefMenu({
+    kind: state.kind,
+    shortName: state.name,
+    isHead,
+    knownRemotes: [],
+    inProgress: opsState.statusSummary.value?.inProgress ?? null,
+  });
+});
+
+async function onRefMenuSelect(id: string): Promise<void> {
+  const state = refContextMenuState.value;
+  refContextMenuState.value = undefined;
+  if (!state) return;
+  if (id === "checkoutRef") {
+    const remoteRow =
+      state.kind === "remoteBranch"
+        ? refsState.remoteBranches.value.find((row) => row.shortName === state.name)
+        : undefined;
+    // `remoteRow` should always be found (the badge only exists for a decoration on an
+    // already-loaded row) — the `?? state.name` fallback is defensive only, for the same reason
+    // `checkoutRef`'s gate never blocks this: a stale badge from a commit rendered just before a
+    // `refsChanged` refresh lands is not worth failing the checkout over.
+    const target = remoteRow
+      ? remoteCheckoutTarget(remoteRow, refsState.branches.value)
+      : state.name;
+    await opsState.runCheckout(target, "switch");
+    return;
+  }
+  if (id === "renameRef") {
+    renameRefDialogState.value = { open: true, currentName: state.name };
+    return;
+  }
+  if (id === "reviewBranch") {
+    await opsState.openReview(state.name);
+    return;
+  }
+  if (id === "deleteRef") {
+    const result = await opsState.branchDelete(state.name, false);
+    if (!result.ok && result.error?.kind === "NotFullyMerged") {
+      forceDeleteRefCandidate.value = { name: state.name, x: state.x, y: state.y };
+    }
+    return;
+  }
+}
+
+async function confirmForceDeleteRef(): Promise<void> {
+  const candidate = forceDeleteRefCandidate.value;
+  forceDeleteRefCandidate.value = undefined;
+  if (candidate !== undefined) await opsState.branchDelete(candidate.name, true);
 }
 
 async function resolveConflictInEditor(path: string): Promise<void> {
@@ -652,6 +737,7 @@ onBeforeUnmount(() => {
               @refresh="triggerRefresh"
               @copy-sha="handleCopySha"
               @context-menu="handleGridContextMenu"
+              @ref-context-menu="handleGridRefContextMenu"
             />
             <LoadMoreButton :graph-view="graphView" :page-size="pageSize" />
             <span class="kv-visually-hidden" data-testid="chunk-source">{{
@@ -716,6 +802,31 @@ onBeforeUnmount(() => {
           @select="onCommitMenuSelect"
           @close="contextMenuState = undefined"
         />
+        <RowContextMenu
+          v-if="refContextMenuState"
+          :sections="refMenuSections"
+          :x="refContextMenuState.x"
+          :y="refContextMenuState.y"
+          :label="`${refContextMenuState.name} actions`"
+          :title="refContextMenuState.name"
+          @select="onRefMenuSelect"
+          @close="refContextMenuState = undefined"
+        />
+        <div
+          v-if="forceDeleteRefCandidate"
+          class="kv-branch-force-delete kv-branch-force-delete--floating"
+          :style="{ left: `${forceDeleteRefCandidate.x}px`, top: `${forceDeleteRefCandidate.y}px` }"
+        >
+          <span>“{{ forceDeleteRefCandidate.name }}” is not fully merged.</span>
+          <button type="button" @click="confirmForceDeleteRef">Force delete</button>
+          <button type="button" @click="forceDeleteRefCandidate = undefined">Cancel</button>
+        </div>
+        <RenameRefDialog
+          :open="renameRefDialogState.open"
+          :current-name="renameRefDialogState.currentName"
+          :ops="opsState"
+          @close="renameRefDialogState = { open: false, currentName: '' }"
+        />
         <BranchDialog
           :open="branchDialogState.open"
           :start-point="branchDialogState.startPoint"
@@ -759,6 +870,17 @@ onBeforeUnmount(() => {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+/* `docs/plans/P7.md` W14: the ref-badge menu's own force-delete confirmation — anchored at the
+   badge's own click point (there is no picker dropdown here to grow an inline row inside of),
+   reusing `BranchPicker.vue`'s own `.kv-branch-force-delete` for its colours/spacing. */
+.kv-branch-force-delete--floating {
+  position: fixed;
+  z-index: 30;
+  border: 1px solid var(--kv-panel-border);
+  border-radius: var(--kv-radius);
+  box-shadow: 0 2px 8px var(--kv-widget-shadow);
 }
 
 .kv-body {
