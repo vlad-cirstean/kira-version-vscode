@@ -439,6 +439,83 @@ export function withRemote(opts: WithRemoteOptions = {}): GeneratedRepo {
   };
 }
 
+export interface GeneratedRepoWithWorktree extends GeneratedRepo {
+  /** Absolute path of the linked worktree — `%(worktreepath)` on `branchInWorktree` resolves
+   *  here, never `dir` (the main worktree, D12's own "not for this session's own checkout"
+   *  subtraction needs both to exist so a test can assert against each). */
+  readonly worktreeDir: string;
+  /** The branch checked out in `worktreeDir`, not `dir` — the one §7.5's fifth blocker,
+   *  `worktreeConflict`, is about. */
+  readonly branchInWorktree: string;
+}
+
+/** P6 W21: a `branchy()`-shaped repo plus a real linked worktree holding a second branch
+ *  checked out — the fixture behind every `worktreeConflict` test (probe P6/D12), so a test
+ *  stops hand-rolling `mkdtempSync` + `git worktree add` inline (`repoService.test.ts`'s own
+ *  preflightCheckout suite did, before this generator existed). */
+export function withWorktree(): GeneratedRepoWithWorktree {
+  const repo = branchy();
+  const worktreeDir = mkdtempSync(join(tmpdir(), "kira-fixture-worktree-"));
+  execFileSync("git", ["worktree", "add", "--quiet", worktreeDir, "feature/a"], {
+    cwd: repo.dir,
+    env: baseEnv(repo.dir),
+  });
+  return { ...repo, worktreeDir, branchInWorktree: "feature/a" };
+}
+
+export interface GeneratedRepoWithInProgressRevert extends GeneratedRepo {
+  /** The commit `git revert` was asked to invert — the one `REVERT_HEAD` now names. */
+  readonly revertedSha: string;
+  /** The path left with unresolved conflict markers — `status --porcelain=v2`'s `U` line. */
+  readonly conflictedPath: string;
+}
+
+/** P6 W21: a real mid-revert, mid-conflict repository — `git revert <sha>` left exactly as a
+ *  real one leaves it on a conflict (REVERT_HEAD present, no commit made, `conflictedPath`
+ *  carrying `<<<<<<<` markers), for the in-progress reader and the opContinue/opAbort tests to
+ *  exercise against reality rather than a hand-written state-file directory
+ *  (`ops/conflict.test.ts`'s own unit coverage already does the latter). The shape: a base line,
+ *  a change (the commit that gets reverted), then a *further* change to the same line — reverting
+ *  the middle commit after the tip has moved the same line again is exactly what makes git unable
+ *  to apply the inverse patch cleanly. */
+export function inProgressRevert(): GeneratedRepoWithInProgressRevert {
+  const path = "conflict.txt";
+  const repo = new Repo(tempRepoDir("in-progress-revert"));
+  repo.init("main");
+  const commits: string[] = [];
+
+  repo.writeFile(path, "base line\n");
+  repo.add(path);
+  commits.push(repo.commit("base commit"));
+
+  repo.writeFile(path, "changed by the commit we will revert\n");
+  repo.add(path);
+  const revertedSha = repo.commit("change to revert");
+  commits.push(revertedSha);
+
+  repo.writeFile(path, "changed again after that, on top\n");
+  repo.add(path);
+  commits.push(repo.commit("further change on the same line"));
+
+  try {
+    repo.git(["revert", "--no-gpg-sign", "--no-edit", revertedSha]);
+    throw new Error("generateRepo.inProgressRevert(): revert did not conflict as designed");
+  } catch (error) {
+    // `execFileSync` throws on git's non-zero exit — the conflict this fixture exists to
+    // produce, not a real failure. Anything else (e.g. this file's own "did not conflict"
+    // throw above, which carries no `status`) rethrows rather than being swallowed.
+    if (!(error instanceof Error) || !("status" in error)) throw error;
+  }
+
+  return {
+    dir: repo.dir,
+    commits,
+    refs: { main: repo.refSha("main") },
+    revertedSha,
+    conflictedPath: path,
+  };
+}
+
 // ---------------------------------------------------------------------------------------
 // large(n) / largeBranchy(n) — via `git fast-import`, cached under a gitignored directory
 // keyed by inputs. Both write a commit-graph by default (§4.4, W13): `git gc` has written one
