@@ -69,6 +69,21 @@
   --kv-diff-deleted-fg: var(--vscode-gitDecoration-deletedResourceForeground, #c74e39);
   --kv-diff-renamed-fg: var(--vscode-gitDecoration-renamedResourceForeground, #73c991);
   --kv-diff-conflict-fg: var(--vscode-gitDecoration-conflictingResourceForeground, #e4676b);
+  /* P5 W8: `copied` and `typeChanged` have no dedicated workbench colour id (VS Code's own SCM
+     view renders both with the same tokens as their nearest sibling — a copy is a rename with
+     no path change worth a new hue, and a type change is a kind of modification), so these
+     alias rather than invent a sixth literal. `unmerged` reuses the conflict token directly —
+     the one status this table already had a name for. */
+  --kv-diff-copied-fg: var(--kv-diff-renamed-fg);
+  --kv-diff-typechanged-fg: var(--kv-diff-modified-fg);
+  --kv-diff-unmerged-fg: var(--kv-diff-conflict-fg);
+
+  /* P5 W9: DiffView.vue's insert/remove backgrounds and current-line highlight, straight off
+     the diff/text editor's own tokens (§6.1) so the in-app diff matches the real editor beside
+     it. Fallbacks are the editor's own defaults' approximate dark-theme values. */
+  --kv-diff-inserted-bg: var(--vscode-diffEditor-insertedTextBackground, rgba(155, 185, 85, 0.2));
+  --kv-diff-removed-bg: var(--vscode-diffEditor-removedTextBackground, rgba(255, 0, 0, 0.2));
+  --kv-line-highlight-bg: var(--vscode-editor-lineHighlightBackground, rgba(255, 255, 255, 0.07));
 
   /* Fonts */
   --kv-font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, sans-serif);

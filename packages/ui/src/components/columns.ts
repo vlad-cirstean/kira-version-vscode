@@ -16,10 +16,10 @@
  */
 import type { CommitRecord, CommitStore, DecorationRef } from "@kira-version/core";
 import type { Column, CustomDataView, Formatter, ItemMetadata } from "slickgrid";
-import { formatAbsoluteDate, formatRelativeDate } from "./dateFormat.ts";
-import { buildRefBadges } from "./refBadges.ts";
 import { graphColumnWidth } from "../graph/geometry.ts";
 import type { ColumnWidths, DateFormat } from "../state/viewState.ts";
+import { formatAbsoluteDate, formatRelativeDate } from "./dateFormat.ts";
+import { buildRefBadges } from "./refBadges.ts";
 
 /** Every field a column's `field:` must name is a valid dotted path into `CommitRecord`
  *  (SlickGrid's `Column<T>.field` is typed against `T`'s own leaf paths); formatters here read
@@ -94,19 +94,53 @@ function dateFormatter(ctx: DateFormatterContext): Formatter<CommitRecord> {
   };
 }
 
-/** A `<button disabled>`, per the plan's own scope boundary: "the sha column renders as a button
- *  because that is what §6.4 says it is, but the copy action and the `Clipboard` port land with
- *  P5's copy actions, and a button that looks live and does nothing is worse than a button that
- *  is explicitly not there yet — so it is rendered `disabled` with a title saying so." */
-const shaFormatter: Formatter<CommitRecord> = (_row, _cell, _value, _columnDef, dataContext) => {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.disabled = true;
-  button.className = "kv-cell-sha";
-  button.title = "Copy SHA — not available until P5";
-  button.textContent = dataContext.sha.slice(0, 7);
-  return button;
-};
+/** P5 W10: lands the copy action P4 shipped `disabled` with a "not available until P5" title.
+ *  `enabled()` is re-read on every render pass (mirroring `DateFormatterContext`'s own accessor
+ *  pattern) so a capability that is only known once `app.init` resolves — after the grid's first
+ *  paint — enables the button on the very next `invalidateAllRows()`/`render()` without a column
+ *  rebuild. Disabled rather than absent when the host has no clipboard (§3.3's feature
+ *  detection): the button still communicates "this copies the sha", it just cannot act on it —
+ *  consistent with `noCapabilities.ts`'s doc comment describing the same button under §6.4. */
+export interface ShaCopyContext {
+  readonly enabled: () => boolean;
+  readonly onCopy: (fullSha: string) => void;
+}
+
+function shaFormatter(ctx: ShaCopyContext): Formatter<CommitRecord> {
+  return (_row, _cell, _value, _columnDef, dataContext) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "kv-cell-sha";
+    // Starts out of the native tab order the instant it exists, never natively-tabbable even for
+    // one render frame — `CommitGrid.vue`'s `applyAccessibility` is what promotes exactly the
+    // currently-tabbable row's own button back to `0`, mirroring the row's roving tabindex. A
+    // button left at its browser default (implicitly focusable, no attribute needed) is reachable
+    // by a *native* `Tab` the instant it lands in the DOM, whether or not `applyAccessibility` has
+    // gotten to it yet — on a `hugeRepo`-sized scenario, where `Tab`-driven `scrollIntoView`
+    // continually reveals fresh rows before that pass catches up, that race turns into every row's
+    // still-default button becoming reachable in turn, one Tab press at a time, never actually
+    // escaping the grid.
+    button.tabIndex = -1;
+    const enabled = ctx.enabled();
+    button.disabled = !enabled;
+    button.title = enabled ? "Copy full SHA" : "Copy SHA — not available in this host";
+    const shortSha = dataContext.sha.slice(0, 7);
+    button.textContent = shortSha;
+    if (enabled) {
+      button.addEventListener("click", (event) => {
+        // Stops this click from also reaching SlickGrid's own delegated row-click handler
+        // (`CommitGrid.vue`'s `handleClick`) — copying a sha is not a row selection.
+        event.stopPropagation();
+        ctx.onCopy(dataContext.sha);
+        button.textContent = "Copied";
+        window.setTimeout(() => {
+          button.textContent = shortSha;
+        }, 1500);
+      });
+    }
+    return button;
+  };
+}
 
 /** The explicit widths `CommitGrid.vue` computes before building columns: `messageWidth` is
  *  whatever remains of the host's own width once every other column is accounted for, the graph
@@ -130,6 +164,7 @@ export function buildColumns(
   widths: ColumnWidthInputs,
   dateCtx: DateFormatterContext,
   graphFormatter: Formatter<CommitRecord>,
+  shaCopyCtx: ShaCopyContext,
 ): Column<CommitRecord>[] {
   return [
     {
@@ -186,7 +221,7 @@ export function buildColumns(
       sortable: false,
       focusable: false,
       selectable: false,
-      formatter: shaFormatter,
+      formatter: shaFormatter(shaCopyCtx),
     },
   ];
 }

@@ -176,7 +176,7 @@ if (viewState.read() === null) {
     // repo, rather than crash the page before the shell itself has a chance to render.
   }
   viewState.write({
-    version: 2,
+    version: 3,
     repoId,
     loadedRows: 0,
     detailOpen: true,
@@ -185,6 +185,7 @@ if (viewState.read() === null) {
     columnWidths: DEFAULT_COLUMN_WIDTHS,
     dateFormat: "relative",
     detailWidth: DEFAULT_DETAIL_WIDTH,
+    fileListMode: "tree",
   });
 }
 

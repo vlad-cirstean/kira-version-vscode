@@ -276,6 +276,7 @@ kira-version-vscode/
 │   │       ├── App.vue
 │   │       ├── bridge/             client.ts   typed client over the ipc contract
 │   │       ├── state/              repo.ts graphView.ts selection.ts search.ts settings.ts
+│   │       │                       detail.ts       P5's commit-detail pane state machine (§6.4)
 │   │       │                       viewState.ts    persisted view state (§2.1, §5.4)
 │   │       │                       review.ts       branch-review session state (§6.8)
 │   │       │                       pullRequests.ts branch → PR records for the session (§6.7)
@@ -293,6 +294,7 @@ kira-version-vscode/
 │   │       │   ├── refBadges.ts    badge element builder used by the message formatter
 │   │       │   ├── LoadMoreButton.vue
 │   │       │   ├── DetailPane.vue CommitMeta.vue FileTree.vue DiffView.vue
+│   │       │   ├── fileTreeModel.ts P5's pure fold of FileChange[] into a directory tree (§6.4)
 │   │       │   ├── SearchBox.vue SearchResults.vue ConflictBanner.vue
 │   │       │   ├── StashList.vue TagList.vue
 │   │       │   ├── review/         ReviewView.vue       the sidebar view's root (§6.8)

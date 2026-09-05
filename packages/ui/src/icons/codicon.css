@@ -73,3 +73,21 @@
 .codicon-git-commit::before {
   content: "\eafc";
 }
+
+/* P5 W8/W9/W10: FileTree.vue's expand/collapse chevrons and rename arrow, DiffView.vue's back
+   affordance and prev/next, and every copy-action button. */
+.codicon-chevron-right::before {
+  content: "\eab6";
+}
+
+.codicon-chevron-left::before {
+  content: "\eab5";
+}
+
+.codicon-arrow-small-right::before {
+  content: "\ea9f";
+}
+
+.codicon-copy::before {
+  content: "\ebcc";
+}

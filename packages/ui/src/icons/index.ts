@@ -2,6 +2,10 @@
 export const ACTION_ICONS = {
   refresh: "codicon-refresh",
   search: "codicon-search",
+  copy: "codicon-copy",
+  chevronRight: "codicon-chevron-right",
+  back: "codicon-chevron-left",
+  renameArrow: "codicon-arrow-small-right",
 } as const;
 
 export type IconAction = keyof typeof ACTION_ICONS;
