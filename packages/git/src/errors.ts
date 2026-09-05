@@ -99,7 +99,8 @@ const PATTERNS: readonly Pattern[] = [
   // different problems with different remedies.
   {
     kind: "AlreadyExists",
-    pattern: /a branch named '.*' already exists|tag '.*' already exists|! \[rejected\].*\(already exists\)/,
+    pattern:
+      /a branch named '.*' already exists|tag '.*' already exists|! \[rejected\].*\(already exists\)/,
   },
   // "! [rejected]  main -> main (fetch first)" / "(non-fast-forward)" — needs a fetch/rebase.
   { kind: "NonFastForward", pattern: /! \[rejected\]|non-fast-forward/ },
@@ -138,18 +139,23 @@ const PATTERNS: readonly Pattern[] = [
   // P6/W6, two real captures: "error: unable to delete 'x': remote ref does not exist" (a
   // remote tag delete for a name not on the remote) and "error: src refspec x does not match
   // any" (pushing a local ref that does not exist).
-  { kind: "RemoteRefMissing", pattern: /remote ref does not exist|src refspec .* does not match any/ },
+  {
+    kind: "RemoteRefMissing",
+    pattern: /remote ref does not exist|src refspec .* does not match any/,
+  },
   // "error: Your local changes to the following files would be overwritten by checkout:"
   { kind: "DirtyWorktree", pattern: /local changes to the following files would be overwritten/ },
   // "fatal: invalid reference: x" / "unknown revision or path" / "did not match any file(s)" —
   // plus four more real captures added at P6/W6 (probe P7): "fatal: reference is not a tree: x"
   // (`switch --detach` on a bad sha), "fatal: no branch named 'x'" (`branch -m` on one that
   // doesn't exist), "error: tag 'x' not found." (`tag -d` on one that doesn't exist), "fatal:
-  // bad object x" (`revert` on a bad sha).
+  // bad object x" (`revert` on a bad sha). "error: branch 'x' not found" (P6/W8: `branch -d`/`-D`
+  // on a name that doesn't exist — distinct wording from rename's "no branch named", probed while
+  // writing `RepoService.runOp`'s own integration tests) joins the same set.
   {
     kind: "NotFound",
     pattern:
-      /invalid reference:|unknown revision or path|did not match any file\(s\) known to git|bad revision|reference is not a tree:|no branch named|tag '.*' not found|bad object/,
+      /invalid reference:|unknown revision or path|did not match any file\(s\) known to git|bad revision|reference is not a tree:|no branch named|branch '.*' not found|tag '.*' not found|bad object/,
   },
   // "error: could not apply <sha>... <subject>" (cherry-pick hitting a real conflict) — and, as
   // of P6/W6, "error: could not revert <sha>... <subject>" (a conflicting revert; probe P8:

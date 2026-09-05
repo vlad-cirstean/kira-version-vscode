@@ -167,14 +167,17 @@ describe("classifyGitError", () => {
       "Please move or remove them before you switch branches.",
       "Aborting",
     ].join("\n");
-    expect(classifyGitError(["switch", "topic"], 1, stderr).kind).toBe("UntrackedWouldBeOverwritten");
+    expect(classifyGitError(["switch", "topic"], 1, stderr).kind).toBe(
+      "UntrackedWouldBeOverwritten",
+    );
   });
 
   test("UntrackedWouldBeOverwritten — --discard-changes, singular 'file', different verb ('merge')", () => {
-    const stderr = "error: Untracked working tree file 'added-on-topic.txt' would be overwritten by merge.\n";
-    expect(
-      classifyGitError(["switch", "--discard-changes", "topic"], 128, stderr).kind,
-    ).toBe("UntrackedWouldBeOverwritten");
+    const stderr =
+      "error: Untracked working tree file 'added-on-topic.txt' would be overwritten by merge.\n";
+    expect(classifyGitError(["switch", "--discard-changes", "topic"], 128, stderr).kind).toBe(
+      "UntrackedWouldBeOverwritten",
+    );
   });
 
   test("OperationInProgress — switch refused while merging/rebasing/cherry-picking/reverting", () => {
@@ -182,14 +185,19 @@ describe("classifyGitError", () => {
       classifyGitError(["switch", "main"], 128, "fatal: cannot switch branch while merging\n").kind,
     ).toBe("OperationInProgress");
     expect(
-      classifyGitError(["switch", "main"], 128, "fatal: cannot switch branch while rebasing\n").kind,
-    ).toBe("OperationInProgress");
-    expect(
-      classifyGitError(["switch", "main"], 128, "fatal: cannot switch branch while cherry-picking\n")
+      classifyGitError(["switch", "main"], 128, "fatal: cannot switch branch while rebasing\n")
         .kind,
     ).toBe("OperationInProgress");
     expect(
-      classifyGitError(["switch", "main"], 128, "fatal: cannot switch branch while reverting\n").kind,
+      classifyGitError(
+        ["switch", "main"],
+        128,
+        "fatal: cannot switch branch while cherry-picking\n",
+      ).kind,
+    ).toBe("OperationInProgress");
+    expect(
+      classifyGitError(["switch", "main"], 128, "fatal: cannot switch branch while reverting\n")
+        .kind,
     ).toBe("OperationInProgress");
   });
 
@@ -235,9 +243,7 @@ describe("classifyGitError", () => {
 
   test("NotFound — reference is not a tree (detach on a bad sha)", () => {
     const stderr = "fatal: reference is not a tree: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n";
-    expect(
-      classifyGitError(["switch", "--detach", "deadbeef"], 128, stderr).kind,
-    ).toBe("NotFound");
+    expect(classifyGitError(["switch", "--detach", "deadbeef"], 128, stderr).kind).toBe("NotFound");
   });
 
   test("NotFound — no branch named (rename on a name that doesn't exist)", () => {
@@ -250,11 +256,16 @@ describe("classifyGitError", () => {
     expect(classifyGitError(["tag", "-d", "nope"], 1, stderr).kind).toBe("NotFound");
   });
 
+  test("NotFound — branch not found (P6/W8: delete on a name that doesn't exist)", () => {
+    const stderr = "error: branch 'nope' not found\n";
+    expect(classifyGitError(["branch", "-D", "nope"], 1, stderr).kind).toBe("NotFound");
+  });
+
   test("NotFound — bad object (revert on a bad sha)", () => {
     const stderr = "fatal: bad object deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n";
-    expect(
-      classifyGitError(["revert", "--no-edit", "deadbeef"], 128, stderr).kind,
-    ).toBe("NotFound");
+    expect(classifyGitError(["revert", "--no-edit", "deadbeef"], 128, stderr).kind).toBe(
+      "NotFound",
+    );
   });
 
   test("Unknown — an unrecognised stderr keeps its text intact", () => {
