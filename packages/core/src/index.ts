@@ -82,6 +82,18 @@ export type {
   StatusResult,
   UntrackedStatusEntry,
 } from "./model/status.ts";
+export { classifyCheckout } from "./preflight/checkout.ts";
+export { classifyRevert } from "./preflight/revert.ts";
+export { classifyTagCreate, validateRefName } from "./preflight/tag.ts";
+export type {
+  CheckoutBlocker,
+  CheckoutPreflight,
+  DirtyPath,
+  RevertParentChoice,
+  RevertPreflight,
+  RevertPrediction,
+  TagCreatePreflight,
+} from "./preflight/types.ts";
 export type { Clipboard } from "./ports/clipboard.ts";
 export type { Dialogs, PickFolderOptions } from "./ports/dialogs.ts";
 export type { Disposable } from "./ports/disposable.ts";
