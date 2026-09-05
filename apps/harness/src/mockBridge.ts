@@ -1,4 +1,5 @@
-import { CommitStore, defaultSettings } from "@kira-version/core";
+import type { DocumentRef, FileChange } from "@kira-version/core";
+import { CommitStore, defaultSettings, mapLineAcrossDiff } from "@kira-version/core";
 import type {
   MessageChannelLike,
   RequestHandler,
@@ -9,6 +10,7 @@ import type {
   Transport,
 } from "@kira-version/ipc";
 import { CONTRACT_VERSION, createRpcClient, createRpcServer } from "@kira-version/ipc";
+import { diffKey } from "./scenarios/diffKey.ts";
 import { loadScenario } from "./scenarios/index.ts";
 import type { Scenario } from "./scenarios/types.ts";
 
@@ -33,6 +35,59 @@ const CHUNK_ROWS = 500;
  *  `kiraVersion.graph.pageSize`, so `hugeRepo`'s `graph.loadMore` genuinely needs more than one
  *  call to reach exhaustion, matching what a real host would do with the same setting. */
 const PAGE_SIZE = defaultSettings()["kiraVersion.graph.pageSize"];
+
+/** Browser-safe `basename` — `node:path` is not an option here (`topology.ts`'s own doc comment
+ *  on why Vite silently stubs `node:` built-ins to `{}` in a browser bundle applies just as much
+ *  here as it does there). */
+function basenameOf(path: string): string {
+  const slash = path.lastIndexOf("/");
+  return slash === -1 ? path : path.slice(slash + 1);
+}
+
+/** One `editor.openDiff`/`editor.goToFile` call, as the mock recorded it — the harness's model of
+ *  "what the host's editor did" (P5 W12's own wording: "the harness models an editor, and this is
+ *  in character rather than a test hook"). Read by W13's Playwright suite off
+ *  `window.__kiraHarness.lastEditorAction`; there is no real editor behind it to assert against
+ *  instead. */
+export type HarnessEditorAction =
+  | {
+      readonly kind: "openDiff";
+      readonly left: DocumentRef;
+      readonly right: DocumentRef;
+      readonly title: string;
+    }
+  | { readonly kind: "reveal"; readonly ref: DocumentRef; readonly line: number };
+
+/** Looks up the one `FileChange` a `commit.fileDiff`/`editor.openDiff` request needs, from
+ *  `Scenario.details`'s fixture — thrown, not invented, when the fixture does not cover the
+ *  request, matching `requireSession`'s own convention for "this is a fixture bug, not a real
+ *  outcome to model". */
+function requireFileChange(
+  scenario: Scenario,
+  sha: string,
+  path: string,
+  parentIndex: number,
+): FileChange {
+  const change = scenario.details?.[sha]?.[parentIndex]?.files.find((f) => f.path === path);
+  if (!change) {
+    throw new Error(
+      `mock bridge: no FileChange fixture for sha '${sha}' path '${path}' parentIndex ${parentIndex}`,
+    );
+  }
+  return change;
+}
+
+/** `service.blob`'s stand-in for D14a's "not in the checkout" branch: the harness has no real
+ *  object database, so a path's blob is "found" at `rev` exactly when `Scenario.diffs` fixtures
+ *  a `commit.fileDiff` body for `(rev, path)` — deliberately independent of whether that path
+ *  also appears in some commit's `CommitDetailFixture.files`, so one scenario can list a path as
+ *  "touched" (for the file tree) while still fixturing its blob as unresolvable (`goToFile`'s own
+ *  fifth case, "blob missing entirely"). Binary/too-large blobs are not modelled: the real UI
+ *  never calls `editor.goToFile` for one (W10 hides the action), so no scenario needs to
+ *  exercise those two `GoToFileOutcome.reason` values through this path. */
+function blobExistsAtRev(scenario: Scenario, rev: string, path: string): boolean {
+  return scenario.diffs?.[diffKey(rev, path)] !== undefined;
+}
 
 function toSettingsSnapshot(): SettingsSnapshot {
   const settings = defaultSettings();
@@ -185,17 +240,21 @@ async function emitRange(
 interface MockHandlers {
   readonly serverHandlers: ServerHandlers;
   getActiveRepoId(): string | null;
+  /** P5 W12's own hook — see `HarnessEditorAction`'s doc comment. */
+  getLastEditorAction(): HarnessEditorAction | undefined;
 }
 
 function createHandlers(scenario: Scenario): MockHandlers {
   const sessions = new Map<string, RepoSession>();
   let activeRepoId: string | null = null;
+  let lastEditorAction: HarnessEditorAction | undefined;
 
   const appInit: RequestHandler<"app.init"> = async () => ({
     host: "harness",
     contractVersion: CONTRACT_VERSION,
     settings: toSettingsSnapshot(),
     git: scenario.git,
+    capabilities: scenario.capabilities ?? { openInEditor: true, goToFile: true, clipboard: true },
   });
 
   const repoList: RequestHandler<"repo.list"> = async () => ({
@@ -286,6 +345,122 @@ function createHandlers(scenario: Scenario): MockHandlers {
     }
   };
 
+  const commitDetail: RequestHandler<"commit.detail"> = async ({ repoId, sha, parentIndex }) => {
+    requireSession(sessions, repoId);
+    const record = scenario.commits.find((c) => c.sha === sha);
+    if (!record) throw new Error(`mock bridge: commit.detail: unknown sha '${sha}'`);
+    const index = parentIndex ?? 0;
+    const fixture = scenario.details?.[sha]?.[index];
+    if (!fixture) {
+      throw new Error(
+        `mock bridge: commit.detail: no CommitDetailFixture for sha '${sha}' parentIndex ${index}`,
+      );
+    }
+    return {
+      sha: record.sha,
+      parents: record.parents,
+      author: record.author,
+      committer: record.committer,
+      subject: record.subject,
+      decoration: record.decoration,
+      body: fixture.body,
+      trailers: fixture.trailers,
+      signature: fixture.signature,
+      parentIndex: index,
+      files: fixture.files,
+    };
+  };
+
+  const commitFileDiff: RequestHandler<"commit.fileDiff"> = async ({
+    repoId,
+    sha,
+    path,
+    parentIndex,
+  }) => {
+    requireSession(sessions, repoId);
+    const record = scenario.commits.find((c) => c.sha === sha);
+    if (!record) throw new Error(`mock bridge: commit.fileDiff: unknown sha '${sha}'`);
+    const index = parentIndex ?? 0;
+    const change = requireFileChange(scenario, sha, path, index);
+    const baseSha = record.parents[index] ?? null;
+    const body = scenario.diffs?.[diffKey(sha, path)];
+    if (!body) {
+      throw new Error(`mock bridge: no FileDiffBody fixture for sha '${sha}' path '${path}'`);
+    }
+    return { sha, parentIndex: index, baseSha, change, body };
+  };
+
+  // Mirrors `packages/git/src/rpcHandlers.ts`'s own `editorOpenDiffImpl` almost line for line —
+  // this file's own doc comment on why: "the harness models an editor, and this is in character
+  // rather than a test hook" (P5 W12).
+  const editorOpenDiff: RequestHandler<"editor.openDiff"> = async ({
+    repoId,
+    sha,
+    path,
+    originalPath,
+    parentIndex,
+  }) => {
+    requireSession(sessions, repoId);
+    const record = scenario.commits.find((c) => c.sha === sha);
+    if (!record) throw new Error(`mock bridge: editor.openDiff: unknown sha '${sha}'`);
+    const index = parentIndex ?? 0;
+    const change = requireFileChange(scenario, sha, path, index);
+    const baseSha = record.parents[index] ?? null;
+    const leftPath = change.originalPath ?? originalPath ?? path;
+    const left: DocumentRef =
+      baseSha === null
+        ? { kind: "empty", label: basenameOf(leftPath) }
+        : { kind: "virtual", key: diffKey(baseSha, leftPath), label: basenameOf(leftPath) };
+    const right: DocumentRef =
+      change.kind === "deleted"
+        ? { kind: "empty", label: basenameOf(path) }
+        : { kind: "virtual", key: diffKey(sha, path), label: basenameOf(path) };
+    const shortSha = sha.slice(0, 7);
+    lastEditorAction = {
+      kind: "openDiff",
+      left,
+      right,
+      title: `${basenameOf(path)} (${shortSha}^ ↔ ${shortSha})`,
+    };
+    return {};
+  };
+
+  // D14a's decision procedure, run in the *same order* as `packages/git/src/rpcHandlers.ts`'s
+  // `editorGoToFileImpl` (that file's own doc comment points back here) — `checkoutPaths`
+  // standing in for `fs.existsSync`, `worktreeDrift` for `worktreeDiff`, and `blobExistsAtRev`
+  // for `service.blob`'s found/missing split (see that function's own doc comment for why the
+  // harness does not model `binary`/`tooLarge`).
+  const editorGoToFile: RequestHandler<"editor.goToFile"> = async ({ repoId, rev, path, line }) => {
+    requireSession(sessions, repoId);
+
+    if ((scenario.checkoutPaths ?? []).includes(path)) {
+      const hunks = scenario.worktreeDrift?.[diffKey(rev, path)];
+      const finalLine = hunks === undefined ? line : mapLineAcrossDiff(hunks, line, "old");
+      lastEditorAction = {
+        kind: "reveal",
+        ref: { kind: "file", path: `${repoId}/${path}` },
+        line: finalLine,
+      };
+      return { kind: "liveFile", path, line: finalLine };
+    }
+
+    if (!blobExistsAtRev(scenario, rev, path)) {
+      return { kind: "unavailable", reason: "notInRevision" };
+    }
+    const key = diffKey(rev, path);
+    lastEditorAction = {
+      kind: "reveal",
+      ref: { kind: "virtual", key, label: basenameOf(path) },
+      line,
+    };
+    return { kind: "virtualBlob", path, rev, line };
+  };
+
+  const clipboardWrite: RequestHandler<"clipboard.write"> = async ({ text }) => {
+    await navigator.clipboard.writeText(text);
+    return {};
+  };
+
   return {
     serverHandlers: {
       requests: {
@@ -297,12 +472,18 @@ function createHandlers(scenario: Scenario): MockHandlers {
         "graph.status": graphStatus,
         "graph.loadMore": graphLoadMore,
         "graph.refresh": graphRefresh,
+        "commit.detail": commitDetail,
+        "commit.fileDiff": commitFileDiff,
+        "editor.openDiff": editorOpenDiff,
+        "editor.goToFile": editorGoToFile,
+        "clipboard.write": clipboardWrite,
       },
       streams: {
         "graph.stream": graphStream,
       },
     },
     getActiveRepoId: () => activeRepoId,
+    getLastEditorAction: () => lastEditorAction,
   };
 }
 
@@ -314,12 +495,16 @@ export interface MockBridge extends Transport {
    *  no-op with no repo open, matching `RepoState`'s own `repo.changed` handling, which ignores
    *  events for a repo that is not (or no longer) the active one. */
   triggerRefsChanged(): void;
+  /** P5 W12: the most recent `editor.openDiff`/`editor.goToFile` action the mock recorded, or
+   *  `undefined` if neither has fired yet this session — `main.ts` exposes this as
+   *  `window.__kiraHarness.lastEditorAction` for W13's Playwright suite. */
+  getLastEditorAction(): HarnessEditorAction | undefined;
 }
 
 export function createMockBridge(scenarioName: string): MockBridge {
   const scenario = loadScenario(scenarioName);
   const [serverChannel, clientChannel] = createInMemoryChannelPair();
-  const { serverHandlers, getActiveRepoId } = createHandlers(scenario);
+  const { serverHandlers, getActiveRepoId, getLastEditorAction } = createHandlers(scenario);
   const server = createRpcServer(serverChannel, serverHandlers);
   const client = createRpcClient(clientChannel);
 
@@ -334,5 +519,6 @@ export function createMockBridge(scenarioName: string): MockBridge {
       if (repoId === null) return;
       server.emit("repo.changed", { repoId, kind: "refsChanged" });
     },
+    getLastEditorAction,
   };
 }
