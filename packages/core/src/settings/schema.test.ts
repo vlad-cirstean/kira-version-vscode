@@ -17,16 +17,46 @@ describe("coerceSettings", () => {
     expect(result.problems).toEqual([]);
   });
 
-  test("accepts a valid value for every type: string, ranged number, and enum", () => {
+  test("accepts a valid value for every type: string, ranged number, enum, and stringArray", () => {
     const result = coerceSettings({
       "kiraVersion.git.path": "/usr/bin/git",
       "kiraVersion.graph.pageSize": 1000,
       "kiraVersion.graph.scope": "head",
+      "kiraVersion.review.baseCandidates": ["trunk", "develop"],
     });
     expect(result.problems).toEqual([]);
     expect(result.settings["kiraVersion.git.path"]).toBe("/usr/bin/git");
     expect(result.settings["kiraVersion.graph.pageSize"]).toBe(1000);
     expect(result.settings["kiraVersion.graph.scope"]).toBe("head");
+    expect(result.settings["kiraVersion.review.baseCandidates"]).toEqual(["trunk", "develop"]);
+  });
+
+  test("stringArray: a non-array value falls back to the default and is reported", () => {
+    const result = coerceSettings({ "kiraVersion.review.baseCandidates": "main" });
+    expect(result.settings["kiraVersion.review.baseCandidates"]).toEqual(
+      SETTINGS["kiraVersion.review.baseCandidates"].default,
+    );
+    expect(result.problems).toEqual([
+      { key: "kiraVersion.review.baseCandidates", reason: "wrong type" },
+    ]);
+  });
+
+  test("stringArray: one non-string member rejects the WHOLE array, never partly", () => {
+    const result = coerceSettings({
+      "kiraVersion.review.baseCandidates": ["main", 42, "master"],
+    });
+    expect(result.settings["kiraVersion.review.baseCandidates"]).toEqual(
+      SETTINGS["kiraVersion.review.baseCandidates"].default,
+    );
+    expect(result.problems).toEqual([
+      { key: "kiraVersion.review.baseCandidates", reason: "wrong type" },
+    ]);
+  });
+
+  test("stringArray: an empty array is a valid value, not an error", () => {
+    const result = coerceSettings({ "kiraVersion.review.baseCandidates": [] });
+    expect(result.settings["kiraVersion.review.baseCandidates"]).toEqual([]);
+    expect(result.problems).toEqual([]);
   });
 
   test("a wrong type falls back to the default and is reported", () => {
@@ -108,6 +138,17 @@ describe("toVsCodeConfiguration", () => {
       type: "string",
       default: "",
       description: SETTINGS["kiraVersion.git.path"].description,
+    });
+
+    const baseCandidates = properties["kiraVersion.review.baseCandidates"] as Record<
+      string,
+      unknown
+    >;
+    expect(baseCandidates).toEqual({
+      type: "array",
+      items: { type: "string" },
+      default: ["main", "master"],
+      description: SETTINGS["kiraVersion.review.baseCandidates"].description,
     });
   });
 });

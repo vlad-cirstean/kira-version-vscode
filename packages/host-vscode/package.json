@@ -82,6 +82,17 @@
             "info",
             "debug"
           ]
+        },
+        "kiraVersion.review.baseCandidates": {
+          "type": "array",
+          "default": [
+            "main",
+            "master"
+          ],
+          "description": "Branch review (§6.8): candidate base branches to compare against, in order, tried after the branch's own upstream and the repository's detected default branch (origin/HEAD) both fail to resolve.",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },

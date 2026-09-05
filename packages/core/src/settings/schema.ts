@@ -17,7 +17,10 @@ import { assert } from "../util/assert.ts";
  *  `DecorationRef`). */
 export type HostKind = "vscode" | "harness";
 
-export type SettingType = "string" | "number" | "boolean" | "enum";
+/** `docs/plans/P7.md` W7/D43: `"stringArray"` is the first array-valued setting type — added for
+ *  `kiraVersion.review.baseCandidates` (§6.8) exclusively; nothing else in the schema needs it
+ *  yet. */
+export type SettingType = "string" | "number" | "boolean" | "enum" | "stringArray";
 
 export interface SettingDef<T> {
   readonly key: string;
@@ -62,6 +65,15 @@ export const SETTINGS = {
     description: "Verbosity of kira-version's own diagnostic log.",
     enum: ["off", "error", "warn", "info", "debug"],
   },
+  "kiraVersion.review.baseCandidates": {
+    key: "kiraVersion.review.baseCandidates",
+    type: "stringArray",
+    default: ["main", "master"],
+    description:
+      "Branch review (§6.8): candidate base branches to compare against, in order, tried " +
+      "after the branch's own upstream and the repository's detected default branch " +
+      "(origin/HEAD) both fail to resolve.",
+  },
 } as const satisfies Record<string, SettingDef<unknown>>;
 
 export type SettingKey = keyof typeof SETTINGS;
@@ -76,9 +88,11 @@ type ValueOfDef<D extends SettingDef<unknown>> = D["type"] extends "string"
     ? boolean
     : D["type"] extends "number"
       ? number
-      : D["enum"] extends readonly (infer E)[]
-        ? E
-        : never;
+      : D["type"] extends "stringArray"
+        ? readonly string[]
+        : D["enum"] extends readonly (infer E)[]
+          ? E
+          : never;
 
 export type SettingValue<K extends SettingKey> = ValueOfDef<(typeof SETTINGS)[K]>;
 
@@ -91,7 +105,14 @@ function isSettingKey(key: string): key is SettingKey {
 /** The canonical default for every key, straight from `SETTINGS` — the single cast below just
  *  restates what `SETTINGS`'s own `satisfies` clause already guarantees element-by-element. */
 export function defaultSettings(): Settings {
-  return Object.fromEntries(SETTING_KEYS.map((key) => [key, SETTINGS[key].default])) as Settings;
+  // `as unknown as Settings`: once a `stringArray` key's value type is a literal array tuple
+  // (`readonly ["main", "master"]`), TypeScript's "sufficient overlap" check on a direct `as
+  // Settings` no longer holds against `Object.fromEntries`'s inferred `{[k: string]: ...}`
+  // shape, even though every member is in fact assignable — the same guarantee `SETTINGS`'s own
+  // `satisfies` clause already establishes element-by-element.
+  return Object.fromEntries(
+    SETTING_KEYS.map((key) => [key, SETTINGS[key].default]),
+  ) as unknown as Settings;
 }
 
 export interface CoerceProblem {
@@ -129,6 +150,14 @@ function coerceOne(def: SettingDef<unknown>, value: unknown): CoerceOne {
       const members: readonly string[] | undefined = def.enum;
       assert(members !== undefined, `SETTINGS[${def.key}]: type "enum" without an enum list`);
       if (!members.includes(value)) return { ok: false, reason: "unknown enum member" };
+      return { ok: true, value };
+    }
+    case "stringArray": {
+      // Never-partly-valid, exactly like every other type: one non-string member and the
+      // WHOLE array falls back to the default, rather than silently dropping just that member.
+      if (!Array.isArray(value) || !value.every((v) => typeof v === "string")) {
+        return { ok: false, reason: "wrong type" };
+      }
       return { ok: true, value };
     }
   }
@@ -172,10 +201,11 @@ export function toVsCodeConfiguration(): VsCodeConfigurationSchema {
     const def: SettingDef<unknown> = SETTINGS[key];
 
     const property: Record<string, unknown> = {
-      type: def.type === "enum" ? "string" : def.type,
+      type: def.type === "enum" ? "string" : def.type === "stringArray" ? "array" : def.type,
       default: def.default,
       description: def.description,
     };
+    if (def.type === "stringArray") property.items = { type: "string" };
     if (def.enum !== undefined) property.enum = def.enum;
     if (def.minimum !== undefined) property.minimum = def.minimum;
     if (def.maximum !== undefined) property.maximum = def.maximum;
