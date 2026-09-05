@@ -4,6 +4,7 @@ import {
   DEFAULT_COLUMN_WIDTHS,
   DEFAULT_DETAIL_WIDTH,
   mount,
+  NullViewStateStore,
   type TokenMap,
   TokenReader,
 } from "@kira-version/ui";
@@ -37,6 +38,9 @@ declare global {
       readonly lastUndo: RecordedUndo | undefined;
       /** P6 W19: see `mockBridge.ts`'s own `MockHandlers.resolveOneConflictedPath` doc comment. */
       resolveOneConflictedPath(): boolean;
+      /** P7 W15: pushes `review.target` at the mock bridge — see `mockBridge.ts`'s own
+       *  `MockBridge.pushReviewTarget` doc comment. */
+      pushReviewTarget(repoId: string, branch: string): void;
     };
   }
 }
@@ -136,6 +140,12 @@ function arraysEqual(a: ArrayLike<number>, b: ArrayLike<number>): boolean {
 const params = new URLSearchParams(location.search);
 const scenarioName = params.get("scenario") ?? "clean";
 const themeParam = params.get("theme") ?? "vscode-dark";
+// P7 W15: `?view=review` alongside `?scenario=` — no second Playwright project, the same page at
+// a different root (`main.ts`'s own `mount({view})` seam, W9). `?branch=` is this harness's own
+// convenience for the cold-bootstrap arm (D40) — a deep link straight into a resolved branch,
+// without a spec needing `window.__kiraHarness.pushReviewTarget` for the common case.
+const viewParam = params.get("view") === "review" ? "review" : "graph";
+const branchParam = params.get("branch");
 
 applyThemeKind(isThemeKind(themeParam) ? themeParam : "vscode-dark");
 
@@ -175,40 +185,69 @@ window.__kiraHarness = {
   resolveOneConflictedPath(): boolean {
     return transport.resolveOneConflictedPath();
   },
+  pushReviewTarget(repoId: string, branch: string): void {
+    transport.pushReviewTarget(repoId, branch);
+  },
 };
 
-// `App.vue`'s own `bootstrap()` only opens a repo automatically when `viewState.read()` returns
-// a persisted, non-null `repoId` — exploited here to get every scenario auto-loading on mount,
-// same as before `SessionStorageViewStateStore` (P4 W13) replaced the old in-memory store. The
-// difference that matters now: seed a default state only when nothing is there yet. The old
-// in-memory store started empty on every navigation by construction, so writing fresh defaults
-// unconditionally was a no-op difference; `sessionStorage` genuinely survives a `page.reload()`,
-// and unconditionally overwriting it here would silently discard whatever `App.vue`'s own
-// persistence watch (a column resize, say) had just written — defeating the one thing this
-// store swap exists to let a Playwright spec exercise.
-const viewState = new SessionStorageViewStateStore();
-if (viewState.read() === null) {
-  let repoId: string | null = null;
-  try {
-    const scenario = loadScenario(scenarioName);
-    if (scenario.repoOpen.kind === "ok") repoId = scenario.repoOpen.repo.repoId;
-  } catch {
-    // An unimplemented scenario stub (dirty/conflicted, see their own files) throws on any
-    // property access by design — leave repoId null and let bootstrap() run without opening a
-    // repo, rather than crash the page before the shell itself has a chance to render.
+if (viewParam === "review") {
+  // P7 W15: the review view persists nothing (§6.8) — `NullViewStateStore`, which also proves
+  // the no-persistence property through the harness, not just the real host (W9's own text).
+  // `?branch=` resolves against the scenario's own `repoOpen` exactly as the graph branch below
+  // resolves its seeded `repoId` — no target at all (state 1, "no branch") when either is
+  // missing or the scenario stub throws.
+  let target: { repoId: string; branch: string } | null = null;
+  if (branchParam) {
+    try {
+      const scenario = loadScenario(scenarioName);
+      if (scenario.repoOpen.kind === "ok") {
+        target = { repoId: scenario.repoOpen.repo.repoId, branch: branchParam };
+      }
+    } catch {
+      // See the graph branch's own identical catch below — an unimplemented scenario stub.
+    }
   }
-  viewState.write({
-    version: 3,
-    repoId,
-    loadedRows: 0,
-    detailOpen: true,
-    scrollRow: 0,
-    selectedSha: null,
-    columnWidths: DEFAULT_COLUMN_WIDTHS,
-    dateFormat: "relative",
-    detailWidth: DEFAULT_DETAIL_WIDTH,
-    fileListMode: "tree",
+  mount(container, {
+    transport,
+    viewState: new NullViewStateStore(),
+    host: "harness",
+    view: "review",
+    target,
   });
-}
+} else {
+  // `App.vue`'s own `bootstrap()` only opens a repo automatically when `viewState.read()` returns
+  // a persisted, non-null `repoId` — exploited here to get every scenario auto-loading on mount,
+  // same as before `SessionStorageViewStateStore` (P4 W13) replaced the old in-memory store. The
+  // difference that matters now: seed a default state only when nothing is there yet. The old
+  // in-memory store started empty on every navigation by construction, so writing fresh defaults
+  // unconditionally was a no-op difference; `sessionStorage` genuinely survives a `page.reload()`,
+  // and unconditionally overwriting it here would silently discard whatever `App.vue`'s own
+  // persistence watch (a column resize, say) had just written — defeating the one thing this
+  // store swap exists to let a Playwright spec exercise.
+  const viewState = new SessionStorageViewStateStore();
+  if (viewState.read() === null) {
+    let repoId: string | null = null;
+    try {
+      const scenario = loadScenario(scenarioName);
+      if (scenario.repoOpen.kind === "ok") repoId = scenario.repoOpen.repo.repoId;
+    } catch {
+      // An unimplemented scenario stub (dirty/conflicted, see their own files) throws on any
+      // property access by design — leave repoId null and let bootstrap() run without opening a
+      // repo, rather than crash the page before the shell itself has a chance to render.
+    }
+    viewState.write({
+      version: 3,
+      repoId,
+      loadedRows: 0,
+      detailOpen: true,
+      scrollRow: 0,
+      selectedSha: null,
+      columnWidths: DEFAULT_COLUMN_WIDTHS,
+      dateFormat: "relative",
+      detailWidth: DEFAULT_DETAIL_WIDTH,
+      fileListMode: "tree",
+    });
+  }
 
-mount(container, { transport, viewState, host: "harness" });
+  mount(container, { transport, viewState, host: "harness", view: "graph" });
+}

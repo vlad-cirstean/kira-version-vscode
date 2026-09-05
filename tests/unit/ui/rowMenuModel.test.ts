@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { InProgressOperation } from "../../../packages/ipc/src/index.ts";
 import {
   buildRefMenu,
+  buildReviewRowMenu,
   buildRowMenu,
   remoteNamesFrom,
 } from "../../../packages/ui/src/components/rowMenuModel.ts";
@@ -110,7 +111,7 @@ describe("buildRefMenu", () => {
       inProgress: null,
     });
     const ids = sections.flatMap((s) => s.items.map((i) => i.id));
-    expect(ids).toEqual(["checkoutRef", "renameRef", "deleteRef"]);
+    expect(ids).toEqual(["checkoutRef", "renameRef", "reviewBranch", "deleteRef"]);
     expect(sections[0]?.items.every((i) => !i.disabled)).toBe(true);
   });
 
@@ -139,7 +140,10 @@ describe("buildRefMenu", () => {
       knownRemotes: [],
       inProgress: null,
     });
-    expect(sections.flatMap((s) => s.items.map((i) => i.id))).toEqual(["checkoutRef"]);
+    expect(sections.flatMap((s) => s.items.map((i) => i.id))).toEqual([
+      "checkoutRef",
+      "reviewBranch",
+    ]);
   });
 
   test("a tag with no known remotes: checkout/delete only", () => {
@@ -187,6 +191,44 @@ describe("buildRefMenu", () => {
     expect(sections.flatMap((s) => s.items).find((i) => i.id === "renameRef")?.disabled).toBe(
       false,
     );
+  });
+
+  test("docs/plans/P7.md W14: reviewBranch is never gated, even mid-operation", () => {
+    const sections = buildRefMenu({
+      kind: "branch",
+      shortName: "feature",
+      isHead: false,
+      knownRemotes: [],
+      inProgress: inProgress({ kind: "rebase", headName: "refs/heads/other" }),
+    });
+    expect(
+      sections.flatMap((s) => s.items).find((i) => i.id === "reviewBranch")?.disabled,
+    ).toBe(false);
+  });
+
+  test("docs/plans/P7.md W14: a tag never offers reviewBranch", () => {
+    const sections = buildRefMenu({
+      kind: "tag",
+      shortName: "v1.0",
+      isHead: false,
+      knownRemotes: [],
+      inProgress: null,
+    });
+    expect(sections.flatMap((s) => s.items.map((i) => i.id))).not.toContain("reviewBranch");
+  });
+});
+
+describe("buildReviewRowMenu", () => {
+  test("docs/plans/P7.md W13: copy sha and copy message only, never checkout/branch/tag/revert", () => {
+    const sections = buildReviewRowMenu(true);
+    expect(sections.flatMap((s) => s.items.map((i) => i.id))).toEqual([
+      "copySha",
+      "copyMessage",
+    ]);
+  });
+
+  test("absent (not disabled) when clipboard is unavailable", () => {
+    expect(buildReviewRowMenu(false)).toEqual([]);
   });
 });
 

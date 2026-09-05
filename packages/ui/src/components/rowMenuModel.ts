@@ -76,6 +76,22 @@ export function buildRowMenu(ctx: CommitMenuContext): MenuSection[] {
   return sections;
 }
 
+/**
+ * `docs/plans/P7.md` W13 — the review view's own per-commit menu: copy sha and copy message
+ * *only* (§6.8's "Read-only" — a review row offers no checkout/branch/tag/revert, and is never
+ * gated on `canRunOp`, since none of these items are operations git could refuse mid-op). Kept
+ * separate from `buildRowMenu` rather than that function gated down to nothing by a flag, so a
+ * reader never has to check "which of these does the review row actually get" against a table of
+ * conditions — there is no table, there is a second, smaller function. Absent (not disabled, same
+ * convention `buildRowMenu` already uses) when the host has no clipboard port.
+ */
+export function buildReviewRowMenu(clipboardEnabled: boolean): MenuSection[] {
+  if (!clipboardEnabled) return [];
+  return [
+    { items: [plainItem("copySha", "Copy SHA"), plainItem("copyMessage", "Copy commit message")] },
+  ];
+}
+
 export interface RefMenuContext {
   readonly kind: RefKind;
   readonly shortName: string;
@@ -110,12 +126,24 @@ export function buildRefMenu(ctx: RefMenuContext): MenuSection[] {
   }
   // branch or remoteBranch — a remote-tracking ref itself is read-only here (its only action is
   // the checkout the picker's row already offers); rename/delete apply to a local branch only.
+  // `docs/plans/P7.md` W14: "Review branch changes" is offered for both — it is a read, never
+  // gated on `canRunOp` (§7.11's in-progress gate is about operations git would refuse), and is
+  // absent for a tag entirely (a tag is a point, not a line of development — `<base>..<tag>` is
+  // not the question §6.8 answers).
   if (ctx.kind === "remoteBranch") {
-    return [{ items: [gatedItem("checkoutRef", "Checkout", "checkout", ctx.inProgress)] }];
+    return [
+      {
+        items: [
+          gatedItem("checkoutRef", "Checkout", "checkout", ctx.inProgress),
+          plainItem("reviewBranch", "Review branch changes"),
+        ],
+      },
+    ];
   }
   const items: MenuItem[] = [
     gatedItem("checkoutRef", "Checkout", "checkout", ctx.inProgress),
     plainItem("renameRef", "Rename branch…"),
+    plainItem("reviewBranch", "Review branch changes"),
   ];
   // git refuses to delete the branch you are currently on — not one of §7.11's gated op kinds
   // (the gate is scoped to what an in-progress *operation* blocks), so this is its own, simpler

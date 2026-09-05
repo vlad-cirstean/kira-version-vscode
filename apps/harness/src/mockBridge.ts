@@ -1340,6 +1340,11 @@ export interface MockBridge extends Transport {
   /** P6 W19: `main.ts` exposes this as `window.__kiraHarness.resolveOneConflictedPath` — see
    *  `MockHandlers`'s own doc comment on why this exists. */
   resolveOneConflictedPath(): boolean;
+  /** P7 W15: pushes `review.target` — `main.ts` exposes this as
+   *  `window.__kiraHarness.pushReviewTarget`, letting a Playwright spec exercise D40's
+   *  "already-open view" arm (the panel's own "Review branch changes" menu, or the palette
+   *  command revealing an already-live view) without a second webview to drive. */
+  pushReviewTarget(repoId: string, branch: string): void;
 }
 
 export function createMockBridge(scenarioName: string): MockBridge {
@@ -1376,5 +1381,8 @@ export function createMockBridge(scenarioName: string): MockBridge {
     getLastOp,
     getLastUndo,
     resolveOneConflictedPath,
+    pushReviewTarget(repoId: string, branch: string): void {
+      server.emit("review.target", { repoId, branch });
+    },
   };
 }

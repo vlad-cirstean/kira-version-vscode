@@ -36,6 +36,16 @@ export interface ReviewExpansion {
   readonly actions: DetailActions;
 }
 
+/** D40's cold-bootstrap arm, threaded from `main.ts`'s `MountOptions.target` down to
+ *  `ReviewView.vue`'s own `target` prop — kept here, a plain `.ts` module, rather than exported
+ *  from `ReviewView.vue` itself: a Vue SFC's `<script setup>` module shim has no named type
+ *  exports (only the default component), so `main.ts`/`index.ts` could not otherwise import it
+ *  by name. */
+export interface ReviewTarget {
+  readonly repoId: string;
+  readonly branch: string;
+}
+
 /** "The outcome or the count changed" (D39's mid-review `refsChanged` resolution) — compares the
  *  two things a background re-resolve can find different: which base (and thus which range
  *  shape) applies, and, when both are `ready`, how many commits are in it. `reason` is
