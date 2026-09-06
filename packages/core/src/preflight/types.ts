@@ -8,6 +8,7 @@
  */
 import type { InProgressOperation } from "../model/operation.ts";
 import type { RefKind } from "../model/ref.ts";
+import type { PullStrategy, PullStrategySource } from "../model/remote.ts";
 
 /** One path from `status`, discriminated by whether it is tracked — the two halves §7.5 says
  *  produce different blockers and different remedies. */
@@ -75,6 +76,43 @@ export interface RevertPreflight {
   readonly detachedHead: boolean;
   readonly verdict: "clean" | "willConflict" | "blocked";
   readonly blockers: readonly ("dirtyWorktree" | "inProgressOperation" | "mainlineRequired")[];
+}
+
+// ---------------------------------------------------------------------------------------
+// P8 — pull and push pre-flight (§7.3/§7.4). Also the two the wire carries.
+// ---------------------------------------------------------------------------------------
+
+/** P9's autostash seam, empty at P8 (`docs/plans/P8.md`'s "Pull: decomposition and the strategy
+ *  resolution order" — mirrors `CheckoutPreflight.routes`'s own precedent exactly). */
+export type PullRoute = "stashAndCarry";
+
+export type PullBlocker = "dirtyNonFastForward";
+
+export interface PullPreflight {
+  readonly strategy: PullStrategy;
+  readonly source: PullStrategySource;
+  readonly upstream: string | null;
+  readonly ahead: number;
+  readonly behind: number;
+  readonly dirty: boolean;
+  /** Empty at P8 — see `PullRoute`'s own doc comment. */
+  readonly routes: readonly PullRoute[];
+  readonly blockers: readonly PullBlocker[];
+}
+
+export interface PushPreflight {
+  readonly upstream: string | null;
+  readonly wouldSetUpstream: boolean;
+  readonly ahead: number;
+  readonly behind: number;
+  /** The remote-tracking sha the lease will be checked against — read here and shown in the
+   *  dialog, so "you are about to overwrite <sha>" is a fact, not a guess. `null` when the
+   *  remote-tracking ref does not exist yet (nothing to overwrite). */
+  readonly remoteTip: string | null;
+  /** The matched protected pattern, or `null` — never a bare boolean (D52's own reasoning,
+   *  `matchProtectedBranch`'s doc comment). */
+  readonly protectedBy: string | null;
+  readonly fastForward: boolean;
 }
 
 /** Never wire-carried — see the file header. `existing`/`existingIsAnnotated` are what let the

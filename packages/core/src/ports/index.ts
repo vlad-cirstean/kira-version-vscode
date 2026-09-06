@@ -1,4 +1,5 @@
 export type { Clipboard } from "./clipboard.ts";
+export type { CredentialPrompt, CredentialRequest } from "./credentialPrompt.ts";
 export type { Dialogs, PickFolderOptions } from "./dialogs.ts";
 export type { Disposable } from "./disposable.ts";
 export type {

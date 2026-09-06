@@ -68,7 +68,16 @@ export type {
   UndoSlotSnapshot,
 } from "./model/operation.ts";
 export { canRunOp, classifyInProgress, describeInProgress } from "./model/operation.ts";
+export type { ProtectedBranchProblem, ProtectedMatch } from "./model/protectedBranch.ts";
+export { matchProtectedBranch } from "./model/protectedBranch.ts";
 export type { RefKind, RefRecord, RefTrack, TagAnnotation } from "./model/ref.ts";
+export type {
+  PullStrategy,
+  PullStrategySource,
+  RefUpdate,
+  RemoteOpKind,
+} from "./model/remote.ts";
+export type { HeadState, RepoIdentity } from "./model/repo.ts";
 export type {
   BaseCandidate,
   BaseResolutionCore,
@@ -76,9 +85,7 @@ export type {
   ResolveBaseInput,
 } from "./model/review.ts";
 export { resolveBase } from "./model/review.ts";
-export type { HeadState, RepoIdentity } from "./model/repo.ts";
 export type { StashEntry } from "./model/stash.ts";
-export { isAnnotated, tagTargetCommit } from "./model/tag.ts";
 export type {
   FileStatusCode,
   IgnoredStatusEntry,
@@ -91,19 +98,9 @@ export type {
   UntrackedStatusEntry,
 } from "./model/status.ts";
 export { dirtyPathsFrom, summarizeStatus } from "./model/status.ts";
-export { classifyCheckout } from "./preflight/checkout.ts";
-export { classifyRevert } from "./preflight/revert.ts";
-export { classifyTagCreate, validateRefName } from "./preflight/tag.ts";
-export type {
-  CheckoutBlocker,
-  CheckoutPreflight,
-  DirtyPath,
-  RevertParentChoice,
-  RevertPreflight,
-  RevertPrediction,
-  TagCreatePreflight,
-} from "./preflight/types.ts";
+export { isAnnotated, tagTargetCommit } from "./model/tag.ts";
 export type { Clipboard } from "./ports/clipboard.ts";
+export type { CredentialPrompt, CredentialRequest } from "./ports/credentialPrompt.ts";
 export type { Dialogs, PickFolderOptions } from "./ports/dialogs.ts";
 export type { Disposable } from "./ports/disposable.ts";
 export type {
@@ -123,6 +120,25 @@ export type {
 export type { Storage, StorageScope } from "./ports/storage.ts";
 export type { Theme, ThemeKind } from "./ports/theme.ts";
 export type { RepoCandidate, WorkspaceRoots } from "./ports/workspaceRoots.ts";
+export { classifyCheckout } from "./preflight/checkout.ts";
+export type { PullConfigValues } from "./preflight/pull.ts";
+export { buildPullPreflight, resolvePullStrategy } from "./preflight/pull.ts";
+export { classifyPush } from "./preflight/push.ts";
+export { classifyRevert } from "./preflight/revert.ts";
+export { classifyTagCreate, validateRefName } from "./preflight/tag.ts";
+export type {
+  CheckoutBlocker,
+  CheckoutPreflight,
+  DirtyPath,
+  PullBlocker,
+  PullPreflight,
+  PullRoute,
+  PushPreflight,
+  RevertParentChoice,
+  RevertPrediction,
+  RevertPreflight,
+  TagCreatePreflight,
+} from "./preflight/types.ts";
 export type {
   CoerceProblem,
   CoerceResult,
@@ -145,6 +161,8 @@ export { CommitStore, packedTransferList } from "./store/commitStore.ts";
 export { StringInterner, SubjectBuffer } from "./store/intern.ts";
 export type { ShaTableOptions } from "./store/shaTable.ts";
 export { bytesToHex, hexToBytes, ShaTable } from "./store/shaTable.ts";
+export type { UndoPolicy, UndoRecord } from "./undo/slot.ts";
+export { UNDO_POLICY, UndoSlot } from "./undo/slot.ts";
 export { AssertionError, assert, assertDefined, assertNever } from "./util/assert.ts";
 export type { RecordSplitterOptions } from "./util/nulSplit.ts";
 export {
@@ -153,5 +171,3 @@ export {
   splitLimitedFields,
   splitRecords,
 } from "./util/nulSplit.ts";
-export type { UndoPolicy, UndoRecord } from "./undo/slot.ts";
-export { UNDO_POLICY, UndoSlot } from "./undo/slot.ts";

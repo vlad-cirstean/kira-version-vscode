@@ -6,6 +6,7 @@
  */
 
 import type { Clipboard } from "./clipboard.ts";
+import type { CredentialPrompt, CredentialRequest } from "./credentialPrompt.ts";
 import type { Dialogs, PickFolderOptions } from "./dialogs.ts";
 import type { Disposable } from "./disposable.ts";
 import type {
@@ -148,6 +149,31 @@ export class FakeDialogs implements Dialogs {
   pickFolder(opts: PickFolderOptions): Promise<string | null> {
     this.calls.push(opts);
     return Promise.resolve(this.queuedResults.shift() ?? null);
+  }
+}
+
+/**
+ * P8/W12/W13's answer-or-hang double: `queuedAnswers` is consumed in order (like
+ * `FakeDialogs.queuedResults`); when it runs dry, `ask` either resolves `undefined` (dismissed
+ * — the default) or, when `hang` is set, never resolves at all until `signal` fires — this is
+ * how W19's "no operation can hang on a prompt" integration test drives the askpass broker's
+ * own timeout without waiting 120 real seconds.
+ */
+export class FakeCredentialPrompt implements CredentialPrompt {
+  readonly calls: CredentialRequest[] = [];
+  queuedAnswers: (string | undefined)[] = [];
+  /** When true, `ask` never resolves on its own — only `request.signal` firing settles it
+   *  (with `undefined`), exactly like a broker whose own timeout is what unblocks it. */
+  hang = false;
+
+  ask(request: CredentialRequest): Promise<string | undefined> {
+    this.calls.push(request);
+    if (this.hang) {
+      return new Promise((resolve) => {
+        request.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+      });
+    }
+    return Promise.resolve(this.queuedAnswers.shift());
   }
 }
 

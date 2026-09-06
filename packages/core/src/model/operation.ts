@@ -215,6 +215,24 @@ export type OpErrorKind =
   | "OperationInProgress"
   | "RemoteRefMissing"
   | "HookRejected"
+  /** P8: `git`'s own `(stale info)` — the bare `--force-with-lease` lease was violated because
+   *  the remote moved and we never fetched it. Probe 1, rows 1-2. */
+  | "LeaseViolation"
+  /** P8: `git`'s own `(remote ref updated since checkout)` — `--force-if-includes` caught a
+   *  remote move we DID fetch but have not integrated. Probe 1, row 3. Kept distinct from
+   *  `LeaseViolation`: the remedies differ (fetch-and-look vs. you-already-saw-this). */
+  | "RemoteRefUpdated"
+  /** P8: a transport-level failure (`Could not resolve host`, `Connection refused/timed out`) —
+   *  never git's own decision, always the network. */
+  | "NetworkFailed"
+  /** P8: the remote itself does not exist (`Repository not found`, "does not appear to be a
+   *  git repository"). */
+  | "RemoteNotFound"
+  /** P8: neither git says this nor could it — the confirmation token `remote.run` requires for
+   *  a protected-branch force-push/delete was absent or did not match (D52). */
+  | "ProtectedBranch"
+  /** P8: a remote op was cancelled mid-flight (D50) — never a git-reported failure either. */
+  | "Cancelled"
   | "Unknown";
 
 export interface UndoSlotSnapshot {
