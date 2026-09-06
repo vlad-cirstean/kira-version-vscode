@@ -1,6 +1,7 @@
-import { canRunOp } from "@kira-version/core";
+import { canRunOp, classifyReset } from "@kira-version/core";
 import type {
   CheckoutPreflight,
+  CherryPickPreflight,
   HeadState,
   InProgressOperation,
   OpErrorKind,
@@ -14,6 +15,8 @@ import type {
   RemoteOpParams,
   RemoteOpResult,
   RemoteProgress,
+  ResetMode,
+  ResetPreflight,
   RevertPreflight,
   StashBranchPreflight,
   StashEntry,
@@ -25,7 +28,11 @@ import { type ShallowRef, shallowRef } from "vue";
 import type { BridgeClient } from "../bridge/client.ts";
 import {
   composeCheckoutAnnouncement,
+  composeCherryPickAnnouncement,
+  composeCherryPickMismatchAnnouncement,
+  type CherryPickPredictionMismatch,
   composeOpFailureAnnouncement,
+  composeResetAnnouncement,
   composeRevertAnnouncement,
   composeStashAnnouncement,
   composeStashPushAnnouncement,
@@ -106,6 +113,26 @@ export interface RevertRoute {
   readonly noCommit: boolean;
 }
 
+/** The route a confirmed `ResetDialog.vue` takes: `mode` is the radio the dialog settled on
+ *  (`runReset`'s own `mode` argument is only the *initial* pre-flight's mode — OQ1's mixed
+ *  default — the dialog may change it client-side via `previewResetMode`, never a second round
+ *  trip, per OQ11). `stashFirst` selects §7.7's "stash first" route (judgment call 5: stash-
+ *  then-stop, never P9's stash-and-carry); `token` is the typed short sha, present only when the
+ *  chosen mode is destructive and `stashFirst` was not taken (judgment call 19 — requiring both
+ *  would be theatre once the work is preserved). */
+export interface ResetRoute {
+  readonly mode: ResetMode;
+  readonly stashFirst: boolean;
+  readonly token: string | undefined;
+}
+
+/** The route a confirmed `CherryPickDialog.vue` takes — the direct structural sibling of
+ *  `RevertRoute`. */
+export interface CherryPickRoute {
+  readonly mainline: number | undefined;
+  readonly noCommit: boolean;
+}
+
 /**
  * `docs/plans/P6.md` W12: one exported method per user-facing action, each the same four steps —
  * pre-flight, confirm (only when the pre-flight found a hazard), run, refresh/announce/surface —
@@ -135,6 +162,14 @@ export class OpsState {
 
   readonly pendingCheckout: ShallowRef<CheckoutPreflight | undefined> = shallowRef(undefined);
   readonly pendingRevert: ShallowRef<RevertPreflight | undefined> = shallowRef(undefined);
+  /** `docs/plans/P10.md` W10: `ResetDialog.vue`'s own pending state — unlike `pendingRevert`,
+   *  opened for EVERY reset, not only a hazardous one (judgment call 18's single entry point IS
+   *  the mode picker, so there is no "clean, skip the dialog" fast path to mirror here). */
+  readonly pendingReset: ShallowRef<ResetPreflight | undefined> = shallowRef(undefined);
+  /** `CherryPickDialog.vue`'s own pending state — a near-sibling of `pendingRevert`: opened only
+   *  when the pre-flight found something worth a dialog (a blocker, a mainline choice, or the
+   *  non-blocking `alreadyApplied` advisory — `runCherryPick`'s own trigger condition). */
+  readonly pendingCherryPick: ShallowRef<CherryPickPreflight | undefined> = shallowRef(undefined);
   /** P9 W13: the shared apply/pop confirmation's own pending state — see `PendingStashPop`'s own
    *  doc comment on why one field, not two, covers both verbs (OQ7). */
   readonly pendingStashPop: ShallowRef<PendingStashPop | undefined> = shallowRef(undefined);
@@ -171,6 +206,8 @@ export class OpsState {
   #repoId: string | undefined;
   #resolveCheckout: ((route: CheckoutRoute | null) => void) | undefined;
   #resolveRevert: ((route: RevertRoute | null) => void) | undefined;
+  #resolveReset: ((route: ResetRoute | null) => void) | undefined;
+  #resolveCherryPick: ((route: CherryPickRoute | null) => void) | undefined;
   #resolveForcePush: ((route: ForcePushRoute | null) => void) | undefined;
   #resolveStashPop: ((proceed: boolean) => void) | undefined;
   #resolvePull: ((proceed: boolean) => void) | undefined;
@@ -364,6 +401,212 @@ export class OpsState {
     const resolve = this.#resolveRevert;
     this.#resolveRevert = undefined;
     resolve?.(route);
+  }
+
+  // -------------------------------------------------------------------------------------
+  // reset (`docs/plans/P10.md` W10, §7.7)
+  // -------------------------------------------------------------------------------------
+
+  /** `mode` is only the *initial* pre-flight's mode (OQ1's mixed default, chosen by
+   *  `ResetDialog.vue`'s caller before this even runs) — the dialog itself may change it via
+   *  `previewResetMode` with no second round trip (OQ11), and whatever it settles on travels back
+   *  in `ResetRoute.mode`. The dialog opens for every reset, hazardous or not (judgment call 18):
+   *  choosing a mode IS the confirm step here, unlike `runCheckout`/`runRevert`'s "skip the dialog
+   *  when nothing is wrong" shape. A `blocked` verdict should never actually reach a user (the row
+   *  menu's own `canRun("reset")` gate gets there first for an in-progress operation, and
+   *  `unknownTarget` cannot happen for a sha taken from a real graph row) — handled defensively,
+   *  with no dialog, rather than assumed unreachable. */
+  async runReset(target: string, mode: ResetMode): Promise<void> {
+    const repoId = this.#repoId;
+    if (repoId === undefined || this.busy.value) return;
+    this.busy.value = true;
+    try {
+      const preflight = await this.#bridge.request("preflight.reset", { repoId, target, mode });
+      if (preflight.verdict === "blocked") {
+        this.announcement.value = preflight.blockers.includes("inProgressOperation")
+          ? "Reset failed — another operation is in progress."
+          : `Reset failed — ${target} does not resolve to a commit.`;
+        return;
+      }
+      const route = await this.#confirmReset(preflight);
+      if (route === null) {
+        this.announcement.value = "Reset cancelled.";
+        return;
+      }
+      if (route.stashFirst) {
+        const push = await this.#bridge.request("op.run", {
+          repoId,
+          op: {
+            kind: "stashPush",
+            message: undefined,
+            includeUntracked: false,
+            keepIndex: false,
+            paths: [],
+          },
+        });
+        this.#applyResult(push);
+        if (!push.ok) {
+          this.announcement.value = composeOpFailureAnnouncement("Stash", push.error);
+          return;
+        }
+      }
+      const result = await this.#bridge.request("op.run", {
+        repoId,
+        op: {
+          kind: "reset",
+          mode: route.mode,
+          target,
+          // Dropped when the stash-first route ran: the tree is clean by then, nothing is
+          // destroyed, and the confirmation would be theatre (judgment call 19).
+          confirmToken: route.stashFirst ? undefined : route.token,
+        },
+      });
+      this.#applyResult(result);
+      this.announcement.value = result.ok
+        ? composeResetAnnouncement(route.mode, target)
+        : composeOpFailureAnnouncement("Reset", result.error);
+    } finally {
+      this.busy.value = false;
+    }
+  }
+
+  #confirmReset(preflight: ResetPreflight): Promise<ResetRoute | null> {
+    this.pendingReset.value = preflight;
+    return new Promise((resolve) => {
+      this.#resolveReset = resolve;
+    });
+  }
+
+  /** `ResetDialog.vue`'s own mode-radio recompute (OQ11): `destroys`/`requiresTypedConfirmation`/
+   *  `routes`/`verdict` all depend only on `mode` and the ONE pre-flight's own `dirty` breakdown,
+   *  already in hand — no round trip. Re-derived via `core`'s own `classifyReset`, never a hand-
+   *  rolled duplicate, holding every other field fixed. `stagedNew: []` is not a loss of fidelity:
+   *  a staged-but-new file is already counted in `dirty.staged` by construction
+   *  (`repoService.ts`'s own `dirtySplitFrom`/`stagedNewPathsFrom` — the latter is a subset of the
+   *  former), so the union `classifyReset` forms is identical either way. */
+  previewResetMode(mode: ResetMode): void {
+    const current = this.pendingReset.value;
+    if (current === undefined) return;
+    this.pendingReset.value = classifyReset({
+      target: current.target,
+      targetSubject: current.targetSubject,
+      mode,
+      currentHead: current.currentHead,
+      branch: current.branch,
+      leaving: current.leaving,
+      gaining: current.gaining,
+      leavingCommits: current.leavingCommits,
+      leavingTruncated: current.leavingTruncated,
+      dirty: current.dirty,
+      stagedNew: [],
+      inProgress: current.inProgress,
+      targetResolves: !current.blockers.includes("unknownTarget"),
+    });
+  }
+
+  /** `ResetDialog.vue`'s Reset/Stash first/Cancel buttons call this — `null` for Cancel, matching
+   *  `resolveCheckoutDialog`/`resolveRevertDialog`'s own convention. */
+  resolveResetDialog(route: ResetRoute | null): void {
+    this.pendingReset.value = undefined;
+    const resolve = this.#resolveReset;
+    this.#resolveReset = undefined;
+    resolve?.(route);
+  }
+
+  // -------------------------------------------------------------------------------------
+  // cherry-pick (`docs/plans/P10.md` W10, §7.13)
+  // -------------------------------------------------------------------------------------
+
+  /** Mirrors `runRevert` exactly, including the "skip the dialog when there is nothing to show"
+   *  shape — with one addition: the non-blocking `alreadyApplied` advisory (probe 6) also opens
+   *  the dialog, since it is a fact §7.13 wants the user to actually read before proceeding, not
+   *  one `classifyCherryPick` folds into `verdict`/`blockers` (it never blocks anything, judgment
+   *  call 9's own "guessing is not honest" reasoning applied to the dialog's own trigger). */
+  async runCherryPick(sha: string): Promise<void> {
+    const repoId = this.#repoId;
+    if (repoId === undefined || this.busy.value) return;
+    this.busy.value = true;
+    try {
+      const preflight = await this.#bridge.request("preflight.cherryPick", { repoId, sha });
+      let mainline: number | undefined;
+      let noCommit = false;
+      if (
+        preflight.verdict !== "clean" ||
+        preflight.mainlineRequired.length > 0 ||
+        preflight.alreadyApplied
+      ) {
+        const route = await this.#confirmCherryPick(preflight);
+        if (route === null) {
+          this.announcement.value = "Cherry-pick cancelled.";
+          return;
+        }
+        mainline = route.mainline;
+        noCommit = route.noCommit;
+      }
+      const result = await this.#bridge.request("op.run", {
+        repoId,
+        op: { kind: "cherryPick", sha, mainline, noCommit },
+      });
+      this.#applyResult(result);
+      const mismatch = this.#reconcileCherryPick(preflight.prediction, result);
+      this.announcement.value = mismatch
+        ? composeCherryPickMismatchAnnouncement(mismatch)
+        : result.ok
+          ? composeCherryPickAnnouncement(sha, noCommit)
+          : composeOpFailureAnnouncement("Cherry-pick", result.error);
+    } finally {
+      this.busy.value = false;
+    }
+  }
+
+  #confirmCherryPick(preflight: CherryPickPreflight): Promise<CherryPickRoute | null> {
+    this.pendingCherryPick.value = preflight;
+    return new Promise((resolve) => {
+      this.#resolveCherryPick = resolve;
+    });
+  }
+
+  /** `CherryPickDialog.vue` calls this once a mainline is picked, same shape as
+   *  `previewRevertMainline` — the *same* pending promise stays open; only the displayed
+   *  `pendingCherryPick` snapshot changes, re-predicted against the newly-known mainline before
+   *  the user decides on `--no-commit`. */
+  async previewCherryPickMainline(mainline: number): Promise<void> {
+    const repoId = this.#repoId;
+    const sha = this.pendingCherryPick.value?.sha;
+    if (repoId === undefined || sha === undefined) return;
+    const preflight = await this.#bridge.request("preflight.cherryPick", {
+      repoId,
+      sha,
+      mainline,
+    });
+    if (this.pendingCherryPick.value !== undefined) this.pendingCherryPick.value = preflight;
+  }
+
+  resolveCherryPickDialog(route: CherryPickRoute | null): void {
+    this.pendingCherryPick.value = undefined;
+    const resolve = this.#resolveCherryPick;
+    this.#resolveCherryPick = undefined;
+    resolve?.(route);
+  }
+
+  /** Hard part 7/D57: `CherryPickPreflight.prediction` is exact about the merge alone, reconciled
+   *  after the fact exactly like `#reconcileStashPop` — a disagreement is announced, never
+   *  swallowed. `unknown` predictions are never compared against, for the same reason
+   *  `#reconcileStashPop` never does: there is nothing to disagree WITH. No `stashKept` half
+   *  exists here (`CherryPickPredictionMismatch`'s own doc comment) — a cherry-pick never touches
+   *  the stash. */
+  #reconcileCherryPick(
+    predicted: CherryPickPreflight["prediction"],
+    result: OpResult,
+  ): CherryPickPredictionMismatch | null {
+    if (predicted.kind === "unknown") return null;
+    const actual: "clean" | "conflicts" | "refused" = result.ok
+      ? "clean"
+      : result.error?.kind === "Conflict"
+        ? "conflicts"
+        : "refused";
+    if (actual === predicted.kind) return null;
+    return { predicted: predicted.kind, actual };
   }
 
   // -------------------------------------------------------------------------------------
@@ -713,6 +956,14 @@ export class OpsState {
 
   async abortOp(): Promise<OpResult> {
     return this.#runSimple({ kind: "opAbort" }, (ok) => (ok ? "Aborted" : undefined), "Abort");
+  }
+
+  /** §7.11's third sequencer verb (probe 6) — `ConflictBanner.vue`'s Skip button, rendered only
+   *  when `inProgress.canSkip`. Joins `continueOp`/`abortOp` as a `#runSimple` one-liner: like
+   *  them, the confirmation already happened (the banner itself), so there is no separate confirm
+   *  step here either. */
+  async skipOp(): Promise<OpResult> {
+    return this.#runSimple({ kind: "opSkip" }, (ok) => (ok ? "Skipped" : undefined), "Skip");
   }
 
   async undo(): Promise<OpResult | undefined> {

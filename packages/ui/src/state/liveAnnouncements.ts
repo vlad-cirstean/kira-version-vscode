@@ -10,7 +10,13 @@
  * or failure — is composed here too, per that phase's own rule that a destructive action which
  * silently does nothing is the same failure mode §6.4 already named for the clipboard.
  */
-import type { CheckoutPreflight, OpErrorKind, OpResult, StashEntry } from "@kira-version/ipc";
+import type {
+  CheckoutPreflight,
+  OpErrorKind,
+  OpResult,
+  ResetMode,
+  StashEntry,
+} from "@kira-version/ipc";
 
 const COUNT_FORMATTER = new Intl.NumberFormat();
 
@@ -67,6 +73,46 @@ export function composeRevertAnnouncement(shas: readonly string[], noCommit: boo
   const subject =
     shas.length === 1 ? `commit ${shortTarget(shas[0] ?? "")}` : `${shas.length} commits`;
   return noCommit ? `Reverted ${subject} — changes staged, not committed` : `Reverted ${subject}`;
+}
+
+/** `docs/plans/P10.md` W10: §7.7's own reset, given a voice — the target's subject is not carried
+ *  here (the live region names *what was done*, not the full advisory the dialog already showed
+ *  and the user already read before confirming). */
+export function composeResetAnnouncement(mode: ResetMode, target: string): string {
+  return `Reset (${mode}) to ${shortTarget(target)}`;
+}
+
+/** `docs/plans/P10.md` W10, §7.10's own `noCommit` wording reused verbatim for cherry-pick
+ *  (§7.13 states the same "staged, not committed" outcome for `--no-commit`). */
+export function composeCherryPickAnnouncement(sha: string, noCommit: boolean): string {
+  const subject = `commit ${shortTarget(sha)}`;
+  return noCommit ? `Cherry-picked ${subject} — changes staged, not committed` : `Cherry-picked ${subject}`;
+}
+
+/** `docs/plans/P10.md` W10, hard part 7's own answer, given a voice: `CherryPickPreflight`'s
+ *  `merge-tree` prediction inherits D57's whole posture (P9's own stash-pop precedent) — exact
+ *  about the merge, reconciled after the fact by `runOp`'s read-back, never swallowed. No
+ *  `stashKept` half exists here (unlike `StashPredictionMismatch`): a cherry-pick never touches
+ *  the stash, so this is its own, one-field-simpler shape rather than a forced reuse. */
+export interface CherryPickPredictionMismatch {
+  readonly predicted: "clean" | "conflicts";
+  readonly actual: "clean" | "conflicts" | "refused";
+}
+
+export function composeCherryPickMismatchAnnouncement(
+  mismatch: CherryPickPredictionMismatch,
+): string {
+  const predictedText = mismatch.predicted === "clean" ? "a clean apply" : "conflicts";
+  const actualText =
+    mismatch.actual === "clean"
+      ? "applied cleanly"
+      : mismatch.actual === "conflicts"
+        ? "conflicted"
+        : "was refused";
+  return (
+    `This cherry-pick ${actualText}, though the pre-flight predicted ${predictedText} — the tree ` +
+    "changed in between."
+  );
 }
 
 const OP_ERROR_TEXT: Record<OpErrorKind, string> = {
