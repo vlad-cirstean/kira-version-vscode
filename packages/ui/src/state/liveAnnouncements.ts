@@ -193,6 +193,35 @@ export function composeUndoAnnouncement(label: string): string {
     : `Undone: ${label}`;
 }
 
+/** `docs/plans/P10.md` W14, hard part 1's own table, given a voice: the undo button's tooltip is
+ *  the one place a user learns *what a reset's undo actually restores* before they need it, and
+ *  the three modes are not interchangeable (probe 5's own finding — a mixed reset's undo does not
+ *  bring back what was staged, because that index state was never written to the object database
+ *  at all). Detected from `UndoRecord.label`'s own text, the same way `composeUndoAnnouncement`
+ *  detects a dropped stash above: `RepoService`'s reset undo capture (mirrored in the harness's
+ *  own mock bridge) is the only call site that ever labels a record `Reset (<mode>) to …`, so the
+ *  label doubles as the mode carrier without a dedicated field. Every other undoable op — cherry-
+ *  pick's `reset --keep` included — keeps the plain, generic caveat this file has always used:
+ *  §7.12's own "does not restore uncommitted work" already covers what a cherry-pick's undo
+ *  cannot bring back (unrelated dirt `--keep` never touched), so it needs no mode table of its
+ *  own. */
+const RESET_UNDO_LABEL_PATTERN = /^Reset \((soft|mixed|hard)\) to /;
+
+const RESET_UNDO_TOOLTIP_SUFFIX: Record<ResetMode, string> = {
+  soft: "restores the branch pointer, index, and working tree — a full round trip",
+  mixed: "restores the commits; what was staged before the reset is not recoverable",
+  hard: "restores the commits — does not restore uncommitted work",
+};
+
+const DEFAULT_UNDO_TOOLTIP_SUFFIX = "one level, does not restore uncommitted work";
+
+export function composeUndoTooltip(label: string): string {
+  const resetMatch = label.match(RESET_UNDO_LABEL_PATTERN);
+  const mode = resetMatch?.[1] as ResetMode | undefined;
+  const suffix = mode ? RESET_UNDO_TOOLTIP_SUFFIX[mode] : DEFAULT_UNDO_TOOLTIP_SUFFIX;
+  return `${label} — ${suffix}`;
+}
+
 /** §7.6's own worked example, given a voice: *"This pop conflicted, though the pre-flight
  *  predicted a clean apply — the tree changed in between. Your stash was kept."* A `mismatch`
  *  takes priority over the plain success/failure text — it is the more specific, more surprising

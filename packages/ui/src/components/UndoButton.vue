@@ -6,7 +6,12 @@
  * makes "no non-undoable operation ever renders this" true without this file re-deriving
  * `UNDO_POLICY` itself). Recovery sha is real, copyable text (`clipboardActions.ts`, matching
  * every other sha in this app), never only inside a tooltip.
+ *
+ * `docs/plans/P10.md` W14: the tooltip text itself moved into `composeUndoTooltip` (mode-matched
+ * for a reset, per hard part 1's own table) rather than staying the single fixed string this file
+ * used to render inline.
  */
+import { composeUndoTooltip } from "../state/liveAnnouncements.ts";
 import type { OpsState } from "../state/ops.ts";
 
 const props = defineProps<{
@@ -25,7 +30,7 @@ async function undo(): Promise<void> {
     <button
       type="button"
       class="kv-undo-button"
-      :title="`${ops.undoSlot.value.label} — one level, does not restore uncommitted work`"
+      :title="composeUndoTooltip(ops.undoSlot.value.label)"
       :disabled="ops.busy.value"
       @click="undo"
     >
