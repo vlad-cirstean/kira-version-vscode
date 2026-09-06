@@ -68,7 +68,7 @@ describe("real induced failures classify correctly", () => {
   });
 
   test("HookRejected — a real push rejected by a server-side pre-receive hook", async () => {
-    const { dir } = withRemote({ localOnlyCommits: 1 });
+    const { dir } = await withRemote({ localOnlyCommits: 1 });
     const bareRemote = execFileSync("git", ["remote", "get-url", "origin"], { cwd: dir })
       .toString("utf8")
       .trim();
@@ -85,7 +85,7 @@ describe("real induced failures classify correctly", () => {
   });
 
   test("NonFastForward — a real push rejected because the remote has diverged", async () => {
-    const { dir } = withRemote({ localOnlyCommits: 1 });
+    const { dir } = await withRemote({ localOnlyCommits: 1 });
     const bareRemote = execFileSync("git", ["remote", "get-url", "origin"], { cwd: dir })
       .toString("utf8")
       .trim();

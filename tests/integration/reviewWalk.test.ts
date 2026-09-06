@@ -116,7 +116,7 @@ async function streamRange(
 
 describe("resolveReviewBase — every §6.8 resolution rule, against a real repo (P7 W19)", () => {
   test("a branch tracking origin/<same-name> falls through rule 1 to defaultBranch", async () => {
-    const repo = withRemote();
+    const repo = await withRemote();
     // `main` clones tracking `origin/main` by default — same bare name as itself, so rule 1
     // must reject it and fall through to rule 2 (origin/HEAD, which the clone also set up).
     const { service, repoId } = await openService(repo.dir);
@@ -130,7 +130,7 @@ describe("resolveReviewBase — every §6.8 resolution rule, against a real repo
   });
 
   test("a branch tracking origin/develop (a differently-named remote branch) is honoured by rule 1", async () => {
-    const repo = withRemote();
+    const repo = await withRemote();
     gitCommit(repo.dir, ["checkout", "--quiet", "-b", "develop"]);
     writeFileSync(join(repo.dir, "develop.txt"), "develop\n");
     git(repo.dir, ["add", "develop.txt"]);
@@ -151,7 +151,7 @@ describe("resolveReviewBase — every §6.8 resolution rule, against a real repo
   });
 
   test("a 'gone' upstream (pruned after the fact) falls through exactly like an absent one (V6)", async () => {
-    const repo = withRemote();
+    const repo = await withRemote();
     gitCommit(repo.dir, ["checkout", "--quiet", "-b", "develop"]);
     writeFileSync(join(repo.dir, "develop.txt"), "develop\n");
     git(repo.dir, ["add", "develop.txt"]);
@@ -202,7 +202,7 @@ describe("resolveReviewBase — every §6.8 resolution rule, against a real repo
   });
 
   test("origin/HEAD set: rule 2 picks it over the main/master candidate list", async () => {
-    const repo = withRemote();
+    const repo = await withRemote();
     // Both "main" and "master" exist locally, but origin/HEAD (set by the clone, to "main") must
     // win over the candidate list per §6.8's own step 2 ordering (originHead before candidates).
     gitCommit(repo.dir, ["branch", "master", "main"]);
@@ -222,7 +222,7 @@ describe("resolveReviewBase — every §6.8 resolution rule, against a real repo
   });
 
   test("origin/HEAD unset: rule 2 falls back to the first existing candidate ('main')", async () => {
-    const repo = withRemote();
+    const repo = await withRemote();
     git(repo.dir, ["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]);
     gitCommit(repo.dir, ["checkout", "--quiet", "-b", "topic", "main"]);
 
@@ -240,7 +240,7 @@ describe("resolveReviewBase — every §6.8 resolution rule, against a real repo
   });
 
   test("origin/HEAD dangling (target since pruned): falls through the same as unset (V1)", async () => {
-    const repo = withRemote();
+    const repo = await withRemote();
     // `git symbolic-ref --short refs/remotes/origin/HEAD` does not verify its target exists — it
     // still prints "origin/main" even after `refs/remotes/origin/main` itself is gone (confirmed
     // empirically), so `detectDefaultBranch` (packages/git/src/queries.ts) returns a real string
@@ -448,7 +448,7 @@ describe("spawn count for one review open (V8, P7 W19)", () => {
     // `logSession.ts`'s narrowed staleness guard (`rev-parse <base> <branch>`, W3's own endpoint
     // snapshot) taken before the walk's first `git log` page — so five spawns total is the honest
     // number for one review open on the defaultBranch path, not four. Recorded in Findings.
-    const repo = withRemote();
+    const repo = await withRemote();
     gitCommit(repo.dir, ["checkout", "--quiet", "-b", "topic", "main"]);
     writeFileSync(join(repo.dir, "topic.txt"), "topic\n");
     git(repo.dir, ["add", "topic.txt"]);
@@ -488,7 +488,7 @@ describe("spawn count for one review open (V8, P7 W19)", () => {
   });
 
   test("a second resolution for an overridden base adds exactly two spawns (merge-base + rev-list --count)", async () => {
-    const repo = withRemote();
+    const repo = await withRemote();
     gitCommit(repo.dir, ["checkout", "--quiet", "-b", "develop"]);
     writeFileSync(join(repo.dir, "develop.txt"), "develop\n");
     git(repo.dir, ["add", "develop.txt"]);

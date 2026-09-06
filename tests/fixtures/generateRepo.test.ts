@@ -101,8 +101,8 @@ describe("generateRepo shapes", () => {
     execFileSync("git", ["merge", "--abort"], { cwd: repo.dir });
   });
 
-  test("withRemote wires a bare remote with ahead/behind commits", () => {
-    const repo = track(withRemote({ remoteOnlyCommits: 2, localOnlyCommits: 1 }));
+  test("withRemote wires a bare remote with ahead/behind commits", async () => {
+    const repo = track(await withRemote({ remoteOnlyCommits: 2, localOnlyCommits: 1 }));
     expect(repo.refs.main).toBeDefined();
     expect(repo.refs["origin/main"]).toBeDefined();
     expect(repo.refs.main).not.toBe(repo.refs["origin/main"]);

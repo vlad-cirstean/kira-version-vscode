@@ -1353,7 +1353,7 @@ describe("RepoService — preflightCheckout() (P6 W8)", () => {
   });
 
   test("a bare remote-tracking target (no local counterpart) offers createsTracking in switch mode, and plain detach in detach mode", async () => {
-    const repo = withRemote();
+    const repo = await withRemote();
     // Push a branch to the remote, then remove the local copy but keep the fetched remote-tracking ref —
     // the exact DWIM case probe P7 describes (a `origin/topic` with no local `topic`).
     const env = baseEnv(repo.dir);
@@ -1941,7 +1941,7 @@ async function streamRange(
 
 describe("RepoService — resolveReviewBase() (P7 W4)", () => {
   test("a branch tracking a DIFFERENTLY-named upstream resolves via rule 1 (upstream)", async () => {
-    const repo = withRemote();
+    const repo = await withRemote();
     // "main" itself tracks "origin/main" — same bare name, so rule 1 falls through (V1's own
     // "same-name fall-through" case, `review.test.ts`'s own coverage of it in `core`). A branch
     // whose upstream names something genuinely different is what actually exercises rule 1 here.
@@ -2237,7 +2237,7 @@ describe("RepoService — ranged streamGraph/loadMore/status and endReview (P7 W
 
 describe("RepoService — remote ops (W14)", () => {
   test("fetch reports the moved ref and leaves the remote-tracking ref updated on disk", async () => {
-    const repo = withRemote({ localOnlyCommits: 0 });
+    const repo = await withRemote({ localOnlyCommits: 0 });
     const externalTip = pushExternalCommit(repo.remoteDir, "main", "external change");
 
     const service = await RepoService.create({
@@ -2274,7 +2274,7 @@ describe("RepoService — remote ops (W14)", () => {
   });
 
   test("push from an ahead-only clone fast-forwards the remote and reports the update", async () => {
-    const repo = withRemote({ localOnlyCommits: 1 });
+    const repo = await withRemote({ localOnlyCommits: 1 });
     const localTip = execFileSync("git", ["rev-parse", "HEAD"], {
       cwd: repo.dir,
       env: baseEnv(repo.dir),
@@ -2312,7 +2312,7 @@ describe("RepoService — remote ops (W14)", () => {
   });
 
   test("pull with the default (ff-only) strategy fast-forwards a behind-only clone", async () => {
-    const repo = withRemote({ remoteOnlyCommits: 1, localOnlyCommits: 0 });
+    const repo = await withRemote({ remoteOnlyCommits: 1, localOnlyCommits: 0 });
     const upstreamTip = execFileSync("git", ["rev-parse", "origin/main"], {
       cwd: repo.dir,
       env: baseEnv(repo.dir),
@@ -2357,7 +2357,7 @@ describe("RepoService — remote ops (W14)", () => {
     // stdout, never stderr, so `classifyGitError` (stderr-only) cannot see it — `#runPull` must
     // instead trust the post-failure sequencer-state read (a live MERGE_HEAD) to override the
     // reported kind to "Conflict" rather than leaving it misclassified as "Unknown".
-    const repo = withRemote({ localOnlyCommits: 0 });
+    const repo = await withRemote({ localOnlyCommits: 0 });
     const env = baseEnv(repo.dir);
     pushExternalCommit(repo.remoteDir, "main", "external edit", {
       path: "file.txt",
@@ -2401,7 +2401,7 @@ describe("RepoService — remote ops (W14)", () => {
   });
 
   test("a second concurrent runRemoteOp on the same repo is rejected with OperationInProgress", async () => {
-    const repo = withRemote({ localOnlyCommits: 0 });
+    const repo = await withRemote({ localOnlyCommits: 0 });
     const service = await RepoService.create({
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
@@ -2434,7 +2434,7 @@ describe("RepoService — remote ops (W14)", () => {
   });
 
   test("forcePush succeeds when expectedRemoteTip matches the freshly re-read remote tip", async () => {
-    const repo = withRemote({ localOnlyCommits: 1 });
+    const repo = await withRemote({ localOnlyCommits: 1 });
     const currentTip = execFileSync("git", ["rev-parse", "origin/main"], {
       cwd: repo.dir,
       env: baseEnv(repo.dir),
@@ -2471,7 +2471,7 @@ describe("RepoService — remote ops (W14)", () => {
   });
 
   test("forcePush fails with LeaseViolation when the remote moved since expectedRemoteTip was captured, without ever spawning git", async () => {
-    const repo = withRemote({ localOnlyCommits: 1 });
+    const repo = await withRemote({ localOnlyCommits: 1 });
     // Move the remote after the (simulated) confirmation dialog would have captured its tip —
     // D48's residual-hazard scenario (a background fetch silently satisfying git's own lease).
     pushExternalCommit(repo.remoteDir, "main", "external change");
@@ -2508,7 +2508,7 @@ describe("RepoService — remote ops (W14)", () => {
   });
 
   test("forcePush and deleteRemoteBranch against a protected branch are refused without a matching confirmToken", async () => {
-    const repo = withRemote({ localOnlyCommits: 1 });
+    const repo = await withRemote({ localOnlyCommits: 1 });
     const currentTip = execFileSync("git", ["rev-parse", "origin/main"], {
       cwd: repo.dir,
       env: baseEnv(repo.dir),
@@ -2561,7 +2561,7 @@ describe("RepoService — remote ops (W14)", () => {
   });
 
   test("deleteRemoteBranch succeeds against an unprotected branch", async () => {
-    const repo = withRemote({ localOnlyCommits: 0 });
+    const repo = await withRemote({ localOnlyCommits: 0 });
     const env = baseEnv(repo.dir);
     execFileSync("git", ["branch", "feature/x", "main"], { cwd: repo.dir, env });
     execFileSync("git", ["push", "--quiet", "origin", "feature/x"], { cwd: repo.dir, env });
@@ -2601,7 +2601,7 @@ describe("RepoService — remote ops (W14)", () => {
   });
 
   test("cancelRemoteOp reports false when no remote op is running for the repo", async () => {
-    const repo = withRemote({ localOnlyCommits: 0 });
+    const repo = await withRemote({ localOnlyCommits: 0 });
     const service = await RepoService.create({
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
@@ -2625,7 +2625,7 @@ describe("RepoService — auto-fetch scheduler (W15)", () => {
   }
 
   test("runs a silent fetch once the configured interval elapses, while focused and visible", async () => {
-    const repo = withRemote({ localOnlyCommits: 0 });
+    const repo = await withRemote({ localOnlyCommits: 0 });
     const service = await RepoService.create(
       {
         runner: new NodeProcessRunner(),
@@ -2663,7 +2663,7 @@ describe("RepoService — auto-fetch scheduler (W15)", () => {
   });
 
   test("never runs while the host is unfocused, and resumes once focus returns", async () => {
-    const repo = withRemote({ localOnlyCommits: 0 });
+    const repo = await withRemote({ localOnlyCommits: 0 });
     const service = await RepoService.create(
       {
         runner: new NodeProcessRunner(),
@@ -2711,7 +2711,7 @@ describe("RepoService — auto-fetch scheduler (W15)", () => {
   });
 
   test("disables itself for the session after a failure, logs at warn, and never retries", async () => {
-    const repo = withRemote({ localOnlyCommits: 0 });
+    const repo = await withRemote({ localOnlyCommits: 0 });
     const env = baseEnv(repo.dir);
     execFileSync("git", ["remote", "set-url", "origin", "/does/not/exist"], {
       cwd: repo.dir,

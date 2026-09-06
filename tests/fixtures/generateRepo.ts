@@ -12,6 +12,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -23,6 +24,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  type GitHttpBackend,
+  type GitHttpBackendOptions,
+  startGitHttpBackend,
+} from "./gitHttpBackend.ts";
 
 const EPOCH_SECONDS = 1_700_000_000; // fixed base instant; commit dates advance from here
 const STEP_SECONDS = 3600;
@@ -499,11 +505,37 @@ export function conflicting(opts: ConflictingOptions = {}): GeneratedRepo {
   });
 }
 
+/** A server-side hook to install on the bare remote's `hooks/<type>` before returning — W19's
+ *  `HookRejected` scenario needs a *real* rejecting `pre-receive`, not a simulated one, since the
+ *  whole point is proving `classifyGitError` reads the hook's own stderr text back out of a real
+ *  push's real failure. Installed only after every setup push this fixture makes on its own
+ *  behalf (seeding, `remoteOnlyCommits`) has already succeeded — the hook must not fire on this
+ *  fixture's own plumbing, only on whatever push the test itself performs afterward. */
+export interface WithRemoteHookOptions {
+  readonly type: "pre-receive" | "update";
+  readonly exitCode: number;
+  /** Written to the hook's stderr — surfaces verbatim in `GitError.remoteMessage` (§7.4). */
+  readonly message: string;
+}
+
 export interface WithRemoteOptions {
   /** Commits pushed to the remote but not present locally (behind). */
   remoteOnlyCommits?: number;
   /** Commits present locally but not pushed (ahead). */
   localOnlyCommits?: number;
+  /** Installs a real, rejecting-or-accepting server-side hook on the bare remote. */
+  hook?: WithRemoteHookOptions;
+  /** Serves the remote over real HTTP (`git http-backend`), gated by HTTP Basic auth, instead of
+   *  the bare local filesystem path every other `withRemote()` caller gets — W19's `AuthFailed`
+   *  and no-hang-on-credential-prompt scenarios need a transport that can actually answer `401`,
+   *  which a `file://`/local-path remote structurally cannot. `remoteCredentials` on the result
+   *  names the one username/password the server accepts; `local`'s own `origin` is left pointed
+   *  at the bare (unauthenticated) URL so a test can choose when to switch it. */
+  requireAuth?: boolean;
+  /** Serves the remote over real HTTP, throttling every response chunk — W19's cancel-mid-fetch
+   *  scenario needs a genuine in-flight transfer to cancel, not a call that has already returned
+   *  by the time `remote.cancel` reaches it. */
+  slow?: { readonly delayMs: number };
 }
 
 /** `withRemote()`'s return value, extending `GeneratedRepo` (whose `dir` is the *local* clone —
@@ -514,11 +546,27 @@ export interface WithRemoteOptions {
  *  repo that first populated it was reachable from `GeneratedRepo` alone before P8/W14). */
 export interface GeneratedRepoWithRemote extends GeneratedRepo {
   readonly remoteDir: string;
+  /** Set only when `requireAuth`/`slow` requested a real HTTP transport — `local`'s own `origin`
+   *  is left pointed at `remote.dir` (the bare local path) regardless, so most tests never need
+   *  this at all; a test exercising auth or throttling switches `origin` to this URL itself,
+   *  choosing exactly when the transport (and any credentials) take effect. */
+  readonly remoteUrl?: string;
+  /** The one username/password `remoteUrl`'s server accepts, when `requireAuth` was set. */
+  readonly remoteCredentials?: { readonly username: string; readonly password: string };
+  /** Stops the HTTP server started for `requireAuth`/`slow`. A no-op-returning function when
+   *  neither was requested, so callers can always `await repo.closeRemoteServer()` unconditionally
+   *  in a `finally` without an `if` guard at every call site. */
+  readonly closeRemoteServer: () => Promise<void>;
 }
 
-/** A local repo with a bare "remote" wired up, for fetch/push/non-ff/lease tests. */
-export function withRemote(opts: WithRemoteOptions = {}): GeneratedRepoWithRemote {
-  const { remoteOnlyCommits = 0, localOnlyCommits = 1 } = opts;
+const NO_REMOTE_SERVER: () => Promise<void> = () => Promise.resolve();
+
+/** A local repo with a bare "remote" wired up, for fetch/push/non-ff/lease tests. Async since
+ *  `requireAuth`/`slow` start a real `node:http` server (`gitHttpBackend.ts`) that only resolves
+ *  once bound — every call site awaits this, even the common case with neither option set, so one
+ *  signature serves both rather than a sync/async split that would fork the fixture in two. */
+export async function withRemote(opts: WithRemoteOptions = {}): Promise<GeneratedRepoWithRemote> {
+  const { remoteOnlyCommits = 0, localOnlyCommits = 1, hook, requireAuth, slow } = opts;
 
   const remote = new Repo(tempRepoDir("remote-bare"));
   remote.initBare("main");
@@ -551,11 +599,39 @@ export function withRemote(opts: WithRemoteOptions = {}): GeneratedRepoWithRemot
   }
 
   local.git(["fetch", "--quiet", "origin"]);
-  return {
+
+  // Installed only now — after every push this fixture makes on its own behalf above has already
+  // landed — so the hook fires on the test's own push, never on this function's setup plumbing.
+  if (hook) {
+    const hookPath = join(remote.dir, "hooks", hook.type);
+    writeFileSync(
+      hookPath,
+      `#!/bin/sh\nprintf '%s\\n' "${hook.message}" >&2\nexit ${hook.exitCode}\n`,
+    );
+    chmodSync(hookPath, 0o755);
+  }
+
+  const base: GeneratedRepoWithRemote = {
     dir: local.dir,
     remoteDir: remote.dir,
+    closeRemoteServer: NO_REMOTE_SERVER,
     commits,
     refs: { main: local.head(), "origin/main": local.refSha("origin/main") },
+  };
+
+  if (!requireAuth && !slow) return base;
+
+  const auth = requireAuth ? { username: "kira-fixture", password: "letmein" } : undefined;
+  const backendOpts: GitHttpBackendOptions = {
+    ...(auth ? { auth } : {}),
+    ...(slow ? { delayMs: slow.delayMs } : {}),
+  };
+  const server: GitHttpBackend = await startGitHttpBackend(remote.dir, backendOpts);
+  return {
+    ...base,
+    remoteUrl: server.url,
+    ...(auth ? { remoteCredentials: auth } : {}),
+    closeRemoteServer: () => server.close(),
   };
 }
 

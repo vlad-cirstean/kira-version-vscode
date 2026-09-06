@@ -114,8 +114,8 @@ function recordLog(): void {
 // refs — upstream/track populated, plus an annotated tag's peeled target.
 // ---------------------------------------------------------------------------------------
 
-function recordRefs(): void {
-  const { dir } = withRemote({ localOnlyCommits: 1, remoteOnlyCommits: 0 });
+async function recordRefs(): Promise<void> {
+  const { dir } = await withRemote({ localOnlyCommits: 1, remoteOnlyCommits: 0 });
   save("refs/withRemote.bin", git(dir, refsArgs()));
 
   const { dir: tagDir, refs } = linear(2);
@@ -533,9 +533,9 @@ function recordHandAuthored(): void {
   }
 }
 
-function main(): void {
+async function main(): Promise<void> {
   recordLog();
-  recordRefs();
+  await recordRefs();
   recordStatus();
   recordDiffTree();
   recordDiffBody();
@@ -545,4 +545,4 @@ function main(): void {
   console.log(`recorded porcelain fixtures under ${OUT_DIR}`);
 }
 
-main();
+await main();
