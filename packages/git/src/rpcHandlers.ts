@@ -25,6 +25,7 @@ import type {
   Logger,
   RefRecord,
   RepoIdentity,
+  SearchField,
   Settings,
   VirtualDocumentSource,
   WorkspaceRoots,
@@ -38,13 +39,20 @@ import type {
   RepoOpenResult,
   RepoSummary,
   RequestHandler,
+  SearchMatchField,
   ServerHandlers,
   SettingsSnapshot,
   StreamHandler,
   GitStatus as WireGitStatus,
 } from "@kira-version/ipc";
 import { CONTRACT_VERSION } from "@kira-version/ipc";
-import type { GitStatus, GraphChunkPayload, RepoOpenOutcome, RepoService } from "./repoService.ts";
+import {
+  DEFAULT_SEARCH_LIMIT,
+  type GitStatus,
+  type GraphChunkPayload,
+  type RepoOpenOutcome,
+  type RepoService,
+} from "./repoService.ts";
 
 /** The slice of `RepoService` this file actually calls — structural, not the concrete class,
  *  so W8's own tests (and W16's) can drive a fake through the real `createRpcServer` without
@@ -82,6 +90,7 @@ export type RepoServicePort = Pick<
   | "stashShow"
   | "preflightStashPop"
   | "preflightStashBranch"
+  | "searchCommits"
 >;
 
 export interface RepoHandlersDeps {
@@ -195,6 +204,25 @@ function toRepoSummary(repoId: string, identity: RepoIdentity): RepoSummary {
 function toRefRow(record: RefRecord): RefRow {
   const { objectType: _objectType, ...row } = record;
   return row;
+}
+
+/** `SearchField` (core, `matcher.ts`) is nine members — `matchRef`'s own `refName`/
+ *  `tagAnnotation` included — while the wire's `SearchMatchField` is the seven `matchCommitFields`
+ *  can ever produce. `RepoService.searchCommits` only ever calls `matchCommitFields`, so this
+ *  filter is never lossy in practice; it filters rather than casts so that stays true by
+ *  construction, not by a note someone has to remember (`docs/plans/P11.md`'s own Findings). */
+const WIRE_SEARCH_FIELDS: ReadonlySet<SearchField> = new Set<SearchField>([
+  "subject",
+  "body",
+  "authorName",
+  "authorEmail",
+  "committerName",
+  "committerEmail",
+  "sha",
+]);
+
+function toWireSearchFields(fields: readonly SearchField[]): SearchMatchField[] {
+  return fields.filter((f): f is SearchMatchField => WIRE_SEARCH_FIELDS.has(f));
 }
 
 function toRepoOpenResult(outcome: RepoOpenOutcome): RepoOpenResult {
@@ -498,6 +526,26 @@ export function createRepoHandlers(deps: RepoHandlersDeps): ServerHandlers {
     return {};
   };
 
+  // ---- `docs/plans/P11.md` W9: search ----------------------------------------------------
+
+  const searchRunImpl: RequestHandler<"search.run"> = async ({ repoId, query, limit }, ctx) => {
+    const result = await deps.service.searchCommits(
+      repoId,
+      query,
+      limit ?? DEFAULT_SEARCH_LIMIT,
+      ctx.signal,
+    );
+    if (result.kind === "invalidPattern") return result;
+    return {
+      kind: "ok",
+      hits: result.hits.map((hit) => ({ ...hit, fields: toWireSearchFields(hit.fields) })),
+      total: result.total,
+      truncated: result.truncated,
+      scanned: result.scanned,
+      complete: result.complete,
+    };
+  };
+
   return {
     requests: {
       "app.init": logged("app.init", appInitImpl),
@@ -533,6 +581,7 @@ export function createRepoHandlers(deps: RepoHandlersDeps): ServerHandlers {
       "editor.resolveConflict": logged("editor.resolveConflict", editorResolveConflictImpl),
       "review.resolveBase": logged("review.resolveBase", reviewResolveBaseImpl),
       "review.open": logged("review.open", reviewOpenImpl),
+      "search.run": logged("search.run", searchRunImpl),
     },
     streams: {
       "graph.stream": logged("graph.stream", graphStreamImpl),

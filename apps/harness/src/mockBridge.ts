@@ -3,6 +3,7 @@ import type {
   DocumentRef,
   FileChange,
   RefRecord,
+  SearchField,
   StashEntry,
 } from "@kira-version/core";
 import {
@@ -14,10 +15,12 @@ import {
   classifyReset,
   classifyStashBranch,
   classifyStashPop,
+  compileQuery,
   resolveBase as coreResolveBase,
   defaultSettings,
   describeInProgress,
   mapLineAcrossDiff,
+  matchCommitFields,
   matchProtectedBranch,
   resolvePullStrategy,
   UNDO_POLICY,
@@ -44,6 +47,7 @@ import type {
   RevertParentChoice,
   RevertPreflight,
   ReviewRangeState,
+  SearchMatchField,
   ServerHandlers,
   SettingsSnapshot,
   StashBranchPreflight,
@@ -290,6 +294,25 @@ function moveHeadTo(session: RepoSession, sha: string): void {
 // then, this gives the harness a real, working resolver rather than a stub with no scenario to
 // exercise it yet.
 // ---------------------------------------------------------------------------------------
+
+/** `docs/plans/P11.md` W9: core's `SearchField` (nine members, `matchRef`'s `refName`/
+ *  `tagAnnotation` included) narrowed to the wire's seven-member `SearchMatchField` — this
+ *  handler only ever calls `matchCommitFields`, so the filter is never lossy in practice; it
+ *  filters rather than casts so that stays true by construction (`packages/git/src/
+ *  rpcHandlers.ts`'s own `toWireSearchFields` makes the identical choice for the same reason). */
+const WIRE_SEARCH_FIELDS: ReadonlySet<SearchField> = new Set<SearchField>([
+  "subject",
+  "body",
+  "authorName",
+  "authorEmail",
+  "committerName",
+  "committerEmail",
+  "sha",
+]);
+
+function toWireSearchFields(fields: readonly SearchField[]): SearchMatchField[] {
+  return fields.filter((f): f is SearchMatchField => WIRE_SEARCH_FIELDS.has(f));
+}
 
 /** `RefRow` (the wire shape `Scenario.refs` fixtures) has no `objectType` — `core`'s
  *  `resolveBase` never reads it (only `shortName`/`upstream`/`isHead`/`kind`), so a filler value
@@ -1268,6 +1291,10 @@ interface RepoSession {
    *  own W11 doc comment says: real merge semantics are `tests/integration`'s job, not the
    *  harness's; this exists only so every stash surface is reachable with no real git present. */
   stashedPaths: Map<string, readonly string[]>;
+  /** `docs/plans/P11.md` W9: `Scenario.searchBodies`, unmodified — `search.run`'s only source of
+   *  a commit body, since `CommitRecord` itself never carries one (see that field's own doc
+   *  comment on `types.ts`). */
+  readonly searchBodies: Readonly<Record<string, string>>;
 }
 
 /** P7 W6/W15 — one open review walk (`ReviewWalk`'s mock-side counterpart): its own `CommitStore`
@@ -1299,6 +1326,7 @@ function createSession(repoId: string, scenario: Scenario, head: HeadState): Rep
     reviewWalks: new Map(),
     stash: (scenario.stash ?? []).map((s) => s.entry),
     stashedPaths: new Map((scenario.stash ?? []).map((s) => [s.entry.sha, s.stashedPaths])),
+    searchBodies: scenario.searchBodies ?? {},
   };
 }
 
@@ -1760,6 +1788,65 @@ function createHandlers(
     requireSession(sessions, repoId);
     lastEditorAction = { kind: "resolveConflict", path };
     return {};
+  };
+
+  // `docs/plans/P11.md` W9: over `session.commits` + `session.searchBodies`, with the REAL
+  // `matchCommitFields` from `@kira-version/core` — the harness must not grow a second matcher,
+  // or the E2E tier stops testing the real semantics (the plan's own words). Runs unbounded and
+  // synchronously (there is no read-pool slot or time box to model here — the mock has no git
+  // process at all), so `complete` is always `true` and `scanned` is always the fixture's own
+  // full commit count.
+  const searchRun: RequestHandler<"search.run"> = async ({ repoId, query, limit }) => {
+    const session = requireSession(sessions, repoId);
+    const compiled = compileQuery({ ...query, scope: "commits" });
+    if (compiled.kind === "invalid") return { kind: "invalidPattern", message: compiled.message };
+    if (compiled.kind === "empty") {
+      return { kind: "ok", hits: [], total: 0, truncated: false, scanned: 0, complete: true };
+    }
+    const cap = limit ?? 200;
+    const hits: Array<{
+      sha: string;
+      subject: string;
+      authorName: string;
+      authorEmail: string;
+      authorTime: number;
+      fields: SearchMatchField[];
+    }> = [];
+    let total = 0;
+    for (const commit of session.commits) {
+      const fields = matchCommitFields(
+        {
+          sha: commit.sha,
+          subject: commit.subject,
+          body: session.searchBodies[commit.sha] ?? "",
+          authorName: commit.author.name,
+          authorEmail: commit.author.email,
+          committerName: commit.committer.name,
+          committerEmail: commit.committer.email,
+        },
+        compiled,
+      );
+      if (fields.length === 0) continue;
+      total++;
+      if (hits.length < cap) {
+        hits.push({
+          sha: commit.sha,
+          subject: commit.subject,
+          authorName: commit.author.name,
+          authorEmail: commit.author.email,
+          authorTime: commit.author.timestamp,
+          fields: toWireSearchFields(fields),
+        });
+      }
+    }
+    return {
+      kind: "ok",
+      hits,
+      total,
+      truncated: total > hits.length,
+      scanned: session.commits.length,
+      complete: true,
+    };
   };
 
   const refsList: RequestHandler<"refs.list"> = async ({ repoId }) => {
@@ -2242,6 +2329,7 @@ function createHandlers(
         "remote.pushPreflight": remotePushPreflight,
         "remote.run": remoteRun,
         "remote.cancel": remoteCancel,
+        "search.run": searchRun,
       },
       streams: {
         "graph.stream": graphStream,
