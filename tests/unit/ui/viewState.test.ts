@@ -6,15 +6,16 @@ import {
 } from "../../../packages/ui/src/state/viewState.ts";
 
 /**
- * P4 W5's own "Done when" (a v1 state is discarded and a v2 one round-trips) plus P5 W11's own
- * "a v2 persisted state is discarded cleanly and a v3 one round-trips". `parsePersistedViewState`
+ * P4 W5's own "Done when" (a v1 state is discarded and a v2 one round-trips), P5 W11's own "a v2
+ * persisted state is discarded cleanly and a v3 one round-trips", and P11 W7's own "a v3
+ * persisted state is discarded cleanly and a v4 one round-trips". `parsePersistedViewState`
  * discards whole, never partially — this exercises that directly and through the harness's
  * `ViewStateStore`, since every concrete store defers to it.
  */
 
 function fullState(overrides: Partial<PersistedViewState> = {}): PersistedViewState {
   return {
-    version: 3,
+    version: 4,
     repoId: "r1",
     loadedRows: 42,
     detailOpen: true,
@@ -24,12 +25,16 @@ function fullState(overrides: Partial<PersistedViewState> = {}): PersistedViewSt
     dateFormat: "absolute",
     detailWidth: 420,
     fileListMode: "tree",
+    searchCaseSensitive: false,
+    searchWholeWord: false,
+    searchRegex: false,
+    searchScope: "both",
     ...overrides,
   };
 }
 
 describe("parsePersistedViewState", () => {
-  test("accepts a well-formed version-3 state and round-trips every field", () => {
+  test("accepts a well-formed version-4 state and round-trips every field", () => {
     const state = fullState();
     expect(parsePersistedViewState(state)).toEqual(state);
   });
@@ -53,6 +58,23 @@ describe("parsePersistedViewState", () => {
     expect(parsePersistedViewState(fullState({ fileListMode: "flat" }))?.fileListMode).toBe("flat");
   });
 
+  test("accepts every searchScope value", () => {
+    expect(parsePersistedViewState(fullState({ searchScope: "commits" }))?.searchScope).toBe(
+      "commits",
+    );
+    expect(parsePersistedViewState(fullState({ searchScope: "refs" }))?.searchScope).toBe("refs");
+    expect(parsePersistedViewState(fullState({ searchScope: "both" }))?.searchScope).toBe("both");
+  });
+
+  test("accepts every combination of the three boolean search toggles", () => {
+    const state = fullState({
+      searchCaseSensitive: true,
+      searchWholeWord: true,
+      searchRegex: true,
+    });
+    expect(parsePersistedViewState(state)).toEqual(state);
+  });
+
   test("discards a v1 (P3-shaped) state whole, never partially", () => {
     const v1 = { version: 1, repoId: "r1", loadedRows: 42, detailOpen: true };
     expect(parsePersistedViewState(v1)).toBeNull();
@@ -64,15 +86,27 @@ describe("parsePersistedViewState", () => {
     expect(parsePersistedViewState(v2)).toBeNull();
   });
 
+  test("discards a v3 (P5-shaped, no search fields) state whole, never partially", () => {
+    const {
+      searchCaseSensitive: _searchCaseSensitive,
+      searchWholeWord: _searchWholeWord,
+      searchRegex: _searchRegex,
+      searchScope: _searchScope,
+      ...v3Shaped
+    } = fullState();
+    const v3 = { ...v3Shaped, version: 3 };
+    expect(parsePersistedViewState(v3)).toBeNull();
+  });
+
   test("discards a future version whole, not partially", () => {
-    const state = { ...fullState(), version: 4 };
+    const state = { ...fullState(), version: 5 };
     expect(parsePersistedViewState(state)).toBeNull();
   });
 
   test("discards non-object and null raw values", () => {
     expect(parsePersistedViewState(null)).toBeNull();
     expect(parsePersistedViewState(undefined)).toBeNull();
-    expect(parsePersistedViewState("v3")).toBeNull();
+    expect(parsePersistedViewState("v4")).toBeNull();
     expect(parsePersistedViewState(42)).toBeNull();
   });
 
@@ -84,6 +118,11 @@ describe("parsePersistedViewState", () => {
   test("discards a shape missing fileListMode", () => {
     const { fileListMode: _fileListMode, ...withoutFileListMode } = fullState();
     expect(parsePersistedViewState(withoutFileListMode)).toBeNull();
+  });
+
+  test("discards a shape missing a search field", () => {
+    const { searchRegex: _searchRegex, ...withoutSearchRegex } = fullState();
+    expect(parsePersistedViewState(withoutSearchRegex)).toBeNull();
   });
 
   test("discards a shape with a malformed columnWidths", () => {
@@ -99,6 +138,10 @@ describe("parsePersistedViewState", () => {
 
   test("discards an invalid fileListMode value", () => {
     expect(parsePersistedViewState({ ...fullState(), fileListMode: "list" })).toBeNull();
+  });
+
+  test("discards an invalid searchScope value", () => {
+    expect(parsePersistedViewState({ ...fullState(), searchScope: "everywhere" })).toBeNull();
   });
 });
 
@@ -121,10 +164,16 @@ describe("InMemoryViewStateStore", () => {
     expect(store.read()).toBeNull();
   });
 
-  test("discards a v2-shaped (no fileListMode) state injected via setRaw", () => {
+  test("discards a v3-shaped (no search fields) state injected via setRaw", () => {
     const store = new InMemoryViewStateStore();
-    const { fileListMode: _fileListMode, ...v2Shaped } = fullState();
-    store.setRaw({ ...v2Shaped, version: 2 });
+    const {
+      searchCaseSensitive: _searchCaseSensitive,
+      searchWholeWord: _searchWholeWord,
+      searchRegex: _searchRegex,
+      searchScope: _searchScope,
+      ...v3Shaped
+    } = fullState();
+    store.setRaw({ ...v3Shaped, version: 3 });
     expect(store.read()).toBeNull();
   });
 });

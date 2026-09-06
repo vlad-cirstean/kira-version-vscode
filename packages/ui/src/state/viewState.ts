@@ -15,11 +15,19 @@
  * commit at one moment, and restoring a stale one is §6.8's own argument against a remembered
  * comparison base, applied here. `FileListMode` is imported from `state/detail.ts` rather than
  * redefined here — one alias, not two structurally-identical types drifting apart.
+ *
+ * `docs/plans/P11.md` W7 (version 4) adds §7.8's four search toggles/scope. The query TEXT
+ * itself is deliberately **not** persisted (judgment call 7 / hard part 7): a remembered search
+ * term silently re-running against a repository that has since moved on is the same stale-state
+ * argument as the diff/selected-file omission above, applied to search instead of the detail
+ * pane. `SearchScope` is imported from `@kira-version/core`'s `search/query.ts` rather than
+ * redefined here, same reasoning as `FileListMode`.
  */
+import type { SearchScope } from "@kira-version/core";
 import type { FileListMode } from "./detail.ts";
 
 export interface PersistedViewState {
-  readonly version: 3;
+  readonly version: 4;
   readonly repoId: string | null;
   readonly loadedRows: number;
   readonly detailOpen: boolean;
@@ -32,6 +40,11 @@ export interface PersistedViewState {
   readonly dateFormat: DateFormat;
   readonly detailWidth: number;
   readonly fileListMode: FileListMode;
+  /** §7.8's toggles (persisted) — the query text itself is not; see the file doc comment. */
+  readonly searchCaseSensitive: boolean;
+  readonly searchWholeWord: boolean;
+  readonly searchRegex: boolean;
+  readonly searchScope: SearchScope;
 }
 
 export interface ColumnWidths {
@@ -68,7 +81,7 @@ function isPersistedViewStateShape(value: unknown): value is PersistedViewState 
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
   return (
-    record.version === 3 &&
+    record.version === 4 &&
     (typeof record.repoId === "string" || record.repoId === null) &&
     typeof record.loadedRows === "number" &&
     typeof record.detailOpen === "boolean" &&
@@ -77,17 +90,23 @@ function isPersistedViewStateShape(value: unknown): value is PersistedViewState 
     isColumnWidthsShape(record.columnWidths) &&
     (record.dateFormat === "relative" || record.dateFormat === "absolute") &&
     typeof record.detailWidth === "number" &&
-    (record.fileListMode === "tree" || record.fileListMode === "flat")
+    (record.fileListMode === "tree" || record.fileListMode === "flat") &&
+    typeof record.searchCaseSensitive === "boolean" &&
+    typeof record.searchWholeWord === "boolean" &&
+    typeof record.searchRegex === "boolean" &&
+    (record.searchScope === "commits" ||
+      record.searchScope === "refs" ||
+      record.searchScope === "both")
   );
 }
 
 /**
  * Validates a raw value read back from platform storage against `PersistedViewState`'s
  * current shape. **A `version` that is not the current one is discarded whole, never
- * partially applied** — a v1 state (P3's shape, no scroll/selection/column fields) is exactly
- * such a mismatch, and a half-applied older state is a bug that reproduces once per upgrade.
- * Every concrete `ViewStateStore` (VS Code's `getState`, this file's in-memory one) calls this
- * rather than trusting its raw source.
+ * partially applied** — a v1 state (P3's shape, no scroll/selection/column fields) and a v3
+ * state (P5's shape, no search fields) are both exactly such a mismatch, and a half-applied
+ * older state is a bug that reproduces once per upgrade. Every concrete `ViewStateStore` (VS
+ * Code's `getState`, this file's in-memory one) calls this rather than trusting its raw source.
  */
 export function parsePersistedViewState(raw: unknown): PersistedViewState | null {
   return isPersistedViewStateShape(raw) ? raw : null;
