@@ -33,7 +33,12 @@ import {
 import { logArgs, parseLogRecord, revSetArgs, showMetadataArgs } from "./parse/log.ts";
 import { mergeTreeArgs, parseMergeTreeOutput } from "./parse/mergeTree.ts";
 import { parseRefRecord, REFS_RECORD_DELIMITER, refsArgs } from "./parse/refs.ts";
-import { parseStashList, stashListArgs } from "./parse/stash.ts";
+import {
+  parseStashList,
+  stashListArgs,
+  stashShowNameStatusArgs,
+  stashShowNumstatArgs,
+} from "./parse/stash.ts";
 import { parseStatus, statusArgs } from "./parse/status.ts";
 
 const decoder = new TextDecoder("utf-8", { fatal: false });
@@ -178,6 +183,25 @@ export async function stashList(driver: GitDriver): Promise<StashEntry[]> {
   for await (const record of read.records(0x00)) records.push(record);
   await read.done;
   return parseStashList(records);
+}
+
+/** The stash's own file list for the detail pane (§4.4/§7.6): two `stash show` invocations
+ *  (tracked + `-u` untracked, one for numstat, one for name-status), joined by the same
+ *  `combineFileChanges` `commitDetail` uses below — probe 12 confirmed `stash show` emits
+ *  `diff-tree`'s own `-z` framing byte-for-byte, so no stash-specific diff parser exists. */
+export async function stashShow(
+  driver: GitDriver,
+  sha: string,
+): Promise<{ readonly sha: string; readonly changes: readonly FileChange[] }> {
+  const [numstatBytes, nameStatusBytes] = await Promise.all([
+    collectOneShot(driver.read(stashShowNumstatArgs(sha))),
+    collectOneShot(driver.read(stashShowNameStatusArgs(sha))),
+  ]);
+  const changes = combineFileChanges(
+    parseNumstatRecords(splitZ(numstatBytes)),
+    parseNameStatusRecords(splitZ(nameStatusBytes)),
+  );
+  return { sha, changes };
 }
 
 /** Shared by `countCommits` and `countRange` (P7 W2) — `rev-list --count`'s only possible

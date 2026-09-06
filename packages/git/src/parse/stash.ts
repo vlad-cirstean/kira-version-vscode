@@ -44,6 +44,14 @@ export function stashShowNameStatusArgs(sha: string): string[] {
   return ["stash", "show", "--name-status", "-z", "-u", "-M", "-C", sha];
 }
 
+/** TRACKED HALF ONLY — deliberately no `-u` — for `classifyStashPop`'s `stashPaths`
+ *  (§7.6: `stashPaths ∩ {d.path | d.tracked}` is the `localChangesWouldBeOverwritten` blocker).
+ *  Untracked collisions are a wholly separate question, answered by `stashUntrackedPathsArgs`
+ *  below against the stash's own third parent, never by this. */
+export function stashShowNameOnlyArgs(sha: string): string[] {
+  return ["stash", "show", "--name-only", "-z", "-M", "-C", sha];
+}
+
 /** The `-u` set, for the untracked-collision blocker (§7.6's `classifyStashPop`). Empty when
  *  `-u` was passed to `stash push` with nothing untracked to save — an empty third parent tree
  *  (P9 probe 1), not a missing one. */

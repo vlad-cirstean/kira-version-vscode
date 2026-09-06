@@ -146,6 +146,7 @@ export {
   refsSnapshot,
   revertMergeParents,
   stashList,
+  stashShow,
   status,
 } from "./queries.ts";
 export type {
