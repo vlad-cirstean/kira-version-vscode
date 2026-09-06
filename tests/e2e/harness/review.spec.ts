@@ -229,6 +229,27 @@ test.describe("row expansion: FileTree.vue's own edge cases inside a review row"
     await toggleRow(reviewRow(page, "lfs1"));
   });
 
+  test("a merge parent outside the walked range falls back to a subject-less label (V5)", async ({
+    page,
+  }) => {
+    // `feat3`'s two parents above (`feat2`/`side1`) are both reachable from `feature`, so both
+    // already have a known subject — this scenario's merge instead has a second parent
+    // (`main`'s own tip) reachable only from `main`, outside `main..feature`, which is the case
+    // `FileTree.vue`'s `parentOptions` falls back for: no row in the review's own commit store,
+    // so no subject to show, leaving just `Parent 2 · <short sha>`.
+    await page.goto("/?scenario=reviewMergeFromBase&view=review&branch=feature");
+    await ready(page);
+    await toggleRow(reviewRow(page, "merge1"));
+    const select = page.locator("#kv-parent-select");
+    await expect(select.locator("option")).toHaveCount(2);
+    await expect(select.locator("option").nth(0)).toContainText("feat1");
+    await expect(select.locator("option").nth(1)).toHaveText(/^Parent 2 · [0-9a-f]{7}$/);
+    await expect(fileRow(page, "feat1.ts")).toBeVisible();
+    await select.selectOption("1");
+    await expect(fileRow(page, "frommain.ts")).toBeVisible();
+    await expect(fileRow(page, "feat1.ts")).toHaveCount(0);
+  });
+
   test("two rows expanded at once", async ({ page }) => {
     await page.goto("/?scenario=review&view=review&branch=feature");
     await ready(page);

@@ -15,6 +15,7 @@ import { rebasing } from "./rebasing.ts";
 import { review } from "./review.ts";
 import { reviewAsk } from "./reviewAsk.ts";
 import { reviewMerged } from "./reviewMerged.ts";
+import { reviewMergeFromBase } from "./reviewMergeFromBase.ts";
 import { reviewPaged } from "./reviewPaged.ts";
 import { reviewPerf } from "./reviewPerf.ts";
 import { reviewUpstream } from "./reviewUpstream.ts";
@@ -41,6 +42,7 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
   review,
   reviewUpstream,
   reviewMerged,
+  reviewMergeFromBase,
   reviewAsk,
 };
 
