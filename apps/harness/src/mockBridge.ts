@@ -1,8 +1,16 @@
-import type { CommitRecord, DocumentRef, FileChange, RefRecord } from "@kira-version/core";
+import type {
+  CommitRecord,
+  DocumentRef,
+  FileChange,
+  RefRecord,
+  StashEntry,
+} from "@kira-version/core";
 import {
   buildPullPreflight,
   CommitStore,
   classifyPush,
+  classifyStashBranch,
+  classifyStashPop,
   resolveBase as coreResolveBase,
   defaultSettings,
   mapLineAcrossDiff,
@@ -31,6 +39,8 @@ import type {
   ReviewRangeState,
   ServerHandlers,
   SettingsSnapshot,
+  StashBranchPreflight,
+  StashPopPreflight,
   StatusSummary,
   StreamChunkOf,
   StreamHandler,
@@ -202,6 +212,28 @@ function findRef(
   return undefined;
 }
 
+/** The sha HEAD currently resolves to — `stashPush`'s base commit, and `preflight.stashPop`'s
+ *  default target when the wire request omits `targetSha`. A branch head that has somehow lost
+ *  its own ref row (should not happen — `checkout`/`branchRename` keep them in sync) falls back
+ *  to a fabricated sha rather than throwing, matching this file's general "never crash on a
+ *  fixture gap" posture. */
+function headSha(session: RepoSession): string {
+  switch (session.head.kind) {
+    case "branch":
+      return (
+        findRef(session.refs, session.head.name)?.row.objectId ??
+        fakeSha(`head:${session.head.name}`)
+      );
+    case "detached":
+      return session.head.sha;
+    case "unborn":
+      // No commit exists yet — real git refuses `stash push` here entirely; nothing in this mock
+      // calls `headSha` for an unborn HEAD today, but a fabricated sha is still a safer fallback
+      // than throwing, matching this file's general posture.
+      return fakeSha(`unborn:${session.head.name}`);
+  }
+}
+
 function updateIsHeadFlags(refs: RefsState, head: HeadState): void {
   for (const row of refs.branches) {
     (row as { isHead: boolean }).isHead = head.kind === "branch" && row.shortName === head.name;
@@ -351,6 +383,47 @@ function defaultRevertPreflight(
     verdict: blockers.length > 0 ? "blocked" : "clean",
     blockers,
   };
+}
+
+/** `preflight.stashPop`'s default (no scenario fixture hook exists yet — see `RepoSession.stash`'s
+ *  own doc comment): the two real, computable blockers (`untrackedCollision`,
+ *  `localChangesWouldBeOverwritten`) still work — they are set intersections over state this mock
+ *  actually tracks — but the merge-tree prediction itself is always `{kind: "clean"}`, since there
+ *  is no real git behind this to predict a genuine conflict with (`classifyStashPop`'s own W11
+ *  reuse is exactly this: the mock supplies the sets, the real classifier decides the verdict). */
+function defaultStashPopPreflight(
+  session: RepoSession,
+  stash: StashEntry,
+  targetSha: string,
+): StashPopPreflight {
+  const stashPaths = session.stashedPaths.get(stash.sha) ?? [];
+  return classifyStashPop({
+    stash,
+    targetSha,
+    prediction: { kind: "clean" },
+    stashPaths,
+    stashUntrackedPaths: [],
+    dirty: session.status.dirtyPaths.map((path) => ({ path, tracked: true })),
+    existingPaths: [],
+    inProgress: session.inProgress,
+  });
+}
+
+/** `preflight.stashBranch`'s default — composes `defaultCheckoutPreflight` against the stash's
+ *  own base commit, same posture as `defaultStashPopPreflight` (`classifyStashBranch` needs no
+ *  merge-tree prediction at all, per its own doc comment: the apply half is clean by
+ *  construction). */
+function defaultStashBranchPreflight(
+  session: RepoSession,
+  stash: StashEntry,
+  branch: string,
+): StashBranchPreflight {
+  const checkout = defaultCheckoutPreflight(session, stash.baseSha, "switch");
+  return classifyStashBranch({
+    name: branch,
+    existingBranchNames: new Set(session.refs.branches.map((b) => b.shortName)),
+    checkout,
+  });
 }
 
 function opError(session: RepoSession, kind: OpErrorKind, message: string): OpResult {
@@ -582,6 +655,169 @@ function applyOp(
       session.inProgress = null;
       return { result: opOk(session), changed: "worktreeChanged" };
     }
+    // ---- P9 W11: Stash -----------------------------------------------------------------
+    case "stashPush": {
+      const candidates =
+        op.paths.length > 0
+          ? session.status.dirtyPaths.filter((p) => op.paths.includes(p))
+          : session.status.dirtyPaths;
+      if (candidates.length === 0) {
+        // git's own `rc=0` "No local changes to save" — a no-op success, never an error
+        // (probe 10, this plan's exit-criteria table). Nothing changed, so no `changed` kind.
+        return { result: opOk(session) };
+      }
+      const stashed = new Set(candidates);
+      const baseSha = headSha(session);
+      const sha = fakeSha(`stash:push:${session.repoId}:${Date.now()}:${session.stash.length}`);
+      const indexSha = fakeSha(`stashindex:${sha}`);
+      const untrackedSha = op.includeUntracked ? fakeSha(`stashuntracked:${sha}`) : undefined;
+      const branch = session.head.kind === "branch" ? session.head.name : null;
+      const message =
+        op.message ??
+        (branch !== null
+          ? `WIP on ${branch}: ${baseSha.slice(0, 7)} stash`
+          : `WIP on (no branch): ${baseSha.slice(0, 7)} stash`);
+      const entry: StashEntry = {
+        index: 0,
+        sha,
+        baseSha,
+        indexSha,
+        untrackedSha,
+        message,
+        branch,
+        timestamp: nowSeconds,
+        fileCount: candidates.length,
+        includedUntracked: op.includeUntracked,
+      };
+      session.stash = [entry, ...session.stash.map((s) => ({ ...s, index: s.index + 1 }))];
+      session.stashedPaths.set(sha, candidates);
+      session.status = {
+        ...session.status,
+        dirtyPaths: session.status.dirtyPaths.filter((p) => !stashed.has(p)),
+        isClean: session.status.dirtyPaths.every((p) => stashed.has(p)),
+      };
+      return { result: opOk(session), changed: "worktreeChanged" };
+    }
+    case "stashApply": {
+      const stash = session.stash.find((s) => s.sha === op.sha);
+      if (!stash) {
+        return {
+          result: opError(session, "NotFound", `'${op.sha}' is not a valid stash reference`),
+        };
+      }
+      const restored = session.stashedPaths.get(stash.sha) ?? [];
+      session.status = {
+        ...session.status,
+        dirtyPaths: [...new Set([...session.status.dirtyPaths, ...restored])],
+        isClean: restored.length === 0 && session.status.isClean,
+      };
+      return { result: opOk(session), changed: "worktreeChanged" };
+    }
+    case "stashPop": {
+      const idx = session.stash.findIndex((s) => s.sha === op.sha && s.index === op.index);
+      if (idx === -1) {
+        return {
+          result: opError(
+            session,
+            "NotFound",
+            `log for 'stash' only has ${session.stash.length} entries`,
+          ),
+        };
+      }
+      const [removed] = session.stash.splice(idx, 1) as [StashEntry];
+      session.stash = session.stash.map((s, i) => ({ ...s, index: i }));
+      const restored = session.stashedPaths.get(removed.sha) ?? [];
+      session.stashedPaths.delete(removed.sha);
+      session.status = {
+        ...session.status,
+        dirtyPaths: [...new Set([...session.status.dirtyPaths, ...restored])],
+        isClean: restored.length === 0 && session.status.isClean,
+      };
+      return { result: opOk(session), changed: "worktreeChanged" };
+    }
+    case "stashDrop": {
+      const idx = session.stash.findIndex((s) => s.sha === op.sha && s.index === op.index);
+      if (idx === -1) {
+        return {
+          result: opError(
+            session,
+            "NotFound",
+            `log for 'stash' only has ${session.stash.length} entries`,
+          ),
+        };
+      }
+      const [removed] = session.stash.splice(idx, 1) as [StashEntry];
+      session.stash = session.stash.map((s, i) => ({ ...s, index: i }));
+      const restorePaths = session.stashedPaths.get(removed.sha);
+      session.stashedPaths.delete(removed.sha);
+      // `%gs` (this file's own comment on `StashEntry.message`) — matches
+      // `RepoService.#captureStashDropUndo`'s label format exactly.
+      const snapshot: UndoSlotSnapshot = {
+        id: fakeSha(`undo:stash:${removed.sha}:${Date.now()}`),
+        label: `Dropped stash@{${removed.index}}: ${removed.message}`,
+        recoverySha: removed.sha,
+        createdAt: Date.now(),
+      };
+      const pendingUndo: PendingUndo = {
+        snapshot,
+        restore: () => {
+          // `stash store` always lands at stash@{0} (W15's own announcement text) — reinsert
+          // there and shift everything else back, same as `stashPush`'s own ordering.
+          session.stash = [
+            { ...removed, index: 0 },
+            ...session.stash.map((s) => ({ ...s, index: s.index + 1 })),
+          ];
+          if (restorePaths) session.stashedPaths.set(removed.sha, restorePaths);
+        },
+      };
+      return { result: opOk(session, pendingUndo), changed: "worktreeChanged" };
+    }
+    case "stashBranch": {
+      const stash = session.stash.find((s) => s.sha === op.sha && s.index === op.index);
+      if (!stash) {
+        return {
+          result: opError(
+            session,
+            "NotFound",
+            `log for 'stash' only has ${session.stash.length} entries`,
+          ),
+        };
+      }
+      if (session.refs.branches.some((b) => b.shortName === op.branch)) {
+        return {
+          result: opError(session, "AlreadyExists", `branch '${op.branch}' already exists`),
+        };
+      }
+      const row: RefRow = {
+        refname: `refs/heads/${op.branch}`,
+        kind: "branch",
+        shortName: op.branch,
+        objectId: stash.baseSha,
+        peeledObjectId: undefined,
+        upstream: undefined,
+        track: undefined,
+        committerDate: nowSeconds,
+        isHead: true,
+        checkedOutIn: undefined,
+        annotation: undefined,
+      };
+      session.refs.branches.push(row);
+      session.head = { kind: "branch", name: op.branch };
+      updateIsHeadFlags(session.refs, session.head);
+      // Clean by construction (§7.6/`classifyStashBranch`'s own doc comment) ⇒ git always drops
+      // the stash on success, exactly like a successful pop.
+      const restored = session.stashedPaths.get(stash.sha) ?? [];
+      session.stashedPaths.delete(stash.sha);
+      session.stash = session.stash
+        .filter((s) => s.sha !== stash.sha)
+        .map((s, i) => ({ ...s, index: i }));
+      session.status = {
+        ...session.status,
+        dirtyPaths: [...new Set([...session.status.dirtyPaths, ...restored])],
+        isClean: restored.length === 0 && session.status.isClean,
+      };
+      return { result: opOk(session), changed: "worktreeChanged" };
+    }
   }
 }
 
@@ -692,6 +928,17 @@ interface RepoSession {
    *  Deliberately not sharing `store`/`dictionaryMarks`/`nextSeq` with the fields above —
    *  D38's isolation requirement, mirrored here from `RepoService`'s own `reviewWalk` slot. */
   reviewWalks: Map<string, ReviewWalkState>;
+  /** P9 W11 — the mock's in-memory stash stack, `stash@{0}` first (matches `stash list`'s own
+   *  order, and `StashEntry.index`'s own meaning). No scenario fixtures this yet (W16 is real-git
+   *  integration fixtures, not a harness scenario field) — every session starts empty and is
+   *  populated purely by `stashPush`, exactly like `refs`/`status` are by their own op cases. */
+  stash: StashEntry[];
+  /** Sha -> the paths `stashPush` moved out of `status.dirtyPaths` for that entry. This mock does
+   *  not distinguish tracked from untracked, model a pathspec's partial-tree effect beyond "which
+   *  paths", or predict real merge conflicts — apply/pop simply puts these back. As this file's
+   *  own W11 doc comment says: real merge semantics are `tests/integration`'s job, not the
+   *  harness's; this exists only so every stash surface is reachable with no real git present. */
+  stashedPaths: Map<string, readonly string[]>;
 }
 
 /** P7 W6/W15 — one open review walk (`ReviewWalk`'s mock-side counterpart): its own `CommitStore`
@@ -721,6 +968,8 @@ function createSession(repoId: string, scenario: Scenario, head: HeadState): Rep
     inProgress: scenario.status?.inProgress ?? null,
     pendingUndo: null,
     reviewWalks: new Map(),
+    stash: [],
+    stashedPaths: new Map(),
   };
 }
 
@@ -1278,6 +1527,58 @@ function createHandlers(
     );
   };
 
+  // ---- P9 W11: Stash ---------------------------------------------------------------------
+
+  const stashList: RequestHandler<"stash.list"> = async ({ repoId }) => {
+    const session = requireSession(sessions, repoId);
+    return { entries: session.stash };
+  };
+
+  const stashShow: RequestHandler<"stash.show"> = async ({ repoId, sha }) => {
+    const session = requireSession(sessions, repoId);
+    const stash = session.stash.find((s) => s.sha === sha);
+    if (!stash) throw new Error(`mock bridge: stash.show: unknown stash '${sha}'`);
+    // No per-stash diff-body fixture exists yet (`RepoSession.stashedPaths`'s own doc comment) —
+    // every path is reported "modified" with no line counts, enough to populate the detail
+    // pane's file tree, not its diff body.
+    const paths = session.stashedPaths.get(sha) ?? [];
+    const changes: FileChange[] = paths.map((path) => ({
+      kind: "modified",
+      path,
+      originalPath: undefined,
+      similarity: undefined,
+      additions: undefined,
+      deletions: undefined,
+      isBinary: false,
+    }));
+    return { sha, changes };
+  };
+
+  const preflightStashPop: RequestHandler<"preflight.stashPop"> = async ({
+    repoId,
+    sha,
+    index,
+    targetSha,
+  }) => {
+    const session = requireSession(sessions, repoId);
+    const stash = session.stash.find((s) => s.sha === sha && s.index === index);
+    if (!stash) {
+      throw new Error(`mock bridge: preflight.stashPop: unknown stash '${sha}'@{${index}}`);
+    }
+    return defaultStashPopPreflight(session, stash, targetSha ?? headSha(session));
+  };
+
+  const preflightStashBranch: RequestHandler<"preflight.stashBranch"> = async ({
+    repoId,
+    sha,
+    branch,
+  }) => {
+    const session = requireSession(sessions, repoId);
+    const stash = session.stash.find((s) => s.sha === sha);
+    if (!stash) throw new Error(`mock bridge: preflight.stashBranch: unknown stash '${sha}'`);
+    return defaultStashBranchPreflight(session, stash, branch);
+  };
+
   const opRun: RequestHandler<"op.run"> = async ({ repoId, op }) => {
     const session = requireSession(sessions, repoId);
     const { result, changed } = applyOp(session, scenario, op);
@@ -1578,6 +1879,10 @@ function createHandlers(
         "status.get": statusGet,
         "preflight.checkout": preflightCheckout,
         "preflight.revert": preflightRevert,
+        "stash.list": stashList,
+        "stash.show": stashShow,
+        "preflight.stashPop": preflightStashPop,
+        "preflight.stashBranch": preflightStashBranch,
         "op.run": opRun,
         "undo.peek": undoPeek,
         "undo.run": undoRun,

@@ -36,9 +36,7 @@ export function classifyStashPop(input: {
   const existingSet = new Set(input.existingPaths);
   const untrackedCollisionPaths = input.stashUntrackedPaths.filter((p) => existingSet.has(p));
 
-  const dirtyTrackedSet = new Set(
-    input.dirty.filter((d) => d.tracked).map((d) => d.path),
-  );
+  const dirtyTrackedSet = new Set(input.dirty.filter((d) => d.tracked).map((d) => d.path));
   const localOverwritePaths = input.stashPaths.filter((p) => dirtyTrackedSet.has(p));
 
   // Ordered exactly like `CheckoutBlocker`'s own documented ordering: `inProgressOperation` first

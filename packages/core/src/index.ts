@@ -5,6 +5,8 @@ export type { LaneAssignment } from "./graph/lanes.ts";
 export { assignLanes } from "./graph/lanes.ts";
 export type { LayoutAppendResult } from "./graph/layout.ts";
 export { layoutAppend, layoutTransferList } from "./graph/layout.ts";
+export type { StashRowFilter } from "./graph/stashRows.ts";
+export { applyStashRowFilter, buildStashRowFilter } from "./graph/stashRows.ts";
 export type {
   ColorState,
   EdgeKind,

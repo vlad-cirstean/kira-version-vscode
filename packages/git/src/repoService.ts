@@ -17,6 +17,7 @@ import type {
   BaseResolutionReason,
   CheckoutPreflight,
   CommitDetail,
+  CommitRecord,
   CommitStore,
   CredentialPrompt,
   DiffHunk,
@@ -48,14 +49,17 @@ import type {
   StashBranchPreflight,
   StashEntry,
   StashPopPreflight,
+  StashRowFilter,
   StatusResult,
   StatusSummary,
   UndoRecord,
   UndoSlotSnapshot,
 } from "@kira-version/core";
 import {
+  applyStashRowFilter,
   assertDefined,
   buildPullPreflight,
+  buildStashRowFilter,
   CommitStore as CommitStoreImpl,
   classifyCheckout,
   classifyInProgress,
@@ -688,14 +692,23 @@ interface RepoSession {
    *  second. Cleared implicitly whenever a *different* range is resolved (nothing reads a stale
    *  entry: `#ensureReviewWalk` only consults it when the ranges still match). */
   lastReviewResolution: { readonly range: CommitRange; readonly commitCount: number } | undefined;
-  /** P9/W8: the sha -> entry map from the most recent `stashList()` call — read by
-   *  `#captureStashDropUndo` (the drop-undo replay needs the dropped entry's own message) and,
-   *  from W12 on, the graph's stash-decoration/parent-truncation post-pass. Populated as a side
-   *  effect of `stashList()`/`preflightStashPop()`/`preflightStashBranch()`, all three of which
-   *  spawn a fresh `stash list` anyway — never independently refreshed, so it is only ever as
-   *  fresh as the most recent of those three calls, which is "best effort" by the same reasoning
-   *  `#captureStashDropUndo`'s own doc comment states. */
+  /** P9/W8, refreshed by W12: the sha -> entry map from the most recent `stash list` read — used
+   *  by `#captureStashDropUndo` (the drop-undo replay needs the dropped entry's own message) and
+   *  by `#refreshStashGraphInputs` to build `stashRowFilter` below. Populated as a side effect of
+   *  `stashList()`/`preflightStashPop()`/`preflightStashBranch()` (each spawns its own fresh
+   *  `stash list`) AND, since W12, of every `#openSession`/`#resetSession` — the graph's own walk
+   *  cannot show anything past `stash@{0}` without first knowing the full list itself (see
+   *  `revSetArgs`'s own doc comment), so opening or refreshing the panel now keeps this at least
+   *  as fresh as the graph currently on screen, not merely "as fresh as the most recent explicit
+   *  stash RPC" as it was through W8 alone. Still best-effort: a failed `stash list` (should not
+   *  happen — it is a plain read) degrades to "no stashes known yet" rather than failing the
+   *  whole repo open. */
   stashShapes: ReadonlyMap<string, StashEntry>;
+  /** P9 W12: derived from `stashShapes` (via `buildStashRowFilter`) every time it refreshes above
+   *  — the graph's own page-read post-pass reads this, never `stashShapes` directly, so the
+   *  "empty ⇒ pass-through" and "`kiraVersion.stash.showInGraph` gates the walk, never the undo
+   *  path" rules live in exactly one place (`#refreshStashGraphInputs`). */
+  stashRowFilter: StashRowFilter;
 }
 
 /**
@@ -822,7 +835,7 @@ export class RepoService {
     const existing = this.#sessions.get(repoId);
     if (existing) return { kind: "ok", repoId, identity: existing.identity };
 
-    const session = this.#openSession(identity);
+    const session = await this.#openSession(identity);
     this.#sessions.set(repoId, session);
     this.#logger.log("debug", "opened repo", { repoId, root: identity.root });
     return { kind: "ok", repoId, identity };
@@ -2620,17 +2633,18 @@ export class RepoService {
   // Internals
   // ---------------------------------------------------------------------------------------
 
-  #openSession(identity: RepoIdentity): RepoSession {
+  async #openSession(identity: RepoIdentity): Promise<RepoSession> {
     const git = this.#git();
     const catFile = openCatFileSession(git, this.#deps.runner, identity.root);
     const driver = openGitDriver(git, this.#deps.runner, identity.root, catFile);
     const watcher = watchRepo(this.#deps.fileWatcher, identity);
+    const { stashShapes, stashShas, rowFilter } = await this.#refreshStashGraphInputs(driver);
 
     const session: RepoSession = {
       repoId: identity.root,
       identity,
       driver,
-      logSession: this.#openLogSession(identity),
+      logSession: this.#openLogSession(identity, stashShas),
       store: new CommitStoreImpl(),
       watcher,
       dictionaryMarks: initialDictionaryMarks(),
@@ -2649,7 +2663,8 @@ export class RepoService {
       activeRemoteOp: undefined,
       autoFetchLastAt: Date.now(),
       autoFetchDisabled: false,
-      stashShapes: new Map(),
+      stashShapes,
+      stashRowFilter: rowFilter,
     };
 
     session.subscriptions.push(watcher.onSignal((signal) => this.#handleSignal(session, signal)));
@@ -2662,11 +2677,46 @@ export class RepoService {
     return session;
   }
 
-  #openLogSession(identity: RepoIdentity): LogSession {
+  #openLogSession(identity: RepoIdentity, stashShas: readonly string[]): LogSession {
     return openLogSession(this.#git(), this.#deps.runner, identity.root, {
-      walk: { kind: "scope", scope: this.#deps.settings()["kiraVersion.graph.scope"] },
+      walk: {
+        kind: "scope",
+        scope: this.#deps.settings()["kiraVersion.graph.scope"],
+        stashShas,
+        includeStash: this.#deps.settings()["kiraVersion.stash.showInGraph"],
+      },
       pageSize: this.#deps.settings()["kiraVersion.graph.pageSize"],
     });
+  }
+
+  /** P9 W12: the one place that reads `stash list` for the graph's own sake — `#openSession` and
+   *  `#resetSession` both call this before building this session's `WalkSpec`, since every stash
+   *  beyond `stash@{0}` must be named as an explicit positional rev to be walkable at all
+   *  (`revSetArgs`'s own doc comment). Also refreshes `stashShapes` (the drop-undo capture's own
+   *  dependency, `RepoSession.stashShapes`'s doc comment) — deliberately unconditional on
+   *  `kiraVersion.stash.showInGraph`, so turning the graph's stash visibility off never degrades
+   *  undo. Only `stashShas`/`rowFilter` (the graph-visible half) are gated by the setting.
+   *  Best-effort: a failed `stash list` (should not happen — it is a plain read) degrades to "no
+   *  stashes known this session" rather than failing the repo open/refresh outright. */
+  async #refreshStashGraphInputs(driver: GitDriver): Promise<{
+    readonly stashShapes: ReadonlyMap<string, StashEntry>;
+    readonly stashShas: readonly string[];
+    readonly rowFilter: StashRowFilter;
+  }> {
+    let entries: readonly StashEntry[] = [];
+    try {
+      entries = await stashListQuery(driver);
+    } catch {
+      entries = [];
+    }
+    const stashShapes = new Map(entries.map((e) => [e.sha, e] as const));
+    const showInGraph = this.#deps.settings()["kiraVersion.stash.showInGraph"];
+    const graphEntries = showInGraph ? entries : [];
+    return {
+      stashShapes,
+      stashShas: graphEntries.map((e) => e.sha),
+      rowFilter: buildStashRowFilter(graphEntries),
+    };
   }
 
   #requireSession(repoId: string): RepoSession {
@@ -2692,25 +2742,43 @@ export class RepoService {
   async #ensureFresh(session: RepoSession): Promise<void> {
     if (!session.staleReason) return;
     session.staleReason = undefined;
-    this.#resetSession(session);
+    await this.#resetSession(session);
   }
 
   /** Resets exactly the panel's own walk state. Deliberately does NOT touch `session.reviewWalk`
    *  (P7/D38): a `refsChanged`/`refresh()` invalidation of the graph's own scoped walk must never
    *  disturb an independently-open review walk on the same repo, and vice versa — the two are
    *  invalidated by entirely separate paths (`#handleSignal`'s `staleReason` here; the review
-   *  view's own quiet re-resolve, per open question 5, for the review walk). */
-  #resetSession(session: RepoSession): void {
+   *  view's own quiet re-resolve, per open question 5, for the review walk).
+   *
+   *  P9 W12: also re-reads the stash list (`#refreshStashGraphInputs`) before rebuilding the log
+   *  session — a stash push/pop/drop is itself a write, so it already reaches here through the
+   *  exact same `refsChanged` path any other ref-moving op does (`driver.onInvalidated`, §4.3);
+   *  this is what keeps the graph's stash rows in sync with no bespoke invalidation of their own. */
+  async #resetSession(session: RepoSession): Promise<void> {
     session.store.clear();
     session.dictionaryMarks = initialDictionaryMarks();
     session.lastRemaining = 0;
     session.logSession.dispose();
-    session.logSession = this.#openLogSession(session.identity);
+    const { stashShapes, stashShas, rowFilter } = await this.#refreshStashGraphInputs(
+      session.driver,
+    );
+    session.stashShapes = stashShapes;
+    session.stashRowFilter = rowFilter;
+    session.logSession = this.#openLogSession(session.identity, stashShas);
+  }
+
+  /** P9 W12's own chunk-build post-pass (`graph/stashRows.ts`'s doc comment): applied to every
+   *  record a page read yields, before it ever reaches `session.store` — a dropped helper-commit
+   *  row is simply never appended. */
+  #appendFilteredRecord(session: RepoSession, record: CommitRecord): void {
+    const filtered = applyStashRowFilter(record, session.stashRowFilter);
+    if (filtered) session.store.append(filtered);
   }
 
   async #readPageIntoStore(session: RepoSession, signal?: AbortSignal): Promise<void> {
     const outcome = await session.logSession.readPage(
-      (record) => session.store.append(record),
+      (record) => this.#appendFilteredRecord(session, record),
       signal ? { signal } : {},
     );
     if (outcome.kind === "stale") {
@@ -2720,7 +2788,7 @@ export class RepoService {
       this.#handleSignal(session, "refsChanged");
       await this.#ensureFresh(session);
       await session.logSession.readPage(
-        (record) => session.store.append(record),
+        (record) => this.#appendFilteredRecord(session, record),
         signal ? { signal } : {},
       );
     }
@@ -2936,7 +3004,11 @@ export class RepoService {
 
   #evict(session: RepoSession): void {
     session.evictTimer = undefined;
-    this.#resetSession(session);
+    // Fire-and-forget: `#resetSession` cannot reject (`#refreshStashGraphInputs`'s own
+    // best-effort try/catch, `openLogSession` itself never throws), and this timer callback has
+    // no caller to propagate a rejection to regardless — same posture as every other synchronous
+    // side effect this method performs below.
+    void this.#resetSession(session);
     // P7/D38: a review's own view (the sidebar) is a *separate* webview from the panel this
     // eviction timer is armed by — hiding the panel must not silently leave a review walk running
     // forever in the background, so it is disposed here alongside everything else this evicts.

@@ -499,9 +499,16 @@ describe("RepoService", () => {
   test("open, stream, loadMore and close over a withStash repo", async () => {
     const repo = withStash({ includeUntracked: true });
     // `revSetArgs("all")` globs `refs/stash` too (parse/log.ts), so the stash's own WIP commit
-    // (and its extra parents, for the -u variant) are reachable rows here, not just the one real
-    // commit `repo.commits` records.
+    // and its two helper-commit parents (the -u variant's index and untracked trees) are all
+    // reachable by `git log`/`rev-list` here — `total` is the raw, UNFILTERED count.
     const total = revListAllCount(repo.dir);
+    // P9 W12: `RepoService`'s own chunk-build post-pass drops both helper-commit rows from what
+    // the UI actually sees (`graph/stashRows.ts`) — the one real commit `repo.commits` records,
+    // plus the stash's own commit (parent truncated to its base), and nothing else. `remaining`
+    // is unaffected: `LogSession.remaining()` is computed over the same unfiltered total/loaded
+    // pair on both sides of the subtraction, so it still reaches exactly 0 once exhausted.
+    const visible = repo.commits.length + 1;
+    expect(visible).toBe(total - 2); // sanity: exactly the two helper rows were dropped
     const runner = new CountingRunner();
     const service = await RepoService.create({
       runner,
@@ -517,11 +524,11 @@ describe("RepoService", () => {
       const { repoId } = opened;
 
       const first = await streamAll(service, repoId);
-      expect(totalRows(first)).toBe(total);
-      expect(service.status(repoId)).toEqual({ loaded: total, remaining: 0, exhausted: true });
+      expect(totalRows(first)).toBe(visible);
+      expect(service.status(repoId)).toEqual({ loaded: visible, remaining: 0, exhausted: true });
 
       await service.loadMore(repoId, 1); // a no-op past exhaustion, must not spawn or throw
-      expect(service.status(repoId)).toEqual({ loaded: total, remaining: 0, exhausted: true });
+      expect(service.status(repoId)).toEqual({ loaded: visible, remaining: 0, exhausted: true });
 
       service.close(repoId);
       expect(() => service.status(repoId)).toThrow();

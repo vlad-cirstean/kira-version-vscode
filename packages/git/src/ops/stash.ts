@@ -25,11 +25,17 @@ export function stashPushArgs(
 
 /** `apply` accepts a raw sha (unlike `pop`/`drop`/`branch`) — it never mutates the stack, so
  *  there is nothing for an index to guard (P9 probe 8). */
-export function stashApplyArgs(sha: string, opts: { readonly restoreIndex?: boolean } = {}): string[] {
+export function stashApplyArgs(
+  sha: string,
+  opts: { readonly restoreIndex?: boolean } = {},
+): string[] {
   return ["stash", "apply", ...(opts.restoreIndex ? ["--index"] : []), sha];
 }
 
-export function stashPopArgs(index: number, opts: { readonly restoreIndex?: boolean } = {}): string[] {
+export function stashPopArgs(
+  index: number,
+  opts: { readonly restoreIndex?: boolean } = {},
+): string[] {
   return ["stash", "pop", ...(opts.restoreIndex ? ["--index"] : []), stashRef(index)];
 }
 

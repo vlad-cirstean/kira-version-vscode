@@ -3,6 +3,7 @@ import type {
   CheckoutPreflight,
   CommitDetail,
   DiffHunk,
+  FileChange,
   FileDiff,
   OpRequest,
   OpResult,
@@ -12,6 +13,9 @@ import type {
   RemoteOpResult,
   RevertPreflight,
   Settings,
+  StashBranchPreflight,
+  StashEntry,
+  StashPopPreflight,
   StatusSummary,
   UndoSlotSnapshot,
 } from "../../../packages/core/src/index.ts";
@@ -155,6 +159,21 @@ class FakeRepoService implements RepoServicePort {
     shas: readonly string[];
     mainline: number | undefined;
   }> = [];
+  // P9 W11
+  stashListResult: { entries: readonly StashEntry[] } | undefined;
+  readonly stashListCalls: string[] = [];
+  stashShowResult: { sha: string; changes: readonly FileChange[] } | undefined;
+  readonly stashShowCalls: Array<{ repoId: string; sha: string }> = [];
+  stashPopPreflightResult: StashPopPreflight | undefined;
+  readonly preflightStashPopCalls: Array<{
+    repoId: string;
+    sha: string;
+    index: number;
+    targetSha: string | undefined;
+  }> = [];
+  stashBranchPreflightResult: StashBranchPreflight | undefined;
+  readonly preflightStashBranchCalls: Array<{ repoId: string; sha: string; branch: string }> = [];
+
   opResult: OpResult | undefined;
   readonly runOpCalls: Array<{ repoId: string; op: OpRequest }> = [];
   undoPeekResult: UndoSlotSnapshot | null = null;
@@ -291,6 +310,47 @@ class FakeRepoService implements RepoServicePort {
       throw new Error("FakeRepoService.revertPreflightResult not set");
     }
     return this.revertPreflightResult;
+  }
+
+  // P9 W11
+  async stashList(repoId: string): Promise<{ entries: readonly StashEntry[] }> {
+    this.stashListCalls.push(repoId);
+    if (!this.stashListResult) throw new Error("FakeRepoService.stashListResult not set");
+    return this.stashListResult;
+  }
+
+  async stashShow(
+    repoId: string,
+    sha: string,
+  ): Promise<{ sha: string; changes: readonly FileChange[] }> {
+    this.stashShowCalls.push({ repoId, sha });
+    if (!this.stashShowResult) throw new Error("FakeRepoService.stashShowResult not set");
+    return this.stashShowResult;
+  }
+
+  async preflightStashPop(
+    repoId: string,
+    sha: string,
+    index: number,
+    targetSha?: string,
+  ): Promise<StashPopPreflight> {
+    this.preflightStashPopCalls.push({ repoId, sha, index, targetSha });
+    if (!this.stashPopPreflightResult) {
+      throw new Error("FakeRepoService.stashPopPreflightResult not set");
+    }
+    return this.stashPopPreflightResult;
+  }
+
+  async preflightStashBranch(
+    repoId: string,
+    sha: string,
+    branch: string,
+  ): Promise<StashBranchPreflight> {
+    this.preflightStashBranchCalls.push({ repoId, sha, branch });
+    if (!this.stashBranchPreflightResult) {
+      throw new Error("FakeRepoService.stashBranchPreflightResult not set");
+    }
+    return this.stashBranchPreflightResult;
   }
 
   async runOp(repoId: string, op: OpRequest): Promise<OpResult> {

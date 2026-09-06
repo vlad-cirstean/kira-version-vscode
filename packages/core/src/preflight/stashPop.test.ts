@@ -87,9 +87,7 @@ describe("classifyStashPop", () => {
       }),
     );
     expect(result.verdict).toBe("blocked");
-    expect(result.blockers).toEqual([
-      { kind: "localChangesWouldBeOverwritten", paths: ["a.txt"] },
-    ]);
+    expect(result.blockers).toEqual([{ kind: "localChangesWouldBeOverwritten", paths: ["a.txt"] }]);
   });
 
   test("an untracked dirty path overlapping stashPaths is NOT localChangesWouldBeOverwritten (tracked-only)", () => {

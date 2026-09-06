@@ -76,6 +76,10 @@ export type RepoServicePort = Pick<
   | "preflightPush"
   | "runRemoteOp"
   | "cancelRemoteOp"
+  | "stashList"
+  | "stashShow"
+  | "preflightStashPop"
+  | "preflightStashBranch"
 >;
 
 export interface RepoHandlersDeps {
@@ -391,6 +395,27 @@ export function createRepoHandlers(deps: RepoHandlersDeps): ServerHandlers {
     mainline,
   }) => deps.service.preflightRevert(repoId, shas, mainline);
 
+  // ---- P9 W11: Stash --------------------------------------------------------------------
+
+  const stashListImpl: RequestHandler<"stash.list"> = async ({ repoId }) =>
+    deps.service.stashList(repoId);
+
+  const stashShowImpl: RequestHandler<"stash.show"> = async ({ repoId, sha }) =>
+    deps.service.stashShow(repoId, sha);
+
+  const preflightStashPopImpl: RequestHandler<"preflight.stashPop"> = async ({
+    repoId,
+    sha,
+    index,
+    targetSha,
+  }) => deps.service.preflightStashPop(repoId, sha, index, targetSha);
+
+  const preflightStashBranchImpl: RequestHandler<"preflight.stashBranch"> = async ({
+    repoId,
+    sha,
+    branch,
+  }) => deps.service.preflightStashBranch(repoId, sha, branch);
+
   // `op.run` does NOT try/catch: W8's executor already turned every expected git failure into
   // `OpResult.error` (a `GitError` never reaches here) — a throw that does escape is a genuine
   // bug and should surface as one, exactly like every other handler in this file.
@@ -481,6 +506,10 @@ export function createRepoHandlers(deps: RepoHandlersDeps): ServerHandlers {
       "status.get": logged("status.get", statusGetImpl),
       "preflight.checkout": logged("preflight.checkout", preflightCheckoutImpl),
       "preflight.revert": logged("preflight.revert", preflightRevertImpl),
+      "stash.list": logged("stash.list", stashListImpl),
+      "stash.show": logged("stash.show", stashShowImpl),
+      "preflight.stashPop": logged("preflight.stashPop", preflightStashPopImpl),
+      "preflight.stashBranch": logged("preflight.stashBranch", preflightStashBranchImpl),
       "op.run": logged("op.run", opRunImpl),
       "undo.peek": logged("undo.peek", undoPeekImpl),
       "undo.run": logged("undo.run", undoRunImpl),

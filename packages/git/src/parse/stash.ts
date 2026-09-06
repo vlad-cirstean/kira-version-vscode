@@ -80,9 +80,11 @@ function parseHeader(record: Uint8Array): {
   readonly timestamp: number;
   readonly message: string;
 } {
-  const [sha, parentsRaw, gd, at, gs] = splitLimitedFields(record, FIELD_DELIMITER, FIELD_COUNT).map(
-    (field) => decoder.decode(field),
-  );
+  const [sha, parentsRaw, gd, at, gs] = splitLimitedFields(
+    record,
+    FIELD_DELIMITER,
+    FIELD_COUNT,
+  ).map((field) => decoder.decode(field));
   const parents = parentsRaw ? parentsRaw.split(" ").filter((p) => p.length > 0) : [];
   const indexMatch = STASH_INDEX.exec(gd ?? "");
   const message = gs ?? "";
