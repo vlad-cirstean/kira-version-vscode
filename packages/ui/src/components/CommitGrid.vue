@@ -724,7 +724,27 @@ function scrollToRow(row: number): void {
   grid?.scrollRowIntoView(row);
 }
 
-defineExpose({ scrollToRow });
+/** `docs/plans/P11.md` W14: `SearchBox.vue`'s second-stage `Escape` (§6.6) asks to move real DOM
+ *  focus back onto the grid — the same row `applyAccessibility`'s own roving tabindex already
+ *  made the one native tab stop (the selected row, or row 0 with nothing selected yet). Scrolled
+ *  into view first, exactly as a real click/keyboard selection already does elsewhere in this
+ *  file (`moveSelection`'s own "scrolls it into view first, focuses second"). Unlike
+ *  `moveSelection`, the row here is very likely *already* selected — this is "give focus back to
+ *  what is already chosen", not "choose something new" — so `props.selection.select(row)` alone
+ *  cannot be relied on to trigger the selection watcher's own invalidate/render (a same-value
+ *  `select()` call is a no-op): `invalidateRows`/`render()` are called directly instead, which is
+ *  what actually runs `onRendered` → `applyAccessibility` and lets `pendingFocusRow` take effect.
+ *  A no-op with nothing loaded yet (`loadedRows === 0`) — there is no row to focus. */
+function focusGrid(): void {
+  if (!grid || props.graphView.loadedRows.value === 0) return;
+  const row = Math.max(0, props.selection.row.value);
+  grid.scrollRowIntoView(row);
+  pendingFocusRow = row;
+  grid.invalidateRows([row]);
+  grid.render();
+}
+
+defineExpose({ scrollToRow, focusGrid });
 </script>
 
 <template>
