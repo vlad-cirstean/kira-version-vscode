@@ -86,7 +86,13 @@ async function submitCreate(): Promise<void> {
     message: message.value.trim() === "" ? undefined : message.value.trim(),
     includeUntracked: includeUntracked.value,
     keepIndex: keepIndex.value,
-    paths: pathspec.value,
+    // `[...pathspec.value]` (not `pathspec.value` itself): `ref<readonly string[]>`'s own value is
+    // a reactive `Proxy`-wrapped array (Vue's `toReactive`), and `mockBridge.ts`'s in-memory pipe
+    // genuinely `structuredClone`s every request to mimic real `postMessage` — Chromium's
+    // structured-clone algorithm rejects a `Proxy` outright ("[object Object] could not be
+    // cloned"), even an empty one, regardless of what it wraps. A plain array copy is the one this
+    // request needs; nothing here relies on the reactive wrapper past this call.
+    paths: [...pathspec.value],
   });
   emit("close-create");
 }
@@ -208,7 +214,7 @@ function confirmPop(): void {
       <template v-else-if="mode === 'branch'">
         <h2 id="kv-stash-dialog-title" class="kv-modal-title">Create branch from stash</h2>
         <p class="kv-modal-note">
-          From <code>{{ `stash@{${branchTarget?.index}}` }}</code>: {{ branchTarget?.message }}
+          From <code>{{ "stash@{" + (branchTarget?.index ?? "") + "}" }}</code>: {{ branchTarget?.message }}
         </p>
         <label class="kv-tag-field">
           Branch name
@@ -241,7 +247,7 @@ function confirmPop(): void {
       <template v-else-if="mode === 'popConfirm' && pending">
         <h2 id="kv-stash-dialog-title" class="kv-modal-title">
           {{ pending.verb === "pop" ? "Pop" : "Apply" }}
-          {{ `stash@{${pending.preflight.stashIndex}}` }}
+          {{ "stash@{" + pending.preflight.stashIndex + "}" }}
         </h2>
 
         <template v-for="blocker in pending.preflight.blockers" :key="blocker.kind">

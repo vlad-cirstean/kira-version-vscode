@@ -89,7 +89,7 @@ async function onMenuSelect(id: string): Promise<void> {
     >
       <button type="button" class="kv-branch-row-main" @click="select(entry)">
         <span class="codicon codicon-archive" aria-hidden="true"></span>
-        <span class="kv-stash-index">{{ `stash@{${entry.index}}` }}</span>
+        <span class="kv-stash-index">{{ "stash@{" + entry.index + "}" }}</span>
         <span class="kv-stash-message" :title="entry.message">{{ entry.message }}</span>
         <span class="kv-stash-base" :title="entry.baseSubject">
           <code>{{ entry.baseSha.slice(0, 7) }}</code> {{ entry.baseSubject }}
@@ -119,7 +119,7 @@ async function onMenuSelect(id: string): Promise<void> {
       :sections="stashMenuSections"
       :x="stashMenu.x"
       :y="stashMenu.y"
-      :label="`stash@{${stashMenu.entry.index}} actions`"
+      :label="'stash@{' + stashMenu.entry.index + '} actions'"
       @select="onMenuSelect"
       @close="stashMenu = undefined"
     />

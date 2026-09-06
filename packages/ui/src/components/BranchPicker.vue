@@ -245,8 +245,9 @@ onBeforeUnmount(() => {
               <button type="button" class="kv-branch-row-main" @click="checkoutBranch(row)">
                 <span
                   class="kv-branch-current-dot"
-                  role="img"
+                  :role="row.isHead ? 'img' : undefined"
                   :aria-label="row.isHead ? 'current branch' : undefined"
+                  :aria-hidden="!row.isHead"
                   >{{ row.isHead ? "●" : "" }}</span
                 >
                 <span class="kv-branch-row-name">{{ row.shortName }}</span>

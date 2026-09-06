@@ -704,7 +704,14 @@ function applyOp(
         dirtyPaths: session.status.dirtyPaths.filter((p) => !stashed.has(p)),
         isClean: session.status.dirtyPaths.every((p) => stashed.has(p)),
       };
-      return { result: opOk(session), changed: "worktreeChanged" };
+      // `"refsChanged"`, not `"worktreeChanged"` (all five stash cases below agree): a stash push
+      // writes `refs/stash` like any other ref write — `StashState`'s own doc comment already
+      // states this as the reload contract ("`ops.ts`'s stash methods do not additionally call
+      // `reload()` themselves"). `OpsState.refreshStatus` listens to *both* kinds, so this single
+      // event still refreshes the dirty-paths/status half too; `"worktreeChanged"` alone would
+      // leave `StashState`/`RefsState` never reloading (both filter for `refsChanged` only),
+      // which is exactly the bug `stash.spec.ts`'s own toolbar-create test caught.
+      return { result: opOk(session), changed: "refsChanged" };
     }
     case "stashApply": {
       const stash = session.stash.find((s) => s.sha === op.sha);
@@ -719,7 +726,12 @@ function applyOp(
         dirtyPaths: [...new Set([...session.status.dirtyPaths, ...restored])],
         isClean: restored.length === 0 && session.status.isClean,
       };
-      return { result: opOk(session), changed: "worktreeChanged" };
+      // `apply` does not touch `refs/stash` itself (the entry survives, per probe 8) — but the
+      // selected-entry/file-list identity `StashState` holds and the row list's own base/message
+      // rendering are still driven by the same reload, and there is no stash-only worktree-diff
+      // signal to fire instead — see `stashPush`'s own comment above for why `refsChanged` (not
+      // `worktreeChanged`) is what actually reaches `StashState`/`RefsState`.
+      return { result: opOk(session), changed: "refsChanged" };
     }
     case "stashPop": {
       const idx = session.stash.findIndex((s) => s.sha === op.sha && s.index === op.index);
@@ -741,7 +753,9 @@ function applyOp(
         dirtyPaths: [...new Set([...session.status.dirtyPaths, ...restored])],
         isClean: restored.length === 0 && session.status.isClean,
       };
-      return { result: opOk(session), changed: "worktreeChanged" };
+      // A real pop removes the entry — `refs/stash`'s own reflog shrinks by one. See
+      // `stashPush`'s own comment above.
+      return { result: opOk(session), changed: "refsChanged" };
     }
     case "stashDrop": {
       const idx = session.stash.findIndex((s) => s.sha === op.sha && s.index === op.index);
@@ -778,7 +792,8 @@ function applyOp(
           if (restorePaths) session.stashedPaths.set(removed.sha, restorePaths);
         },
       };
-      return { result: opOk(session, pendingUndo), changed: "worktreeChanged" };
+      // Drop shrinks `refs/stash`'s own reflog by one. See `stashPush`'s own comment above.
+      return { result: opOk(session, pendingUndo), changed: "refsChanged" };
     }
     case "stashBranch": {
       const stash = session.stash.find((s) => s.sha === op.sha && s.index === op.index);
@@ -824,7 +839,9 @@ function applyOp(
         dirtyPaths: [...new Set([...session.status.dirtyPaths, ...restored])],
         isClean: restored.length === 0 && session.status.isClean,
       };
-      return { result: opOk(session), changed: "worktreeChanged" };
+      // Creates a branch ref, moves HEAD, and (on the clean-by-construction success path) drops
+      // the stash — three ref writes. See `stashPush`'s own comment above.
+      return { result: opOk(session), changed: "refsChanged" };
     }
   }
 }
@@ -937,9 +954,9 @@ interface RepoSession {
    *  D38's isolation requirement, mirrored here from `RepoService`'s own `reviewWalk` slot. */
   reviewWalks: Map<string, ReviewWalkState>;
   /** P9 W11 — the mock's in-memory stash stack, `stash@{0}` first (matches `stash list`'s own
-   *  order, and `StashEntry.index`'s own meaning). No scenario fixtures this yet (W16 is real-git
-   *  integration fixtures, not a harness scenario field) — every session starts empty and is
-   *  populated purely by `stashPush`, exactly like `refs`/`status` are by their own op cases. */
+   *  order, and `StashEntry.index`'s own meaning). Seeded from `Scenario.stash` (P9 W21) when a
+   *  scenario states one, empty otherwise; mutated purely by `stashPush`/apply/pop/drop/branch
+   *  from there, exactly like `refs`/`status` are by their own op cases. */
   stash: StashEntry[];
   /** Sha -> the paths `stashPush` moved out of `status.dirtyPaths` for that entry. This mock does
    *  not distinguish tracked from untracked, model a pathspec's partial-tree effect beyond "which
@@ -976,8 +993,8 @@ function createSession(repoId: string, scenario: Scenario, head: HeadState): Rep
     inProgress: scenario.status?.inProgress ?? null,
     pendingUndo: null,
     reviewWalks: new Map(),
-    stash: [],
-    stashedPaths: new Map(),
+    stash: (scenario.stash ?? []).map((s) => s.entry),
+    stashedPaths: new Map((scenario.stash ?? []).map((s) => [s.entry.sha, s.stashedPaths])),
   };
 }
 
