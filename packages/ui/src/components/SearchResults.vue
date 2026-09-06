@@ -1,3 +1,11 @@
+<script lang="ts">
+/** `SearchBox.vue`'s own `aria-controls` names this id (P11 W20 a11y pass) — the combobox
+ *  pattern's own required-attribute, missing until then. A stable export rather than two files
+ *  independently agreeing on the same string literal. `<script setup>` cannot itself carry a
+ *  named export, so this one constant lives in a plain sibling `<script>` block instead. */
+export const SEARCH_LISTBOX_ID = "kv-search-listbox";
+</script>
+
 <script setup lang="ts">
 /**
  * `docs/plans/P11.md` W12: the grouped dropdown `SearchBox.vue` renders inside its own panel
@@ -36,56 +44,61 @@ const isEmpty = computed(() => props.model.sections.length === 0);
 </script>
 
 <template>
-  <div class="kv-search-results" role="listbox" aria-label="Search results" data-testid="search-results">
-    <div v-if="searching" class="kv-search-status" data-testid="search-status">Searching…</div>
+  <div class="kv-search-results" data-testid="search-results">
+    <!-- ARIA's listbox role only permits `option`/`group` children (`aria-required-children`) —
+         the status line, section titles and options live inside this inner listbox div; the
+         stale hint, footers and the body-search button are its *siblings*, not its children. -->
+    <div :id="SEARCH_LISTBOX_ID" role="listbox" aria-label="Search results">
+      <div v-if="searching" class="kv-search-status" data-testid="search-status">Searching…</div>
 
-    <template v-for="section in model.sections" :key="section.title">
-      <div class="kv-search-section-title">
-        {{ section.title }} <span class="kv-search-section-count">({{ section.options.length }})</span>
-      </div>
+      <template v-for="section in model.sections" :key="section.title">
+        <div class="kv-search-section-title">
+          {{ section.title }} <span class="kv-search-section-count">({{ section.options.length }})</span>
+        </div>
 
-      <template v-for="option in section.options" :key="option.id">
-        <div
-          :id="option.id"
-          role="option"
-          class="kv-search-option"
-          :class="{ 'kv-search-option--active': option.id === highlightedId }"
-          :aria-selected="option.id === highlightedId"
-          @click="emit('select', option)"
-          @mouseenter="emit('hover', option)"
-        >
-          <template v-if="option.kind === 'ref'">
-            <span
-              class="codicon"
-              :class="{
-                'codicon-git-branch': option.hit.ref.kind === 'branch',
-                'codicon-cloud': option.hit.ref.kind === 'remoteBranch',
-                'codicon-tag': option.hit.ref.kind === 'tag',
-              }"
-              aria-hidden="true"
-            ></span>
-            <span class="kv-search-option-main">{{ option.hit.ref.shortName }}</span>
-            <span v-if="fieldLabel(option.hit.fields)" class="kv-search-option-field">
-              {{ fieldLabel(option.hit.fields) }}
-            </span>
-          </template>
-          <template v-else>
-            <span class="kv-search-option-sha">{{ option.hit.sha.slice(0, 7) }}</span>
-            <span class="kv-search-option-main">{{ option.hit.subject }}</span>
-            <span class="kv-search-option-author">{{ option.hit.authorName }}</span>
-            <span class="kv-search-option-date">{{ formatRelativeDate(option.hit.authorTime) }}</span>
-            <span v-if="fieldLabel(option.hit.fields)" class="kv-search-option-field">
-              {{ fieldLabel(option.hit.fields) }}
-            </span>
-          </template>
+        <template v-for="option in section.options" :key="option.id">
+          <div
+            :id="option.id"
+            role="option"
+            class="kv-search-option"
+            :class="{ 'kv-search-option--active': option.id === highlightedId }"
+            :aria-selected="option.id === highlightedId"
+            @click="emit('select', option)"
+            @mouseenter="emit('hover', option)"
+          >
+            <template v-if="option.kind === 'ref'">
+              <span
+                class="codicon"
+                :class="{
+                  'codicon-git-branch': option.hit.ref.kind === 'branch',
+                  'codicon-cloud': option.hit.ref.kind === 'remoteBranch',
+                  'codicon-tag': option.hit.ref.kind === 'tag',
+                }"
+                aria-hidden="true"
+              ></span>
+              <span class="kv-search-option-main">{{ option.hit.ref.shortName }}</span>
+              <span v-if="fieldLabel(option.hit.fields)" class="kv-search-option-field">
+                {{ fieldLabel(option.hit.fields) }}
+              </span>
+            </template>
+            <template v-else>
+              <span class="kv-search-option-sha">{{ option.hit.sha.slice(0, 7) }}</span>
+              <span class="kv-search-option-main">{{ option.hit.subject }}</span>
+              <span class="kv-search-option-author">{{ option.hit.authorName }}</span>
+              <span class="kv-search-option-date">{{ formatRelativeDate(option.hit.authorTime) }}</span>
+              <span v-if="fieldLabel(option.hit.fields)" class="kv-search-option-field">
+                {{ fieldLabel(option.hit.fields) }}
+              </span>
+            </template>
+          </div>
+        </template>
+        <div v-if="section.hiddenCount > 0" class="kv-search-more">
+          {{ section.hiddenCount }} more — refine your search
         </div>
       </template>
-      <div v-if="section.hiddenCount > 0" class="kv-search-more">
-        {{ section.hiddenCount }} more — refine your search
-      </div>
-    </template>
 
-    <div v-if="isEmpty" class="kv-search-empty">No results</div>
+      <div v-if="isEmpty" class="kv-search-empty">No results</div>
+    </div>
 
     <div v-if="tailStale" class="kv-search-hint" data-testid="search-tail-stale">
       Refs changed since this search ran

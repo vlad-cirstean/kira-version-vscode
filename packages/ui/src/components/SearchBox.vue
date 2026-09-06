@@ -46,7 +46,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ACTION_ICONS } from "../icons/index.ts";
 import type { SearchState } from "../state/search.ts";
 import { MIN_TAIL_QUERY_LENGTH } from "../state/search.ts";
-import SearchResults from "./SearchResults.vue";
+import SearchResults, { SEARCH_LISTBOX_ID } from "./SearchResults.vue";
 import type { SearchOption } from "./searchResultsModel.ts";
 import { buildSearchResultsModel } from "./searchResultsModel.ts";
 
@@ -232,6 +232,7 @@ defineExpose({ focus: () => inputEl.value?.focus() });
         aria-haspopup="listbox"
         data-testid="search-input"
         :aria-expanded="dropdownVisible && resultsModel.sections.length > 0"
+        :aria-controls="dropdownVisible ? SEARCH_LISTBOX_ID : undefined"
         :aria-activedescendant="highlightedOption?.id"
         :aria-describedby="search.error.value ? ERROR_ID : undefined"
         :aria-invalid="search.error.value ? 'true' : undefined"
