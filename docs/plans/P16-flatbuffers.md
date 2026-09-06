@@ -957,26 +957,30 @@ Complete when all of the following hold, verified by running them:
       path — was executed and passed in full (281/281). `git diff` against the pre-P16 tip shows
       **zero** changes to `repoService.ts` or `logSession.ts`: D38's session isolation is
       untouched, not merely unmentioned.
-- [x] **The boundary is measured and recorded**, per W11: measured twice (two independent runs)
-      against a 100k-commit repo. `hostBoundaryMs` (gated, shipping FlatBuffers path): baseline
-      4.74 ms → 22.95 ms / 24.74 ms actual (+384% / +421%) — a **materially worse**, not
-      within-tolerance, result. `hostWireBytes`: 563,748 B baseline → 563,697 B / 563,748 B actual
-      (unchanged, within gate). `hostBoundaryBase64Ms`/`hostWireBytesBase64` (recorded, not
-      gated — the old plain-base64 path over the identical ten chunks, same run): ~3.0 ms /
-      563,748 B. Per the pre-resolved escalation ladder for a materially-worse result: **not**
-      re-baselined, **not** tolerance-widened — `streamRoundTrip.budget.json` was left exactly as
-      P15 committed it, so `bun run test:perf` continues to report this as a regression on every
-      future run until the orchestrating session weighs in. Flagged below as a Finding; the
-      FlatBuffers implementation shipped anyway, per the override.
-      **W11 follow-up (post-checklist):** the coordinator identified that the seven generated
-      `create<Field>Vector()` byte-column builders in `graphChunk.ts` loop `addInt8()` per element
-      instead of using the `flatbuffers` runtime's own bulk `Builder.createByteVector()`. Swapping
-      to `builder.createByteVector(...)` in `toWire` (wire format unchanged — a `[ubyte]` vector is
-      length + raw bytes regardless of which builder call wrote it) roughly **halved** the
-      regression: two fresh runs measured `hostBoundaryMs` at **12.17 ms (+156.4%)** and
-      **10.42 ms (+119.6%)** against the same 4.74 ms baseline — down from 22.95/24.74 ms, but
-      **still materially worse**, still outside the ±20% ladder tolerance. The budget remains
-      untouched; see V3 in Findings for the full before/after and what remains unexplained.
+- [x] **The boundary is measured and recorded, and the gate now reflects an accepted cost.**
+      Three rounds, per W11 and two coordinator-directed follow-ups (all against the same
+      100k-commit repo, two independent runs each):
+      **Round 1** — `hostBoundaryMs` (gated, shipping FlatBuffers path): baseline 4.74 ms →
+      22.95 ms / 24.74 ms actual (+384% / +421%), materially worse; `streamRoundTrip.budget.json`
+      deliberately left untouched, flagged as a Finding.
+      **Round 2** — root cause found: the seven generated `create<Field>Vector()` byte-column
+      builders in `graphChunk.ts` loop `addInt8()` per element instead of the `flatbuffers`
+      runtime's own bulk `Builder.createByteVector()`. Fixed in `toWire` (wire-format-neutral —
+      confirmed by unchanged `test:unit`/`test:integration` results); roughly **halved** the
+      regression to 12.17 ms (+156.4%) / 10.42 ms (+119.6%) — still materially worse, budget still
+      untouched.
+      **Round 3** — pre-sizing the `Builder`'s initial capacity from the payload (instead of a
+      hardcoded 1024 bytes) was tried and reverted: two fresh runs (11.37 ms / 10.80 ms) were
+      statistically indistinguishable from round 2's numbers, given this sandbox's substantial
+      run-to-run noise on unrelated metrics (`packMs`/`appendMs` swinging 12–39% between identical
+      runs). **No further optimization was attempted, per the coordinator's explicit
+      end-of-loop instruction.** `hostBoundaryMs`'s budget was then re-baselined to a fresh
+      full-measurement run (11.10 ms) — every other gated metric's baseline (`packMs`, `cloneMs`,
+      `appendMs`, `hostWireBytes`) left at its original P15 value, touching only the one metric
+      this investigation concerned. `hostWireBytes` was unchanged throughout all three rounds
+      (563,748 B → 563,697 B/563,748 B, always within gate). The residual ~2.3x cost is recorded as
+      an accepted tradeoff of the D44 override (SPEC.md D44), not chased further. See V3 in
+      Findings for the full three-round table and reasoning.
 - [x] **`CONTRACT_VERSION` is 8**, and a version mismatch still fails loudly (unchanged
       `validateVersion`/`ContractVersionMismatchError` machinery in `validate.ts`).
 - [x] **Nothing else moved.** `rpc.test.ts` and `codec.test.ts` have zero diff against the pre-P16
@@ -1029,7 +1033,7 @@ recorded in `graphChunk.ts`'s generated-file header rather than re-invoking `fla
 makes this possible: the schema-drift check never touches the toolchain at all in the common case,
 only `gen:schema` (an explicit, separate command) does.
 
-### V3 — The host-boundary regression (W11 escalation, plus a coordinator-directed follow-up)
+### V3 — The host-boundary regression (W11 escalation, two coordinator-directed follow-ups, final resolution)
 
 Measured twice, independently, against a 100k-commit `largeBranchy` repo, using
 `tests/perf/streamRoundTrip.ts`'s gated `hostBoundaryMs` metric (the shipping FlatBuffers
@@ -1113,8 +1117,62 @@ inherent to `toWire`/`fromWire`'s object-table structure (nested `RowDecorations
 tables, the `dictionary` string vector, the nine separate typed-array `.slice()` copies in
 `fromWire`'s `copyColumn`), none of which this scoped follow-up touched. A deeper investigation
 (e.g. whether `fromWire`'s per-column `.slice()` copies could be views in cases where the caller
-doesn't need an independent buffer) is left to a future decision by the orchestrating session,
-consistent with this follow-up's scope being one targeted fix, not a broader optimization pass.
+doesn't need an independent buffer) was not pursued in this scoped follow-up — see round 3 below,
+where the coordinator explicitly closed off further speculative micro-optimization.
+
+**Round 3 (post-checklist, coordinator-directed, final round):** the coordinator proposed one more
+narrow, cheap attempt before accepting the residual as a cost: `toWire`'s `const builder = new
+flatbuffers.Builder(1024)` starts every chunk at a hardcoded 1 KB capacity, and for a real chunk
+(seven byte columns of tens of KB each) that forces several doubling reallocations — each copying
+the entire buffer built so far — before the `Builder` settles at its final size. The fix tried:
+compute an estimated capacity up front (the seven byte columns' summed `byteLength`, plus a
+worst-case UTF-8 estimate for the `dictionary` strings, plus a fixed 4096-byte slack for
+vtables/scalars/nesting) and pass that as the `Builder`'s initial size instead of 1024 — purely a
+local allocation-strategy change in `toWire`, no schema/wire/`fromWire` change (confirmed: `tsc
+--build --force` clean, `bun run test:unit` 922/922 unchanged, `bun run test:integration` 230/230
+unchanged).
+
+Re-measuring `hostBoundaryMs` twice, independently, against the same 100k-commit repo:
+
+| metric | baseline (P15) | after round 2 (fix only) | after round 3 (fix + pre-sized capacity) |
+|---|---|---|---|
+| `hostBoundaryMs` (gated) | 4.74 ms | 12.17 ms / 10.42 ms | 11.37 ms / 10.80 ms |
+
+The two pairs are statistically indistinguishable — a ~0.2 ms difference in the averages, well
+inside this sandbox's demonstrated run-to-run noise floor (in the very same two round-3 runs,
+`packMs` and `appendMs` — neither touched by any P16 code — swung 12.7%→38.6% and 6.4%→23.7%
+respectively, purely from scheduling noise). Pre-sizing the `Builder`'s capacity made **no
+measurable difference**: `flatbuffers`' `Builder.growByteBuffer` doubling strategy is evidently
+cheap enough at this payload size (tens of KB, a handful of doublings at most) that avoiding it
+isn't where the remaining cost lives. This attempt was **reverted** (`git diff` against the round-2
+commit is empty for `graphChunkCodec.ts`), keeping only the round-2 byte-vector fix.
+
+Per the coordinator's decision rule for this final round ("if this change makes no measurable
+difference at all: revert just this one attempt ... and still re-baseline the budget to the numbers
+from the previous round ... with the same accepted-cost framing" and "this is the end of the
+performance-chasing loop for P16"): a fresh full baseline run was captured
+(`bun run tests/perf/streamRoundTrip.ts --update-baseline`, `hostBoundaryMs: 11.10 ms`, consistent
+with both round 2 and round 3's numbers), and only `hostBoundaryMs` (plus the two pre-existing
+recorded-only keys `hostBoundaryBase64Ms`/`hostWireBytesBase64`, now included for completeness) was
+taken from that run into `streamRoundTrip.budget.json` — every other metric's baseline (`packMs`,
+`cloneMs`, `cloneMsNoTransfer`, `appendMs`, `wireBytesFirstPage`, `wireBytes100k`,
+`roundTripMs100k`, `hostWireBytes`) was restored to its original, untouched P15 value, since this
+investigation concerned `hostBoundaryMs` only and re-baselining unrelated metrics off one noisy run
+would mask real future regressions in `packSlice`/`appendPacked`. Confirmed after the update:
+`bun run tests/perf/streamRoundTrip.ts` passes `hostBoundaryMs` at 2.0% and (in a repeat run) fails
+it once at 20.6% — a hair over the ±20% line — consistent with the noise level already documented
+above; this occasional borderline flakiness at the tolerance boundary is a known property of
+re-baselining onto real, noisy hardware rather than a defect, and is recorded here rather than
+concealed.
+
+**Final disposition:** `hostBoundaryMs`'s residual cost (~11 ms against a ~4.7 ms baseline, a
+roughly 2.3x increase, down from the original ~5x) is accepted as a **documented tradeoff of the
+D44 override** — the project owner's business decision to adopt FlatBuffers regardless of the
+measured cost (SPEC.md D44) — distinct from, and not to be confused with, the byte-vector codegen
+inefficiency fixed in round 2, which *was* a genuine implementation defect worth fixing. No further
+performance work on this metric was pursued past this round, per the coordinator's explicit
+instruction to close the loop here. `hostWireBytes` was unaffected throughout all three rounds
+(563,748 B ↔ 563,697 B, always within its unrelated ±20% gate).
 
 ### V4 — Review sidebar uses the same path
 
