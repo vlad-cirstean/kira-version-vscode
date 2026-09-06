@@ -143,6 +143,7 @@ const inProgress: InProgressOperation = {
   canAbort: true,
   isSequence: false,
   unmergedCount: 0,
+  canSkip: false,
 };
 
 describe("classifyCheckout — the three non-path blockers, alone and combined, and blocker ORDER", () => {

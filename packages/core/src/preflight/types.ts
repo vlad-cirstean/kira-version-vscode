@@ -6,7 +6,7 @@
  * loaded ref list, to run client-side (`ui/src/state/ops.ts` imports `classifyTagCreate`
  * directly).
  */
-import type { InProgressOperation } from "../model/operation.ts";
+import type { InProgressOperation, ResetMode } from "../model/operation.ts";
 import type { RefKind } from "../model/ref.ts";
 import type { PullStrategy, PullStrategySource } from "../model/remote.ts";
 
@@ -169,4 +169,74 @@ export interface StashBranchPreflight {
   };
   readonly checkout: CheckoutPreflight;
   readonly verdict: "clean" | "invalidName" | "blocked";
+}
+
+// ---------------------------------------------------------------------------------------
+// P10 — reset and cherry-pick pre-flight (§7.7/§7.13). Both are wire-carried.
+// ---------------------------------------------------------------------------------------
+
+export interface ResetPreflight {
+  /** Resolved sha of the target and its subject — the dialog names what it is moving TO. */
+  readonly target: string;
+  readonly targetSubject: string;
+  readonly mode: ResetMode;
+  readonly currentHead: string;
+  /** `null` on a detached HEAD — §7.7's "moving nothing but HEAD" (hard part 8). */
+  readonly branch: string | null;
+  /** Both halves of `rev-list --count --left-right <target>...HEAD` in one spawn (probe 4).
+   *  `leaving` is §7.7's stated count; `gaining` is what makes a diverged target legible. */
+  readonly leaving: number;
+  readonly gaining: number;
+  /** Up to 10, from a second spawn, and only when `leaving > 0`. `leavingTruncated` when the
+   *  real count exceeds the cap. */
+  readonly leavingCommits: readonly { readonly sha: string; readonly subject: string }[];
+  readonly leavingTruncated: boolean;
+  readonly dirty: {
+    readonly staged: readonly string[];
+    readonly unstaged: readonly string[];
+    readonly untracked: readonly string[];
+  };
+  /** Probe 1: what `--hard` will actually destroy — staged ∪ unstaged tracked paths ∪
+   *  staged-but-uncommitted new files. **Excludes untracked and ignored files**, which `--hard`
+   *  leaves alone. Empty for `soft`/`mixed`, always. */
+  readonly destroys: readonly string[];
+  readonly inProgress: InProgressOperation | null;
+  /** hard part 2: `mode === "hard" && destroys.length > 0`. */
+  readonly requiresTypedConfirmation: boolean;
+  /** §7.7's "stash first", offered whenever `destroys` is non-empty. A stash-then-stop, NOT
+   *  P9's `stashAndCarry` (hard part 3) — the union member name says so. */
+  readonly routes: readonly "stashFirst"[];
+  readonly verdict: "clean" | "destructive" | "blocked";
+  readonly blockers: readonly ("inProgressOperation" | "unknownTarget")[];
+}
+
+export type CherryPickBlocker =
+  | { readonly kind: "inProgressOperation"; readonly operation: InProgressOperation }
+  | { readonly kind: "mainlineRequired"; readonly parents: readonly RevertParentChoice[] }
+  /** Probe 7 B/D: git refuses ANY staged change, related to the pick or not. */
+  | { readonly kind: "stagedChanges"; readonly paths: readonly string[] }
+  /** Probe 7C: unstaged dirt ∩ the commit's own paths. Atomic — nothing is applied. */
+  | { readonly kind: "localChangesWouldBeOverwritten"; readonly paths: readonly string[] }
+  /** Probe 7E: untracked files ∩ the paths the commit adds. Also atomic, and refused even when
+   *  the content is byte-identical. */
+  | { readonly kind: "untrackedWouldBeOverwritten"; readonly paths: readonly string[] };
+
+export interface CherryPickPreflight {
+  readonly sha: string;
+  readonly subject: string;
+  /** Non-empty parents ⇒ the user MUST pick before the op is offered. Same shape and same
+   *  producer (`revertMergeParents`) as `RevertPreflight.mainlineRequired` — probe 8. */
+  readonly mainlineRequired: readonly RevertParentChoice[];
+  /** ALWAYS predicted with `--merge-base=<sha>^<mainline|1>` — probe 2. Never omit it. */
+  readonly prediction: MergeOutcomePrediction;
+  /** `git merge-base --is-ancestor <sha> HEAD` — the change is already in this history, so the
+   *  pick will be empty (probe 6). Advisory, not a blocker: picking it anyway is legal. */
+  readonly alreadyApplied: boolean;
+  readonly inProgress: InProgressOperation | null;
+  readonly detachedHead: boolean;
+  readonly verdict: "clean" | "willConflict" | "blocked";
+  /** Ordered: `inProgressOperation`, `mainlineRequired`, `stagedChanges`,
+   *  `untrackedWouldBeOverwritten`, `localChangesWouldBeOverwritten` — mirroring
+   *  `classifyRevert`'s own "first blocker is the headline" convention. */
+  readonly blockers: readonly CherryPickBlocker[];
 }

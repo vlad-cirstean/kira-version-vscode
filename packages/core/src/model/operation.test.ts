@@ -45,6 +45,7 @@ describe("classifyInProgress — precedence table (§7.11)", () => {
       canAbort: true,
       isSequence: false,
       unmergedCount: 1,
+      canSkip: false,
     });
   });
 
@@ -71,6 +72,7 @@ describe("classifyInProgress — precedence table (§7.11)", () => {
       canAbort: true,
       isSequence: false,
       unmergedCount: 1,
+      canSkip: false,
     });
   });
 
@@ -88,6 +90,7 @@ describe("classifyInProgress — precedence table (§7.11)", () => {
       canAbort: true,
       isSequence: false,
       unmergedCount: 0,
+      canSkip: true,
     });
   });
 
@@ -105,6 +108,7 @@ describe("classifyInProgress — precedence table (§7.11)", () => {
       canAbort: true,
       isSequence: false,
       unmergedCount: 0,
+      canSkip: true,
     });
   });
 
@@ -122,6 +126,7 @@ describe("classifyInProgress — precedence table (§7.11)", () => {
       canAbort: true,
       isSequence: false,
       unmergedCount: 0,
+      canSkip: false,
     });
   });
 
@@ -139,6 +144,7 @@ describe("classifyInProgress — precedence table (§7.11)", () => {
       canAbort: false,
       isSequence: false,
       unmergedCount: 2,
+      canSkip: false,
     });
   });
 
@@ -201,6 +207,7 @@ describe("canRunOp — the gate (§7.11)", () => {
     canAbort: true,
     isSequence: false,
     unmergedCount: 1,
+    canSkip: false,
   };
 
   test("in progress: checkout is gated", () => {
@@ -225,6 +232,40 @@ describe("canRunOp — the gate (§7.11)", () => {
     expect(canRunOp(inProgress, "opContinue")).toBe(true);
     expect(canRunOp(inProgress, "opAbort")).toBe(true);
   });
+
+  // P10 probe 3: git does not refuse `reset --mixed`/`--hard` mid-merge on its own — it silently
+  // abandons the sequencer state — so `reset` must be gated here even though no earlier phase's
+  // op needed host-side enforcement to match git's own refusal.
+  test("in progress: reset and cherryPick are gated (probe 3)", () => {
+    expect(canRunOp(inProgress, "reset")).toBe(false);
+    expect(canRunOp(inProgress, "cherryPick")).toBe(false);
+  });
+
+  // `opSkip` is only ever offered *from within* the gated state itself (`canSkip`), never a way
+  // to bypass it — so it is deliberately NOT in GATED_OP_KINDS.
+  test("in progress: opSkip is not gated", () => {
+    expect(canRunOp(inProgress, "opSkip")).toBe(true);
+  });
+});
+
+describe("classifyInProgress — canSkip (P10 probe 6)", () => {
+  test("cherryPick and revert can skip; every other kind cannot", () => {
+    expect(classifyInProgress({ stateFiles: stateFiles({ cherryPickHead: "c0ffee" }), unmergedPaths: [] })?.canSkip).toBe(true);
+    expect(classifyInProgress({ stateFiles: stateFiles({ revertHead: "f00d" }), unmergedPaths: [] })?.canSkip).toBe(true);
+    expect(classifyInProgress({ stateFiles: stateFiles({ mergeHead: "m" }), unmergedPaths: [] })?.canSkip).toBe(false);
+    expect(
+      classifyInProgress({
+        stateFiles: stateFiles({ rebaseMergeDir: true }),
+        unmergedPaths: [],
+      })?.canSkip,
+    ).toBe(false);
+    expect(classifyInProgress({ stateFiles: stateFiles({ bisectLog: true }), unmergedPaths: [] })?.canSkip).toBe(
+      false,
+    );
+    expect(
+      classifyInProgress({ stateFiles: stateFiles({}), unmergedPaths: ["x"] })?.canSkip,
+    ).toBe(false);
+  });
 });
 
 describe("describeInProgress", () => {
@@ -239,6 +280,7 @@ describe("describeInProgress", () => {
       canAbort: true,
       isSequence: false,
       unmergedCount: 0,
+      canSkip: false,
       ...partial,
     };
   }

@@ -67,6 +67,7 @@ export type {
   OpErrorKind,
   OpRequest,
   OpResult,
+  ResetMode,
   UndoSlotSnapshot,
 } from "./model/operation.ts";
 export { canRunOp, classifyInProgress, describeInProgress } from "./model/operation.ts";
@@ -125,21 +126,26 @@ export type { Storage, StorageScope } from "./ports/storage.ts";
 export type { Theme, ThemeKind } from "./ports/theme.ts";
 export type { RepoCandidate, WorkspaceRoots } from "./ports/workspaceRoots.ts";
 export { classifyCheckout } from "./preflight/checkout.ts";
+export { classifyCherryPick } from "./preflight/cherryPick.ts";
 export type { PullConfigValues } from "./preflight/pull.ts";
 export { buildPullPreflight, resolvePullStrategy } from "./preflight/pull.ts";
 export { classifyPush } from "./preflight/push.ts";
+export { classifyReset } from "./preflight/reset.ts";
 export { classifyRevert } from "./preflight/revert.ts";
 export { classifyStashBranch, classifyStashPop } from "./preflight/stashPop.ts";
 export { classifyTagCreate, validateRefName } from "./preflight/tag.ts";
 export type {
   CheckoutBlocker,
   CheckoutPreflight,
+  CherryPickBlocker,
+  CherryPickPreflight,
   DirtyPath,
   MergeOutcomePrediction,
   PullBlocker,
   PullPreflight,
   PullRoute,
   PushPreflight,
+  ResetPreflight,
   RevertParentChoice,
   RevertPrediction,
   RevertPreflight,

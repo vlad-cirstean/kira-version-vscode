@@ -134,6 +134,7 @@ describe("summarizeStatus", () => {
       canAbort: true,
       isSequence: false,
       unmergedCount: 1,
+      canSkip: true,
     };
     const summary = summarizeStatus(result([unmerged("a.txt")]), op);
     expect(summary.inProgress).toBe(op);
