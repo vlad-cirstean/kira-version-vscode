@@ -40,6 +40,8 @@ import type {
   PullStrategySource as CorePullStrategySource,
   RefUpdate as CoreRefUpdate,
   RemoteOpKind as CoreRemoteOpKind,
+  RemoteOpRequest as CoreRemoteOpRequest,
+  RemoteOpResult as CoreRemoteOpResult,
 } from "../../../packages/core/src/model/remote.ts";
 import type { HeadState as CoreHeadState } from "../../../packages/core/src/model/repo.ts";
 import type {
@@ -91,6 +93,8 @@ import type {
   RefRow as WireRefRow,
   RefUpdate as WireRefUpdate,
   RemoteOpKind as WireRemoteOpKind,
+  RemoteOpParams as WireRemoteOpParams,
+  RemoteOpResult as WireRemoteOpResult,
   RevertPreflight as WireRevertPreflight,
   SettingsSnapshot as WireSettingsSnapshot,
   SignatureStatus as WireSignatureStatus,
@@ -437,6 +441,44 @@ describe("ipc wire conformance", () => {
     };
     const wire: WirePushPreflight = preflight;
     expect(wire).toEqual(preflight);
+  });
+
+  test("RemoteOpRequest: assignable both ways against RemoteOpParams minus the wire-only repoId", () => {
+    // Same "minus one wire-only field" shape as RefRow vs RefRecord above: `RemoteOpParams`
+    // bundles `repoId` alongside the request fields flatly (no nested `op:`, unlike `op.run` —
+    // `docs/plans/P8.md`'s D51), and `RemoteOpRequest` is exactly that params shape minus it.
+    assertBothWays<Omit<WireRemoteOpParams, "repoId">, CoreRemoteOpRequest>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const request: CoreRemoteOpRequest = {
+      kind: "fetch",
+      remote: "origin",
+      branch: undefined,
+      setUpstream: false,
+      prune: true,
+      pruneTags: false,
+      strategy: undefined,
+      confirmToken: undefined,
+    };
+    const wire: Omit<WireRemoteOpParams, "repoId"> = request;
+    expect(wire).toEqual(request);
+  });
+
+  test("RemoteOpResult: core and ipc's wire copy are assignable both ways", () => {
+    assertBothWays<WireRemoteOpResult, CoreRemoteOpResult>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const result: CoreRemoteOpResult = {
+      ok: true,
+      error: undefined,
+      updates: [{ ref: "origin/main", from: "abc1234", to: "def5678", forced: false }],
+      head: { kind: "branch", name: "main" },
+      inProgress: null,
+    };
+    const wire: WireRemoteOpResult = result;
+    expect(wire).toEqual(result);
   });
 
   test("OpRequest: core and ipc's wire copy are assignable both ways", () => {

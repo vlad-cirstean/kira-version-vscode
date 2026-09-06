@@ -76,6 +76,8 @@ export type {
   PullStrategySource,
   RefUpdate,
   RemoteOpKind,
+  RemoteOpRequest,
+  RemoteOpResult,
 } from "./model/remote.ts";
 export type { HeadState, RepoIdentity } from "./model/repo.ts";
 export type {
