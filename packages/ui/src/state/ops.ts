@@ -478,10 +478,19 @@ export class OpsState {
     return { predicted: predicted.kind, actual, stashKept };
   }
 
+  /** OQ8: §7.12 gives the undo slot no stash-specific exception — the very next operation clears
+   *  it exactly like any other undoable op — so the one honest thing to promise here is the bound
+   *  itself, not a guarantee. No pre-flight endpoint exists for `stashDrop` (`git stash drop`
+   *  cannot fail in a way worth predicting), so — like `tagDelete`/`branchDelete` — this runs
+   *  directly with no confirm dialog; the announcement below stands in as the "confirmation" OQ8
+   *  asks for. */
   async runStashDrop(entry: StashEntry): Promise<OpResult> {
     return this.#runSimple(
       { kind: "stashDrop", sha: entry.sha, index: entry.index },
-      (ok) => (ok ? `Dropped stash@{${entry.index}}: ${entry.message}` : undefined),
+      (ok) =>
+        ok
+          ? `Dropped stash@{${entry.index}}: ${entry.message} — undo available until your next operation.`
+          : undefined,
       "Drop stash",
     );
   }

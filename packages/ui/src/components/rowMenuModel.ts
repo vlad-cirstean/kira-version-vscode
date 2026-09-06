@@ -175,7 +175,7 @@ export function buildStashMenu(inProgress: InProgressOperation | null): MenuSect
       items: [
         gatedItem("stashApply", "Apply", "stashApply", inProgress),
         gatedItem("stashPop", "Pop", "stashPop", inProgress),
-        gatedItem("stashDrop", "Drop…", "stashDrop", inProgress),
+        gatedItem("stashDrop", "Drop", "stashDrop", inProgress),
         gatedItem("stashBranch", "Create branch from stash…", "stashBranch", inProgress),
         plainItem("stashShow", "Show changes"),
       ],
