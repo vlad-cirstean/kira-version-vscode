@@ -28,7 +28,7 @@
     "test": "bun run test:unit && bun run test:integration",
     "test:e2e": "playwright test",
     "test:e2e:vscode": "bun run scripts/e2e-display.ts test --project=vscode",
-    "test:perf": "bun run tests/perf/run.ts && bun run tests/perf/parserThroughput.ts && bun run tests/perf/historyPipeline.ts && bun run tests/perf/streamRoundTrip.ts && bun run tests/perf/graphUi.ts",
+    "test:perf": "bun run tests/perf/run.ts && bun run tests/perf/parserThroughput.ts && bun run tests/perf/historyPipeline.ts && bun run tests/perf/streamRoundTrip.ts && bun run tests/perf/graphUi.ts && bun run tests/perf/reviewPrelude.ts",
     "dev:harness": "bun run --filter '@kira-version/harness' dev"
   },
   "devDependencies": {

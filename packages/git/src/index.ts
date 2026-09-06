@@ -48,7 +48,7 @@ export {
   parseNameStatusRecords,
   parseNumstatRecords,
 } from "./parse/diffTree.ts";
-export type { LogArgsOptions } from "./parse/log.ts";
+export type { LogArgsOptions, WalkSpec } from "./parse/log.ts";
 export {
   LOG_FORMAT,
   logArgs,
@@ -57,6 +57,7 @@ export {
   parseLogRecord,
   revSetArgs,
   showMetadataArgs,
+  walkArgs,
 } from "./parse/log.ts";
 export { mergeTreeArgs, parseMergeTreeOutput } from "./parse/mergeTree.ts";
 export {
@@ -96,7 +97,10 @@ export type { CommitDetailOptions, LogQueryOptions, RefsSnapshot } from "./queri
 export {
   commitDetail,
   countCommits,
+  countRange,
+  detectDefaultBranch,
   log,
+  mergeBase,
   predictMerge,
   refs,
   refsSnapshot,

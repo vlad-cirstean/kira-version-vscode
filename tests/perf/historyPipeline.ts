@@ -163,7 +163,7 @@ async function measureFirstPageNoGraph(dir: string): Promise<number> {
   if (resolution.kind !== "ok") throw new Error("no usable system git found for this measurement");
   const store = new CommitStore();
   const session = openLogSession(resolution.git, runner, dir, {
-    scope: "all",
+    walk: { kind: "scope", scope: "all" },
     pageSize: PAGE_SIZE,
   });
   const start = performance.now();
@@ -183,7 +183,7 @@ async function measure(): Promise<Measurement> {
 
   const store = new CommitStore();
   const session = openLogSession(resolution.git, runner, dir, {
-    scope: "all",
+    walk: { kind: "scope", scope: "all" },
     pageSize: PAGE_SIZE,
   });
   let frontier: LayoutFrontier | undefined;

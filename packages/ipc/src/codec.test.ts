@@ -62,6 +62,7 @@ describe("ipc codec", () => {
         "kiraVersion.graph.pageSize": 5000,
         "kiraVersion.graph.scope": "all",
         "kiraVersion.log.level": "info",
+        "kiraVersion.review.baseCandidates": ["main", "master"],
       },
       git: { kind: "ok", path: "/usr/bin/git", version: "2.43.0" },
       capabilities: { openInEditor: true, goToFile: true, clipboard: true, resolveConflict: true },

@@ -12,6 +12,8 @@ describe("badgeSpecFor", () => {
       text: "main",
       isCurrentBranch: false,
       dashed: false,
+      refKind: "branch",
+      refName: "main",
     });
   });
 
@@ -29,6 +31,8 @@ describe("badgeSpecFor", () => {
     expect(spec.colorClass).not.toBe("kv-badge-local");
     expect(spec.text).toBe("origin/main");
     expect(spec.isCurrentBranch).toBe(false);
+    expect(spec.refKind).toBe("remoteBranch");
+    expect(spec.refName).toBe("origin/main");
   });
 
   test("a tag is a square on the tag token — different shape and colour from a branch (§7.9)", () => {
@@ -53,6 +57,13 @@ describe("badgeSpecFor", () => {
     expect(spec.colorClass).toBe("kv-badge-local");
     expect(spec.text).toBe("HEAD");
     expect(spec.isCurrentBranch).toBe(true);
+  });
+
+  test("docs/plans/P7.md W14: only branch/remoteBranch carry refKind/refName — tag/stash/HEAD carry neither", () => {
+    expect(badgeSpecFor({ kind: "tag", name: "v1.0.0" }).refKind).toBeUndefined();
+    expect(badgeSpecFor({ kind: "tag", name: "v1.0.0" }).refName).toBeUndefined();
+    expect(badgeSpecFor({ kind: "stash" }).refKind).toBeUndefined();
+    expect(badgeSpecFor({ kind: "head" }).refKind).toBeUndefined();
   });
 });
 

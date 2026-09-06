@@ -25,9 +25,12 @@ import { VsCodeEditorIntegration } from "./ports/editorIntegration.ts";
 import { VsCodeLogger } from "./ports/logger.ts";
 import { VsCodeTheme } from "./ports/theme.ts";
 import { VsCodeWorkspaceRoots } from "./ports/workspaceRoots.ts";
+import { KiraReviewViewProvider } from "./reviewView.ts";
 
 const VIEW_ID = "kiraVersion.graph";
+const REVIEW_VIEW_ID = "kiraVersion.review";
 const FOCUS_COMMAND = "kiraVersion.focusGraph";
+const REVIEW_BRANCH_COMMAND = "kiraVersion.reviewBranch";
 const SETTING_KEYS = Object.keys(SETTINGS) as readonly SettingKey[];
 
 function readRawSettings(config: vscode.WorkspaceConfiguration): Record<string, unknown> {
@@ -48,6 +51,7 @@ function toSettingsSnapshot(settings: Settings): SettingsSnapshot {
     "kiraVersion.graph.pageSize": settings["kiraVersion.graph.pageSize"],
     "kiraVersion.graph.scope": settings["kiraVersion.graph.scope"],
     "kiraVersion.log.level": settings["kiraVersion.log.level"],
+    "kiraVersion.review.baseCandidates": settings["kiraVersion.review.baseCandidates"],
   };
 }
 
@@ -101,11 +105,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     clipboard,
   });
 
+  // One shared `RepoService`, one shared `VirtualDocumentSource` registration (above) — the
+  // review view is `panelView.ts`'s sibling, not a second extension (§6.8/W8).
+  const reviewProvider = new KiraReviewViewProvider({
+    extensionUri: context.extensionUri,
+    service: repoService,
+    roots,
+    dialogs,
+    settings: () => currentSettings,
+    logger,
+    editor,
+    clipboard,
+  });
+
   context.subscriptions.push(
     vscode.commands.registerCommand(FOCUS_COMMAND, () =>
       vscode.commands.executeCommand(`${VIEW_ID}.focus`),
     ),
+    vscode.commands.registerCommand(REVIEW_BRANCH_COMMAND, () =>
+      reviewProvider.reviewBranch(undefined, undefined),
+    ),
     vscode.window.registerWebviewViewProvider(VIEW_ID, provider),
+    vscode.window.registerWebviewViewProvider(REVIEW_VIEW_ID, reviewProvider),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (!event.affectsConfiguration("kiraVersion") && !event.affectsConfiguration("git.path"))
         return;
@@ -117,6 +138,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         logger.log("warn", "invalid setting, using default", problem);
       }
       provider.notifySettingsChanged(toSettingsSnapshot(currentSettings));
+      reviewProvider.notifySettingsChanged(toSettingsSnapshot(currentSettings));
     }),
   );
 }

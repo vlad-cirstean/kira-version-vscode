@@ -46,7 +46,10 @@ async function resolvedGit() {
  *  concatenated layout chunks — the sketch from docs/plans/P2.md's W14 section, made concrete. */
 async function runPipeline(dir: string, pageSize: number) {
   const git = await resolvedGit();
-  const session = openLogSession(git, runner, dir, { scope: "all", pageSize });
+  const session = openLogSession(git, runner, dir, {
+    walk: { kind: "scope", scope: "all" },
+    pageSize,
+  });
   const store = new CommitStore();
   const chunks: LayoutChunk[] = [];
   let frontier: LayoutFrontier | undefined;
@@ -203,7 +206,10 @@ describe("history pipeline — remaining() reaches exactly zero", () => {
   test("remaining() decreases to zero as the real walk completes", async () => {
     const { dir, commits } = linear(9);
     const git = await resolvedGit();
-    const session = openLogSession(git, runner, dir, { scope: "all", pageSize: 4 });
+    const session = openLogSession(git, runner, dir, {
+      walk: { kind: "scope", scope: "all" },
+      pageSize: 4,
+    });
     try {
       expect(await session.remaining()).toBe(commits.length);
       let outcome = await session.readPage(() => {});

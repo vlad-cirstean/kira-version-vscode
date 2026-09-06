@@ -1,12 +1,13 @@
-import { CommitStore } from "@kira-version/core";
+import type { CommitStore } from "@kira-version/core";
 import type { StreamChunkOf } from "@kira-version/ipc";
 import { TransportError } from "@kira-version/ipc";
 import { markRaw, type ShallowRef, shallowRef } from "vue";
 import type { BridgeClient } from "../bridge/client.ts";
 import { createLayoutClient, type LayoutClient } from "../graph/layoutClient.ts";
 import { LayoutStore } from "../graph/layoutStore.ts";
+import { type ChunkSource, PackedStreamState } from "./packedStream.ts";
 
-export type ChunkSource = StreamChunkOf<"graph.stream">["source"];
+export type { ChunkSource };
 export type LoadingState = "idle" | "streaming" | "loadingMore" | "refreshing";
 
 /** The row range a just-applied chunk gained lane layout for — what `onChunkLayout` hands its
@@ -47,14 +48,15 @@ export interface LayoutRange {
 export class GraphViewState {
   readonly store: CommitStore;
   readonly layout: LayoutStore;
-  readonly loadedRows: ShallowRef<number> = shallowRef(0);
-  readonly remaining: ShallowRef<number> = shallowRef(0);
-  readonly exhausted: ShallowRef<boolean> = shallowRef(false);
-  readonly lastChunkSource: ShallowRef<ChunkSource | undefined> = shallowRef(undefined);
+  readonly loadedRows: ShallowRef<number>;
+  readonly remaining: ShallowRef<number>;
+  readonly exhausted: ShallowRef<boolean>;
+  readonly lastChunkSource: ShallowRef<ChunkSource | undefined>;
   readonly laneCount: ShallowRef<number> = shallowRef(0);
   readonly loading: ShallowRef<LoadingState> = shallowRef("idle");
-  readonly generation: ShallowRef<number> = shallowRef(0);
+  readonly generation: ShallowRef<number>;
 
+  readonly #packed: PackedStreamState;
   readonly #bridge: BridgeClient;
   readonly #layoutClient: LayoutClient;
   readonly #layoutListeners = new Set<(range: LayoutRange) => void>();
@@ -66,7 +68,13 @@ export class GraphViewState {
   constructor(bridge: BridgeClient, layoutClient: LayoutClient = createLayoutClient()) {
     this.#bridge = bridge;
     this.#layoutClient = layoutClient;
-    this.store = markRaw(new CommitStore());
+    this.#packed = new PackedStreamState();
+    this.store = this.#packed.store;
+    this.loadedRows = this.#packed.loadedRows;
+    this.remaining = this.#packed.remaining;
+    this.exhausted = this.#packed.exhausted;
+    this.lastChunkSource = this.#packed.lastChunkSource;
+    this.generation = this.#packed.generation;
     this.layout = markRaw(new LayoutStore());
   }
 
@@ -213,44 +221,30 @@ export class GraphViewState {
   /** Clears every loaded row. Call before opening a stream for a newly *selected* repo — never
    *  needed for a fresh mount or remount, whose store already starts empty. */
   reset(): void {
-    this.#reset();
+    this.#resetLayout();
+    this.#packed.reset();
   }
 
-  #reset(): void {
-    this.store.clear();
+  #resetLayout(): void {
     this.layout.clear();
     this.#layoutClient.reset();
-    this.loadedRows.value = 0;
-    this.remaining.value = 0;
-    this.exhausted.value = false;
-    this.lastChunkSource.value = undefined;
     this.laneCount.value = 0;
-    this.generation.value++;
   }
 
   async #applyChunk(chunk: StreamChunkOf<"graph.stream">): Promise<void> {
-    if (chunk.from === 0 && this.store.rowCount > 0) this.#reset();
+    const range = await this.#packed.applyChunk(chunk, {
+      onReset: () => this.#resetLayout(),
+      onCorrupted: async () => {
+        // The re-open supersedes this call's own still-in-flight stream (W2's
+        // supersede-on-reopen rule), so nothing else from the corrupted sequence is applied
+        // after this point.
+        const repoId = this.#repoId;
+        if (repoId) await this.openStream(repoId, 0);
+      },
+    });
+    if (!range) return; // corrupted — already re-opening from row 0, nothing to lay out
 
-    try {
-      this.store.appendPacked(chunk.commits);
-    } catch (error) {
-      // A genuinely corrupted stream (§5.5's store asserts are the right place to catch this
-      // and the wrong place to recover from it): log it and re-open from row 0 instead of
-      // leaving an unhandled rejection and a half-populated list on screen. The re-open
-      // supersedes this call's own still-in-flight stream (W2's supersede-on-reopen rule), so
-      // nothing else from the corrupted sequence is applied after this point.
-      console.error("GraphViewState: appendPacked failed, re-opening from row 0", error);
-      const repoId = this.#repoId;
-      if (repoId) await this.openStream(repoId, 0);
-      return;
-    }
-
-    this.loadedRows.value = this.store.rowCount;
-    this.remaining.value = chunk.remaining;
-    this.exhausted.value = chunk.exhausted;
-    this.lastChunkSource.value = chunk.source;
-
-    const { from, to } = chunk.commits;
+    const { from, to } = range;
     // W15's `layoutSubmitMs` — the worker round trip for the *first* page only, so a first-page
     // `firstPageMs`/`worstFrameMs` miss is attributable to this hop or not in one line rather
     // than re-derived. Marked here, not measured externally, because this `await` is the only

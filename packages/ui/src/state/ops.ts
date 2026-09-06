@@ -112,6 +112,19 @@ export class OpsState {
     this.undoSlot.value = slot;
   }
 
+  /** `docs/plans/P7.md` W14: "Review branch changes", from either menu `buildRefMenu` puts it on
+   *  (`BranchPicker.vue`'s own row menu, and `App.vue`'s ref-badge menu). This is a read, not an
+   *  operation — no pre-flight, no hazard, no `canRunOp` gate, no `op.run` envelope, so it does
+   *  not go through `#runSimple` below; it is the one method on this class that is really just a
+   *  named `bridge.request` (§6.8's `review.open` reveals the sidebar view and either seeds a
+   *  cold resolve or pushes `review.target` to an already-open one, host-side — this class does
+   *  not wait on, or need to know, which). */
+  async openReview(branch: string): Promise<void> {
+    const repoId = this.#repoId;
+    if (repoId === undefined) return;
+    await this.#bridge.request("review.open", { repoId, branch });
+  }
+
   // -------------------------------------------------------------------------------------
   // checkout
   // -------------------------------------------------------------------------------------

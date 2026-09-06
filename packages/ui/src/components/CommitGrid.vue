@@ -66,6 +66,15 @@ const emit = defineEmits<{
    *  commit store's decorations at hand), so this only ever reports which row and where to open
    *  it, exactly as `copySha` reports which sha rather than copying it itself. */
   (e: "contextMenu", detail: { row: number; x: number; y: number }): void;
+  /** `docs/plans/P7.md` W14: a right-click landed on a ref badge (`refBadges.ts`'s
+   *  `data-ref-kind`/`data-ref-name`), not merely the row underneath it — `App.vue` opens the
+   *  branch-scoped menu instead of the commit menu. The row is still selected either way
+   *  (`handleContextMenu`'s own doc comment says why); this fires *instead of* `contextMenu`,
+   *  never alongside it. */
+  (
+    e: "refContextMenu",
+    detail: { kind: "branch" | "remoteBranch"; name: string; x: number; y: number },
+  ): void;
 }>();
 
 const MIN_COLUMN_WIDTH = 40;
@@ -235,12 +244,28 @@ function handleClick(row: number, cell: number): void {
 
 /** §6.4: "right-click selects the row [first]", then (P6 W14) opens `RowContextMenu.vue` at the
  *  click point — the browser's own native menu is suppressed now that there is a real one to
- *  show instead of P4's "nothing else". */
+ *  show instead of P4's "nothing else". `docs/plans/P7.md` W14 adds one hit-test ahead of that:
+ *  a click landing on a ref badge (`refBadges.ts`'s `data-ref-kind`) opens the branch-scoped menu
+ *  instead — the row is still selected either way (this is about which menu opens, not whether
+ *  the click also selects), and a click one pixel to the side of a badge (no `data-ref-kind`
+ *  ancestor) falls straight through to the commit menu, unchanged. */
 function handleContextMenu(event: MouseEvent): void {
   event.preventDefault();
   const cell = grid?.getCellFromEvent(event);
   if (!cell) return;
   props.selection.select(cell.row);
+
+  const badgeEl =
+    event.target instanceof Element ? event.target.closest<HTMLElement>("[data-ref-kind]") : null;
+  const refKind = badgeEl?.dataset.refKind;
+  const refName = badgeEl?.dataset.refName;
+  if (refKind === "branch" || refKind === "remoteBranch") {
+    if (refName !== undefined) {
+      emit("refContextMenu", { kind: refKind, name: refName, x: event.clientX, y: event.clientY });
+      return;
+    }
+  }
+
   emit("contextMenu", { row: cell.row, x: event.clientX, y: event.clientY });
 }
 

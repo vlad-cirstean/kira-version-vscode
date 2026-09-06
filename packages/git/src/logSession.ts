@@ -20,15 +20,29 @@ import type { ResolvedGit } from "./discovery.ts";
 import type { Disposable } from "./driver.ts";
 import { buildGitArgv, buildGitEnv } from "./driver.ts";
 import { classifyGitError, GitCancelled } from "./errors.ts";
-import { logSessionArgs, logSessionSkipArgs, parseLogRecord, revSetArgs } from "./parse/log.ts";
+import {
+  logSessionArgs,
+  logSessionSkipArgs,
+  parseLogRecord,
+  revSetArgs,
+  type WalkSpec,
+} from "./parse/log.ts";
 import { parseRefRecord, REFS_RECORD_DELIMITER, refsArgs } from "./parse/refs.ts";
 
 export interface LogSessionOptions {
-  readonly scope: "all" | "head";
+  /** `docs/plans/P7.md` W3: what this session walks — the graph panel's rev-set `scope`
+   *  (unchanged) or Branch review's `<base>..<branch>` range. */
+  readonly walk: WalkSpec;
   /** `kiraVersion.graph.pageSize` (§5.1.1); P3's settings schema feeds it. */
   readonly pageSize?: number;
   /** Kills the paused process after this long idle; the next page falls back to `--skip`. */
   readonly idleReclaimMs?: number;
+  /** P7 W3: `resolveReviewBase` (W4) has already run `rev-list --count <base>..<branch>` to
+   *  decide `ready`/`empty` before this session is even opened — passing that count here primes
+   *  `remaining()`'s cache so a ranged session never runs the same count twice for the same
+   *  range. Ignored (the session runs its own count) when omitted, which every scoped session
+   *  does. */
+  readonly precomputedTotal?: number;
 }
 
 export type PageOutcome =
@@ -100,6 +114,54 @@ async function captureRefSnapshot(
   return snapshot;
 }
 
+/** `docs/plans/P7.md` W3: the narrowed staleness guard for a *range* walk. Only two refs can
+ *  possibly move the answer to `<base>..<branch>` — `base` and `branch` themselves — so this
+ *  snapshots exactly those two object ids via `rev-parse` rather than every ref in the
+ *  repository. A tag created in another window, or any ref outside this pair, must never
+ *  invalidate a review session it cannot possibly affect. Keyed by the ref expression itself
+ *  (not a refname), which is all `snapshotsEqual` needs. */
+async function captureRangeEndpointSnapshot(
+  git: ResolvedGit,
+  runner: ProcessRunner,
+  repoRoot: string,
+  base: string,
+  branch: string,
+): Promise<ReadonlyMap<string, string>> {
+  const argv = ["rev-parse", base, branch];
+  const proc = runner.spawn(git.path, {
+    argv: buildGitArgv(argv, true),
+    cwd: repoRoot,
+    env: buildGitEnv(),
+  });
+  const bytes = await collectBytes(proc.stdout);
+  const exit = await proc.exit;
+  if (exit.code !== 0) {
+    const stderr = await proc.stderr;
+    throw classifyGitError(argv, exit.code, new TextDecoder().decode(stderr));
+  }
+  const lines = new TextDecoder()
+    .decode(bytes)
+    .split("\n")
+    .filter((line) => line.length > 0);
+  const snapshot = new Map<string, string>();
+  snapshot.set(base, lines[0] ?? "");
+  snapshot.set(branch, lines[1] ?? "");
+  return snapshot;
+}
+
+/** Dispatches to the full snapshot for a scoped walk or the two-endpoint snapshot for a range —
+ *  the one place `LogSessionImpl` asks "have this walk's own refs moved?" */
+async function captureWalkSnapshot(
+  git: ResolvedGit,
+  runner: ProcessRunner,
+  repoRoot: string,
+  walk: WalkSpec,
+): Promise<ReadonlyMap<string, string>> {
+  return walk.kind === "range"
+    ? captureRangeEndpointSnapshot(git, runner, repoRoot, walk.base, walk.branch)
+    : captureRefSnapshot(git, runner, repoRoot);
+}
+
 function snapshotsEqual(a: ReadonlyMap<string, string>, b: ReadonlyMap<string, string>): boolean {
   if (a.size !== b.size) return false;
   for (const [refname, objectId] of a) {
@@ -112,7 +174,7 @@ class LogSessionImpl implements LogSession {
   readonly #git: ResolvedGit;
   readonly #runner: ProcessRunner;
   readonly #repoRoot: string;
-  readonly #scope: "all" | "head";
+  readonly #walk: WalkSpec;
   readonly #pageSize: number;
   readonly #idleReclaimMs: number | undefined;
 
@@ -135,9 +197,12 @@ class LogSessionImpl implements LogSession {
     this.#git = git;
     this.#runner = runner;
     this.#repoRoot = repoRoot;
-    this.#scope = opts.scope;
+    this.#walk = opts.walk;
     this.#pageSize = opts.pageSize ?? DEFAULT_PAGE_SIZE;
     this.#idleReclaimMs = opts.idleReclaimMs;
+    if (opts.precomputedTotal !== undefined) {
+      this.#remainingCache = { total: opts.precomputedTotal };
+    }
   }
 
   get loadedCount(): number {
@@ -157,20 +222,30 @@ class LogSessionImpl implements LogSession {
     if (this.#exhausted) return { kind: "page", appended: 0, exhausted: true };
 
     if (!this.#startRefSnapshot) {
-      this.#startRefSnapshot = await captureRefSnapshot(this.#git, this.#runner, this.#repoRoot);
+      this.#startRefSnapshot = await captureWalkSnapshot(
+        this.#git,
+        this.#runner,
+        this.#repoRoot,
+        this.#walk,
+      );
     }
 
     if (!this.#proc) {
       if (this.#loadedCount > 0) {
         // A fresh spawn resuming a previously paused-then-reclaimed session: refs must not
         // have moved, or `--skip`'s offset would silently point at the wrong record.
-        const current = await captureRefSnapshot(this.#git, this.#runner, this.#repoRoot);
+        const current = await captureWalkSnapshot(
+          this.#git,
+          this.#runner,
+          this.#repoRoot,
+          this.#walk,
+        );
         if (!snapshotsEqual(current, this.#startRefSnapshot)) {
           return { kind: "stale", reason: "refsChanged" };
         }
-        this.#spawn(logSessionSkipArgs(this.#scope, this.#loadedCount));
+        this.#spawn(logSessionSkipArgs(this.#walk, this.#loadedCount));
       } else {
-        this.#spawn(logSessionArgs(this.#scope));
+        this.#spawn(logSessionArgs(this.#walk));
       }
     }
 
@@ -241,7 +316,10 @@ class LogSessionImpl implements LogSession {
   }
 
   async #countTotal(): Promise<number> {
-    const argv = ["rev-list", "--count", ...(this.#scope === "all" ? revSetArgs("all") : ["HEAD"])];
+    const argv =
+      this.#walk.kind === "range"
+        ? ["rev-list", "--count", `${this.#walk.base}..${this.#walk.branch}`]
+        : ["rev-list", "--count", ...(this.#walk.scope === "all" ? revSetArgs("all") : ["HEAD"])];
     const proc = this.#runner.spawn(this.#git.path, {
       argv: buildGitArgv(argv, true),
       cwd: this.#repoRoot,

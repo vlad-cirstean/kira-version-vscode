@@ -30,6 +30,13 @@
           "title": "Git Graph",
           "icon": "resources/icon.svg"
         }
+      ],
+      "activitybar": [
+        {
+          "id": "kiraVersionReview",
+          "title": "Branch Review",
+          "icon": "resources/review-icon.svg"
+        }
       ]
     },
     "views": {
@@ -39,12 +46,24 @@
           "name": "Graph",
           "type": "webview"
         }
+      ],
+      "kiraVersionReview": [
+        {
+          "id": "kiraVersion.review",
+          "name": "Branch Review",
+          "type": "webview"
+        }
       ]
     },
     "commands": [
       {
         "command": "kiraVersion.focusGraph",
         "title": "Focus Graph",
+        "category": "Kira Version"
+      },
+      {
+        "command": "kiraVersion.reviewBranch",
+        "title": "Review Branch Changes",
         "category": "Kira Version"
       }
     ],
@@ -82,6 +101,17 @@
             "info",
             "debug"
           ]
+        },
+        "kiraVersion.review.baseCandidates": {
+          "type": "array",
+          "default": [
+            "main",
+            "master"
+          ],
+          "description": "Branch review (§6.8): candidate base branches to compare against, in order, tried after the branch's own upstream and the repository's detected default branch (origin/HEAD) both fail to resolve.",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },

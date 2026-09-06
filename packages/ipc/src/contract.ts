@@ -38,6 +38,8 @@ export interface SettingsSnapshot {
   readonly "kiraVersion.graph.pageSize": number;
   readonly "kiraVersion.graph.scope": "all" | "head";
   readonly "kiraVersion.log.level": "off" | "error" | "warn" | "info" | "debug";
+  /** P7 W7/D43: Branch review's own candidate base branches (§6.8). */
+  readonly "kiraVersion.review.baseCandidates": readonly string[];
 }
 
 export interface RepoSummary {
@@ -411,6 +413,62 @@ export type RepoOpenResult =
   | { readonly kind: "gitUnavailable"; readonly git: GitStatus };
 
 // ---------------------------------------------------------------------------------------
+// P7 — Branch review (§6.8). Structural copies of `core`'s `model/review.ts`, kept honest by
+// `tests/unit/ipc/wireConformance.test.ts` rather than an import (B3).
+// ---------------------------------------------------------------------------------------
+
+/** A `<base>..<branch>` two-dot range (§6.8/D30). Both are short ref names as the UI shows them
+ *  (`main`, `origin/develop`, `feature-x`) — never full refnames, never object ids: the range is
+ *  a question about two *refs*, and a sha in `base` would make "how it was resolved" unanswerable. */
+export interface CommitRange {
+  readonly base: string;
+  readonly branch: string;
+}
+
+export type BaseResolutionReason =
+  /** §6.8 step 1: the branch's upstream, and it names a *different* branch. */
+  | "upstream"
+  /** §6.8 step 2: `origin/HEAD`, or the first existing `review.baseCandidates` member. */
+  | "defaultBranch"
+  /** The user picked it from the header picker — resolution was skipped entirely. */
+  | "override"
+  /** §6.8 step 3: nothing detected. `base` is null and no walk is opened. */
+  | "none";
+
+/** What a `<base>..<branch>` comparison *is*, decided before the first row is painted — see
+ *  `docs/plans/P7.md`'s "Base resolution has four outcomes" for why this cannot be inferred from
+ *  an empty walk. */
+export type ReviewRangeState =
+  | { readonly kind: "ready"; readonly commitCount: number }
+  /** `rev-list --count` is 0: fully merged, or the branch IS the base. §6.8's "nothing to
+   *  review — `<branch>` adds no commits to `<base>`", which the UI renders naming both refs. */
+  | { readonly kind: "empty" }
+  /** `merge-base` found nothing: `<base>..<branch>` would list the branch's entire history as
+   *  though it were all new (§6.8). */
+  | { readonly kind: "unrelated" }
+  /** No base at all. Only ever paired with `reason: "none"`. */
+  | { readonly kind: "ask" };
+
+/** One entry in the header picker's shortlist. The picker's *full* branch list comes from
+ *  `refs.list`, which the review view already loads — this is only the handful worth ranking to
+ *  the top, each with the reason it is offered. */
+export interface BaseCandidate {
+  readonly ref: string;
+  readonly kind: RefKind;
+  /** Never "override" — a candidate is a thing we detected, not a thing the user chose. */
+  readonly reason: Exclude<BaseResolutionReason, "override" | "none">;
+}
+
+export interface BaseResolution {
+  readonly branch: string;
+  /** `null` iff `reason === "none"`. */
+  readonly base: string | null;
+  readonly reason: BaseResolutionReason;
+  readonly range: ReviewRangeState;
+  readonly candidates: readonly BaseCandidate[];
+}
+
+// ---------------------------------------------------------------------------------------
 // The contract.
 // ---------------------------------------------------------------------------------------
 
@@ -452,16 +510,39 @@ export type Contract = {
       result: Record<string, never>;
     };
     "graph.status": {
-      params: { repoId: string };
+      /** `range` present ⇒ the review walk's own counters (P7 W5), not the panel's. */
+      params: { repoId: string; range?: CommitRange };
       result: { loaded: number; remaining: number; exhausted: boolean };
     };
     "graph.loadMore": {
-      params: { repoId: string; pages?: number };
+      /** `range` present ⇒ pages the review walk instead of the panel's own (P7 W5). */
+      params: { repoId: string; pages?: number; range?: CommitRange };
       result: { started: boolean };
     };
     "graph.refresh": {
       params: { repoId: string };
       result: { restarted: boolean };
+    };
+    /**
+     * §6.8/D30. Called once when the review view targets a branch (no `base`), and again with
+     * an explicit `base` each time the header picker overrides it — the `merge-base` and
+     * range-count checks must run for a chosen base exactly as they do for a detected one, so
+     * both paths land here rather than the override taking a shortcut through the candidate
+     * list the first call returned.
+     */
+    "review.resolveBase": {
+      params: { repoId: string; branch: string; base?: string };
+      result: BaseResolution;
+    };
+    /**
+     * §6.8's entry point, from the *panel* webview: reveal the sidebar view on this branch. The
+     * host reveals the view and either seeds a cold resolve (`html.ts`'s bootstrap island) or
+     * pushes `review.target` to an already-open one. Returns nothing — the panel does not wait
+     * on, and is not told about, what the review view then finds.
+     */
+    "review.open": {
+      params: { repoId: string; branch: string };
+      result: Record<string, never>;
     };
     "commit.detail": {
       params: { repoId: string; sha: string; parentIndex?: number };
@@ -577,10 +658,21 @@ export type Contract = {
   events: {
     "repo.changed": { repoId: string; kind: "refsChanged" | "worktreeChanged" };
     "settings.changed": { settings: SettingsSnapshot };
+    /** Host -> the review webview only: "review this branch instead". Never emitted to the
+     *  panel's own server — the two views hold separate `RpcServer`s over separate channels. */
+    "review.target": { repoId: string; branch: string };
   };
   streams: {
     "graph.stream": {
-      params: { repoId: string; resumeThroughRow?: number };
+      params: {
+        repoId: string;
+        /** Ignored when `range` is present — a ranged walk has no cache to resume from (§5.4's
+         *  exclusion, made structural). */
+        resumeThroughRow?: number;
+        /** Present ⇒ walk `<base>..<branch>` instead of the repo's `graph.scope` rev set,
+         *  against this repo's own separate review walk. Chunk shape is byte-for-byte the same. */
+        range?: CommitRange;
+      };
       chunk: {
         readonly repoId: string;
         readonly seq: number;

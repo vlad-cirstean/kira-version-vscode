@@ -14,6 +14,12 @@ const props = defineProps<{
   x: number;
   y: number;
   label: string;
+  /** `docs/plans/P7.md` W14: "the menu is titled with the branch name so it cannot be misread"
+   *  (§6.8) — the ref-badge menu's own accessible name (replacing `label` as the menu's
+   *  `aria-label`) *and* a non-interactive first line inside it, so both a screen-reader user and
+   *  a sighted one see which ref this menu applies to. Absent for every other menu this component
+   *  renders (the commit-row menu has no comparable ambiguity — it is always titled by context). */
+  title?: string;
 }>();
 
 const emit = defineEmits<{
@@ -154,10 +160,11 @@ onBeforeUnmount(() => {
       ref="menuEl"
       class="kv-row-menu"
       role="menu"
-      :aria-label="label"
+      :aria-label="title ?? label"
       :style="style"
       @keydown="onKeydown"
     >
+      <div v-if="title" class="kv-row-menu-heading" aria-hidden="true">{{ title }}</div>
       <template v-for="(section, sectionIndex) in sections" :key="sectionIndex">
         <div v-if="sectionIndex > 0" class="kv-row-menu-separator" role="separator"></div>
         <div
@@ -218,6 +225,17 @@ onBeforeUnmount(() => {
 .kv-row-menu-item--disabled {
   color: var(--kv-description-fg);
   cursor: default;
+}
+
+.kv-row-menu-heading {
+  padding: var(--kv-space-1) var(--kv-space-3);
+  font-weight: 600;
+  color: var(--kv-description-fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-bottom: 1px solid var(--kv-panel-border);
+  margin-bottom: var(--kv-space-1);
 }
 
 .kv-row-menu-separator {

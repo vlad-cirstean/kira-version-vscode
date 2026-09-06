@@ -24,6 +24,7 @@ import type { BlobResult, GitStatus, RefsResult } from "../../../packages/git/sr
 import type { RepoServicePort } from "../../../packages/git/src/rpcHandlers.ts";
 import { createRepoHandlers } from "../../../packages/git/src/rpcHandlers.ts";
 import type {
+  BaseResolution,
   MessageChannelLike,
   RequestKey,
   ServerHandlers,
@@ -155,6 +156,21 @@ class FakeRepoService implements RepoServicePort {
   undoPeekResult: UndoSlotSnapshot | null = null;
   readonly undoRunCalls: Array<{ repoId: string; id: string }> = [];
 
+  // P7 W6
+  resolveReviewBaseResult: BaseResolution = {
+    branch: "",
+    base: null,
+    reason: "none",
+    range: { kind: "ask" },
+    candidates: [],
+  };
+  readonly resolveReviewBaseCalls: Array<{
+    repoId: string;
+    branch: string;
+    base: string | undefined;
+  }> = [];
+  readonly endReviewCalls: string[] = [];
+
   constructor(git: GitStatus) {
     this.git = git;
   }
@@ -278,6 +294,15 @@ class FakeRepoService implements RepoServicePort {
     if (!this.opResult) throw new Error("FakeRepoService.opResult not set");
     return this.opResult;
   }
+
+  async resolveReviewBase(repoId: string, branch: string, base?: string): Promise<BaseResolution> {
+    this.resolveReviewBaseCalls.push({ repoId, branch, base });
+    return this.resolveReviewBaseResult;
+  }
+
+  endReview(repoId: string): void {
+    this.endReviewCalls.push(repoId);
+  }
 }
 
 function settingsFn(overrides: Partial<Settings> = {}): () => Settings {
@@ -336,6 +361,8 @@ describe("createRepoHandlers", () => {
       "editor.openDiff",
       "editor.goToFile",
       "clipboard.write",
+      "review.resolveBase",
+      "review.open",
     ];
     for (const key of expectedRequests) expect(typeof handlers.requests[key]).toBe("function");
     expect(typeof handlers.streams["graph.stream"]).toBe("function");

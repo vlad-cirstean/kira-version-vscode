@@ -94,6 +94,15 @@ declare global {
       /** P6 W19: `conflictBanner.spec.ts`'s own hook — see `mockBridge.ts`'s
        *  `MockHandlers.resolveOneConflictedPath` doc comment. */
       resolveOneConflictedPath(): boolean;
+      /** P7 W15: pushes `review.target` at the mock bridge — see `mockBridge.ts`'s own
+       *  `MockBridge.pushReviewTarget` doc comment. */
+      pushReviewTarget(repoId: string, branch: string): void;
+      /** P7 W15/W16: the most recent `review.open` call the mock bridge recorded — see
+       *  `mockBridge.ts`'s own `RecordedReviewOpen` doc comment. */
+      readonly lastReviewOpen: { readonly repoId: string; readonly branch: string } | undefined;
+      /** P7 W16: `sha`'s own call count to `commit.detail` — see `mockBridge.ts`'s own
+       *  `MockHandlers.getCommitDetailCallCount` doc comment. */
+      getCommitDetailCallCount(sha: string): number;
     };
   }
 }
