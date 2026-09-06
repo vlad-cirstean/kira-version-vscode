@@ -9,3 +9,10 @@ was ever written; phase number 14 was reassigned before that. The FlatBuffers mi
 used to describe is `P15.md`'s original brief: designed and implemented out of sequence, ahead of
 P7, and declined on measured grounds (D33) rather than built — see `P15.md`'s own Findings for
 the measurements and the base64-encoding fix that shipped instead.
+
+That decline did not stand: `P16-flatbuffers.md`, designed and implemented out of sequence after
+P7, carries out an explicit project-owner override of D33 (recorded as D44 in `SPEC.md` §11.1).
+`graph.stream`'s `PackedCommitChunk` now crosses the wire as a FlatBuffer built from a checked-in
+`.fbs` schema — the measurement in `P15.md` still stands and is not disputed by `P16.md`; only
+the decision it fed into was overridden. See `P16-flatbuffers.md`'s own Findings for the
+re-measurement against `P15.md`'s baseline and the rest of the scope.
