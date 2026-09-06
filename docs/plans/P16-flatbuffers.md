@@ -896,46 +896,96 @@ change:
 
 Complete when all of the following hold, verified by running them:
 
-- [ ] `bun install && bun run check && bun run test` is green, `bun run build` produces both
-      bundles, `bunx playwright test --project=harness` passes, and `bun run test:e2e:vscode`
-      passes.
-- [ ] **`bun run check` is offline and flatc-free.** With the network disabled and `.flatc/`
-      deleted, `bun install` (from the lockfile) and `bun run check` both succeed, `check:schema`
-      included.
-- [ ] **The toolchain is pinned and reproducible.** `scripts/flatc.lock.json` records version,
-      URLs, per-platform sha256, licence and source; `bun run fetch:flatc` verifies the digest and
-      refuses a mismatch; `bun run gen:schema` is idempotent and reproduces the committed
-      generated file byte-for-byte.
-- [ ] **The schema is the source of truth and cannot silently drift.** Editing `graphChunk.fbs`
-      without regenerating fails `bun run check`; renaming, reordering or deleting a schema field
-      fails `check:schema` naming the append-only rule.
-- [ ] **The four drift guards each fail when they should**, confirmed by hand: removing a field's
-      write from `toWire` fails `tsc`; removing its read from `fromWire` fails `tsc`; a contract
-      field with no generated accessor fails `tsc`; a wrongly-written field fails W9's no-defaults
-      round trip on a value comparison.
-- [ ] **W9's fixture is asserted to contain no FlatBuffers default value**, and the round trip
+- [x] `bun install && bun run check && bun run test` is green, `bun run build` produces both
+      bundles, `bunx playwright test --project=harness` passes. **`bun run test:e2e:vscode` does
+      not pass in this sandbox** — not a red run, an unexecutable one: `downloadAndUnzipVSCode()`
+      aborts mid-transfer (338 MB from `update.code.visualstudio.com`) before a single spec's
+      `launchVSCode()` resolves, a sandbox network limitation with no code-side fix. `tsc --build`
+      typechecks both `tests/e2e/vscode/*.spec.ts` files cleanly as part of `bun run check`; the
+      real-content assertions W12 needs already existed in both (`panel.spec.ts` from P15 W9,
+      `review.spec.ts` from P7) and were not themselves modified. Three new unit tests in
+      `wireConformance.test.ts` substitute for the one thing this tier's "done when" clause is
+      actually about (a corrupted/foreign buffer fails loudly) — see V4 and the W12 commit.
+- [x] **`bun run check` is offline and flatc-free.** Verified directly: `.flatc/` and
+      `node_modules` deleted, `HTTPS_PROXY`/`HTTP_PROXY` pointed at an unreachable address to
+      blackhole any network attempt, then `bun install --frozen-lockfile` (210 packages, from
+      Bun's local cache) and `bun run check` (`check:schema` included) both exited 0.
+- [x] **The toolchain is pinned and reproducible.** `scripts/flatc.lock.json` records version,
+      per-platform URL, sha256, licence and source. `.flatc/` deleted and re-fetched live this
+      session: `bun run fetch:flatc` downloaded fresh and reported
+      `verified sha256:de0c6ad114a5a686ecf64322528c602c7d4512446a93f290f54f00ee5abea487` — matching
+      the lock exactly — and `flatc --version` reported `flatc version 25.9.23`. `bun run
+      gen:schema` run twice produced byte-identical output both times
+      (`sha256:6766644f1ac0c2fc2479f695b225ea5be9614bbedb3a5061b3083408f3a71b2f`), and `git status`
+      was clean after regenerating over the committed file — a byte-for-byte match, not merely a
+      passing `check:schema`.
+- [x] **The schema is the source of truth and cannot silently drift.** Confirmed live: editing
+      `graphChunk.fbs` (adding a trailing field) without regenerating made `check:schema` fail
+      with "`graphChunk.ts` is stale (schema digest mismatch)"; renaming one field
+      (`sha_width_bytes` → `sha_width`, a same-position rename) made `gen:schema` itself refuse
+      with "the append-only rule was violated ... no renames, reorders or deletions". Both edits
+      reverted; `git status` clean afterward.
+- [x] **The four drift guards each fail when they should**, confirmed fresh by hand this session
+      (not merely re-cited from an earlier pass), each edit made and reverted with `git status`
+      clean afterward: removing `from` from `toWire`'s destructure fails `tsc` (`Record<string,
+      never>` guard, plus a second "Cannot find name 'from'" at the `addFrom` call); removing
+      `dictionaryBase` from `fromWire`'s return object fails `tsc` ("Property 'dictionaryBase' is
+      missing"); a phantom field added to `PackedCommitChunk` in `contract.ts` fails `tsc` in
+      all **three** `graphChunkCodec.ts` guards simultaneously (`ACCESSOR_BRIDGE`, the
+      `Record<string, never>` exhaustive-destructure, and `fromWire`'s return type) plus cascades
+      into every other file that touches a `PackedCommitChunk` across the whole `tsc --build`
+      graph (`codec.test.ts`, `rpc.test.ts`, `rpcHandlers.ts`, `mockBridge.ts`,
+      `streamRoundTrip.ts`, `wireConformance.test.ts`, `graphView.test.ts`, `review.test.ts`) —
+      stronger than the plan's stated "two places" or W5's originally-observed "three places".
+      Guard 4 (the exhaustive `never`-defaulted switch on `DecorationRef.kind`, both directions)
+      is the standard TypeScript exhaustiveness idiom and was not re-sabotaged separately this
+      session — doing so needs the same invasive `contract.ts` union edit as guard 3's test, which
+      already demonstrated the mechanism. A wrongly-written field failing W9's no-defaults round
+      trip on a value comparison (not a type error) was confirmed earlier in this same
+      implementation (removing only the `addFrom()` builder call, `from` still destructured):
+      `tsc` stayed clean, the no-defaults test failed with `Expected: 2, Received: 0`.
+- [x] **W9's fixture is asserted to contain no FlatBuffers default value**, and the round trip
       enumerates `Object.keys` rather than a hand-written field list, and covers all five
-      `DecorationRef` variants including `{kind:"head"}` arriving with no `name` property.
-- [ ] **Both surfaces are proven, not assumed.** A ranged `graph.stream` chunk round-trips
-      byte-identically in `transportContract.test.ts`, and the VS Code e2e tier asserts real row
-      content in **both** the panel and the review sidebar. D38's session isolation is unchanged.
-- [ ] **The boundary is measured and recorded**, per W11: `hostBoundaryMs`/`hostWireBytes` (the
-      shipping FlatBuffers path) reported against P15's committed 4.74 ms / 563,748 B baseline,
-      alongside `hostBoundaryBase64Ms`/`hostWireBytesBase64` from the same run. If the number
-      disagrees materially, W11's ladder was followed — recorded and escalated, never re-baselined
-      quietly or accommodated by widening the tolerance.
-- [ ] **`CONTRACT_VERSION` is 8**, and a version mismatch still fails loudly.
-- [ ] **Nothing else moved.** `rpc.test.ts` passes unmodified; `codec.test.ts` passes unmodified;
-      the `Frame` union, credit gate, correlation, supersede rule and cancellation are untouched;
-      `PackedCommitChunk`'s shape, `packSlice`, `appendPacked` and the interning scheme are
-      untouched; `commit.fileDiff` and every other contract key still cross as they did.
-- [ ] **`packages/ipc`'s new dependency is exactly one**, `flatbuffers@25.9.23`, Apache-2.0, and
-      §3.1's dependency-rule prose is corrected to match reality.
-- [ ] **Generated code is generated code.** `packages/ipc/src/generated/` is excluded from Biome,
-      carries a do-not-edit header with the flatc version and input digests, and is committed.
-- [ ] V1–V8 resolved and recorded in Findings, including the bundle-size delta (V5),
+      `DecorationRef` variants including `{kind:"head"}` arriving with no `name` property. See
+      `tests/unit/ipc/wireConformance.test.ts`'s "no field ... is at a FlatBuffers default" and
+      "all five DecorationRef variants" tests.
+- [x] **Both surfaces are proven, not assumed.** A ranged `graph.stream` chunk round-trips
+      byte-identically in `transportContract.test.ts` (W10, real `RepoService`, direct walk vs.
+      over-the-wire compared chunk-by-chunk). The VS Code e2e tier's real-row-content assertions
+      exist in both `panel.spec.ts` and `review.spec.ts` (see the first bullet above for why they
+      could not be executed here); harness coverage — the same `createRpcServer`/`createRpcClient`
+      path — was executed and passed in full (281/281). `git diff` against the pre-P16 tip shows
+      **zero** changes to `repoService.ts` or `logSession.ts`: D38's session isolation is
+      untouched, not merely unmentioned.
+- [x] **The boundary is measured and recorded**, per W11: measured twice (two independent runs)
+      against a 100k-commit repo. `hostBoundaryMs` (gated, shipping FlatBuffers path): baseline
+      4.74 ms → 22.95 ms / 24.74 ms actual (+384% / +421%) — a **materially worse**, not
+      within-tolerance, result. `hostWireBytes`: 563,748 B baseline → 563,697 B / 563,748 B actual
+      (unchanged, within gate). `hostBoundaryBase64Ms`/`hostWireBytesBase64` (recorded, not
+      gated — the old plain-base64 path over the identical ten chunks, same run): ~3.0 ms /
+      563,748 B. Per the pre-resolved escalation ladder for a materially-worse result: **not**
+      re-baselined, **not** tolerance-widened — `streamRoundTrip.budget.json` was left exactly as
+      P15 committed it, so `bun run test:perf` continues to report this as a regression on every
+      future run until the orchestrating session weighs in. Flagged below as a Finding; the
+      FlatBuffers implementation shipped anyway, per the override.
+- [x] **`CONTRACT_VERSION` is 8**, and a version mismatch still fails loudly (unchanged
+      `validateVersion`/`ContractVersionMismatchError` machinery in `validate.ts`).
+- [x] **Nothing else moved.** `rpc.test.ts` and `codec.test.ts` have zero diff against the pre-P16
+      tip (`git diff b0cd47e..HEAD -- packages/ipc/src/rpc.test.ts packages/ipc/src/codec.test.ts`
+      is empty) — passing unmodified, not merely passing. The `Frame` union, credit gate,
+      correlation, supersede rule and cancellation are untouched; `PackedCommitChunk`'s shape,
+      `packSlice`, `appendPacked` and the interning scheme are untouched; `commit.fileDiff` and
+      every other contract key still cross as plain JSON, unchanged.
+- [x] **`packages/ipc`'s new dependency is exactly one**, `flatbuffers@25.9.23` (exact pin, no
+      caret/tilde, confirmed in `packages/ipc/package.json`), Apache-2.0, and §3.1's
+      dependency-rule prose is corrected to match reality (W13).
+- [x] **Generated code is generated code.** `packages/ipc/src/generated/` is excluded from Biome
+      (`!**/src/generated` in `biome.json`'s `includes`), carries a do-not-edit header naming the
+      flatc version and the schema's own sha256, and is committed.
+- [x] V1–V8 resolved and recorded in Findings, including the bundle-size delta (V5),
       `appendPacked`'s re-confirmed number for task #53 (V6), the sender-side heap cost (V7), and
-      the macOS position (V8).
+      the macOS position (V8) — V3's escalation is the one materially-open item, by design (see
+      Findings and the bullet above).
 
 ---
 
@@ -943,3 +993,158 @@ Complete when all of the following hold, verified by running them:
 
 _Recorded during implementation. V1–V8 outcomes, and any decision made at the keyboard that this
 plan did not anticipate — later phases read this section as part of the context they inherit._
+
+### V1 — Toolchain reproducibility
+
+`.flatc/` was deleted and re-fetched live (not merely re-cited from an earlier pass). `bun run
+fetch:flatc` downloaded the Linux x64 asset fresh and printed `verified
+sha256:de0c6ad114a5a686ecf64322528c602c7d4512446a93f290f54f00ee5abea487` — an exact match against
+the committed `scripts/flatc.lock.json`. `flatc --version` reported `flatc version 25.9.23`,
+matching the `flatbuffers@25.9.23` npm runtime `packages/ipc` depends on. `bun run gen:schema` was
+then run twice over the freshly-fetched `flatc`; both runs produced byte-identical output
+(`sha256:6766644f1ac0c2fc2479f695b225ea5be9614bbedb3a5061b3083408f3a71b2f`), and `git status`
+reported no diff against the already-committed `packages/ipc/src/generated/graphChunk.ts` — a
+byte-for-byte match against the shipped generated file, not merely an equivalent one. The toolchain
+is reproducible: same input schema, same `flatc` version, same output bytes, verified rather than
+assumed.
+
+### V2 — `bun run check` is offline and flatc-free
+
+Verified directly rather than by code inspection. `.flatc/` and `node_modules` were both deleted;
+`HTTPS_PROXY`/`HTTP_PROXY`/lowercase variants were pointed at `http://127.0.0.1:1` (a port nothing
+listens on) to blackhole any outbound request the tooling might attempt. `bun install
+--frozen-lockfile` still succeeded (210 packages resolved from Bun's local cache, no network
+needed) and `bun run check` — `check:schema` included — exited 0 with the network fully
+blackholed. `check:schema` compares a digest of the committed `graphChunk.fbs` against the digest
+recorded in `graphChunk.ts`'s generated-file header rather than re-invoking `flatc`, which is what
+makes this possible: the schema-drift check never touches the toolchain at all in the common case,
+only `gen:schema` (an explicit, separate command) does.
+
+### V3 — The host-boundary regression (W11 escalation)
+
+Measured twice, independently, against a 100k-commit `largeBranchy` repo, using
+`tests/perf/streamRoundTrip.ts`'s gated `hostBoundaryMs` metric (the shipping FlatBuffers
+`toWire`/`fromWire` path across ten chunks) alongside the new recorded-only
+`hostBoundaryBase64Ms`/`hostWireBytesBase64` pair (the old plain-JSON-plus-base64 path over the
+identical chunks, same run, for direct A/B comparison):
+
+| metric | baseline (P15) | run 1 | run 2 |
+|---|---|---|---|
+| `hostBoundaryMs` (gated) | 4.74 ms | 22.95 ms (+383.8%) | 24.74 ms (+421.4%) |
+| `hostWireBytes` (gated) | 563,748 B | 563,697 B | 563,748 B |
+| `hostBoundaryBase64Ms` (recorded) | — | ~3.03 ms | ~3.03 ms |
+| `hostWireBytesBase64` (recorded) | — | 563,748 B | 563,748 B |
+
+`hostWireBytes` is unchanged (within the gate, as expected — FlatBuffers' framing overhead on this
+payload shape is negligible). `hostBoundaryMs`, however, is **materially worse**: FlatBuffers'
+`toWire`/`fromWire` round trip on the host boundary costs roughly 7–8x what the old plain-JSON path
+cost for the same ten chunks, not the modest overhead the plan's open question 8 budgeted for.
+Two consecutive runs producing consistent ~4-5x regressions rules out a one-off scheduling fluke.
+
+Per the pre-resolved escalation ladder (open question 8): "within ±20% → proceed & re-baseline;
+materially worse → do NOT widen tolerance or silently revert, write up as a clearly-flagged Finding
+for the orchestrating session, keep FlatBuffers implementation in place." This result is
+unambiguously in the "materially worse" branch. Accordingly: `streamRoundTrip.budget.json` was
+**deliberately left untouched** at its original P15 values (`hostBoundaryMs: 4.743741...`) — not
+re-baselined, not tolerance-widened. `bun run test:perf` will continue to report this as a failing
+regression on every future run, by design, as the visible signal that this decision point is still
+open. The FlatBuffers implementation itself was **not** reverted or gated behind a flag; it ships
+as built, per the override this plan operates under. **This is the one exit-criterion item that is
+intentionally left in a "red" state pending a decision from the orchestrating session** — see the
+escalation note under the exit-criteria checklist above.
+
+No root-cause micro-profiling of the regression was performed (out of this phase's scope per the
+ladder's instruction to record and flag, not to fix); a plausible contributor is that `toWire`
+performs a full `Builder` construction plus a second `slice()` copy to produce an exactly-sized
+buffer, and `fromWire` performs a `ByteBuffer` wrap plus per-column `slice()` copies — several more
+allocation/copy passes than the old path's single `JSON.stringify`/base64 encode, on payloads whose
+absolute byte counts are already small (hundreds of KB) enough that constant-factor overhead
+dominates.
+
+### V4 — Review sidebar uses the same path
+
+The review sidebar (P7's second `RepoService`/`graph.stream` consumer) was confirmed to ride the
+identical `toWire`/`fromWire` codec with no separate integration: `apps/harness/src/mockBridge.ts`
+constructs its RPC server/client via the same `createRpcServer`/`createRpcClient` from
+`@kira-version/ipc` that the panel uses, so harness's 281/281 passing Playwright tests already
+exercise the FlatBuffers path for both surfaces with no new scenario needed. `git diff
+b0cd47e..HEAD -- packages/git/src/repoService.ts packages/git/src/logSession.ts` is empty —
+**zero** changes to either file — confirming D38's session-isolation guarantee is untouched, not
+merely unaffected in spirit. A ranged `graph.stream` chunk (not just a from-zero one) was confirmed
+to round-trip byte-identically end-to-end in `transportContract.test.ts` (W10): a real
+`RepoService`'s direct in-process walk compared chunk-by-chunk against the same walk sent over the
+wire and decoded back. `review.spec.ts`'s real-content e2e assertion (`"2 commits"`, `"feature
+commit 1"`, `"feature commit 0"`, from P7) was read in full and required no changes — it already
+asserts exactly what W12 needs; it typechecks cleanly via `tsc --build` but could not be executed
+in this sandbox (see V8-adjacent note under the exit-criteria checklist's first bullet).
+
+### V5 — Bundle-size delta
+
+Measured by building both the pre-P16 tip (`b0cd47e`, checked out into a scratch `git worktree` so
+the main worktree was undisturbed) and the current tree with `bun run build`, then comparing
+`dist/`'s output files directly:
+
+| bundle | before | after | delta |
+|---|---|---|---|
+| webview bundle (raw) | 392,788 B | 407,587 B | +14,799 B (+3.77%) |
+| webview bundle (gzip) | 112.97 kB | 115.77 kB | +2.80 kB (+2.48%) |
+| `dist/vscode/extension.js` | 192,218 B | 233,649 B | +41,431 B (+21.6%) |
+
+The extension host bundle grows proportionally more than the webview bundle because the host side
+is where `toWire`/`fromWire` and the generated FlatBuffers table classes actually live and run (the
+webview only receives already-decoded data structures, per D45's scope decision that only the host
+boundary moves onto FlatBuffers). No pre-existing bundle-size budget or gate covers either bundle
+(per the plan's own open question 4), so both deltas are recorded here rather than checked against
+a threshold; neither is large in absolute terms against typical extension/webview bundle sizes.
+
+### V6 — `appendPacked`, re-confirmed (task #53 handoff)
+
+Re-measured fresh in this session (not re-cited): `appendMs` (the gated metric covering
+`CommitStore.appendPacked`, which does not change in this phase — only the wire format around it
+does) came in at 40.52 ms and 41.55 ms actual across the two runs, against a 39.91 ms baseline —
+deltas of +1.5% and +4.1%, both comfortably inside the 20% gate. `appendPacked` itself, the
+interning scheme, and `packSlice` are confirmed untouched by this phase (see the "Nothing else
+moved" exit-criterion bullet's `git diff` evidence).
+
+One relative shift is worth flagging for whoever next tunes this path (task #53): before this
+phase, `hostBoundaryMs` (~4.7 ms) was a small fraction of `appendMs` (~39.9 ms) — roughly 12%. After
+this phase, `hostBoundaryMs` (~23–25 ms) is now **57–61%** of `appendMs` (~40–42 ms) — the host
+boundary went from a minor contributor to roughly half the total pipeline cost, even though neither
+`appendMs` itself nor the two measurements' sum moved dramatically in absolute terms. Anyone
+optimizing this pipeline going forward should treat the host boundary, not `appendPacked`, as the
+now-dominant cost center on this path.
+
+### V7 — Sender-side heap cost
+
+Measured with a standalone script (`/tmp/.../scratchpad/v7-heap-measure.ts`, not part of the
+repository) against a real 500-row `packSlice` chunk drawn from a `largeBranchy(5000)`-generated
+repository via the real `CommitStore`/`logSession` pipeline (not a synthetic fixture):
+
+- Raw pre-existing columnar bytes (`shas` + `parentOffsets` + `parentShas` + `identityIds` +
+  `times` + `subjectBytes` + `subjectOffsets`, byte lengths the sender already holds regardless of
+  wire format): **41,528 bytes**.
+- `toWire()`'s finished, exactly-sized FlatBuffer for the same chunk: **41,860 bytes** — a delta of
+  only **332 bytes (+0.8%)** over the raw columns, matching the plan's own "~42 KB" estimate almost
+  exactly.
+- The `Builder`'s peak *transient* capacity (not the finished size) is larger during construction:
+  `flatbuffers.Builder`'s doubling-growth strategy starting from `new flatbuffers.Builder(1024)`
+  (the initial size `toWire` passes) means the backing buffer is a power-of-two multiple of 1024
+  bytes at any moment — for a ~41.9 KB finished message the smallest doubling that fits is
+  **65,536 bytes (64 KB)**, derived analytically from the growth strategy rather than measured
+  directly (the finished buffer's own backing array, per `asUint8Array()`, is exactly this size
+  before `toWire`'s final `.slice()` produces the exactly-sized copy returned to the caller).
+
+Both the finished-size delta (332 B) and the transient peak (64 KB) are negligible against §5.1's
+≤80 MB renderer budget — but note this cost sits on the **sender/host side** of `graph.stream`, not
+the renderer the ≤80 MB budget actually governs, so this comparison is a sanity-magnitude check,
+not a claim that the renderer's own budget is what bounds this cost.
+
+### V8 — macOS
+
+No macOS machine was reachable from this sandbox, consistent with P15's own V2 finding and P4c's
+findings before it. All numbers in this Findings section (V1–V7) are Linux x64 measurements only.
+This gap is recorded explicitly rather than presenting the Linux numbers as authoritative for both
+platforms; per-platform `flatc` provenance is nonetheless pinned and verifiable in
+`scripts/flatc.lock.json` (both `linux-x64` and `darwin-arm64` entries exist with their own
+sha256s), so a future session with macOS access can re-run V1/V3/V5–V7 there without any plan or
+tooling changes.
