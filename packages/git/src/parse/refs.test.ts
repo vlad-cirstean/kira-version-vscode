@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { splitRecords } from "@kira-version/core";
-import { parseRefRecord, REFS_RECORD_DELIMITER } from "./refs.ts";
+import {
+  parseRefRecord,
+  REFS_RECORD_DELIMITER,
+  TAG_REFS_RECORD_DELIMITER,
+} from "./refs.ts";
 
 const FIXTURES = join(import.meta.dir, "../../../../tests/fixtures/porcelain/refs");
 const HAND_AUTHORED = join(import.meta.dir, "../../../../tests/fixtures/porcelain/handAuthored");
@@ -11,15 +15,25 @@ async function* toAsyncIterable(bytes: Uint8Array) {
   yield bytes;
 }
 
+// The tags-only spawn is NUL-framed (W4/probe 7): `for-each-ref` still appends its own `\n` line
+// terminator after every record regardless of format string, so every record but the stream's
+// first carries a stray leading `\n` left over from the previous record's terminator — mirrors
+// `queries.ts`'s own `stripLeadingNewline`.
+function stripLeadingNewline(record: Uint8Array): Uint8Array {
+  return record.length > 0 && record[0] === 0x0a ? record.subarray(1) : record;
+}
+
 async function loadRefs(dir: string, name: string, withSubject = false) {
   const bytes = readFileSync(join(dir, `${name}.bin`));
+  const delimiter = withSubject ? TAG_REFS_RECORD_DELIMITER : REFS_RECORD_DELIMITER;
   const records = [];
-  for await (const record of splitRecords(toAsyncIterable(bytes), {
-    delimiter: REFS_RECORD_DELIMITER,
-  })) {
+  for await (const record of splitRecords(toAsyncIterable(bytes), { delimiter })) {
     records.push(record);
   }
-  return records.map((record) => parseRefRecord(record, withSubject));
+  return records
+    .map((record) => (withSubject ? stripLeadingNewline(record) : record))
+    .filter((record) => record.length > 0)
+    .map((record) => parseRefRecord(record, withSubject));
 }
 
 // withWorktree.bin: captured from a real repository (git 2.43.0) with `main` (this session's own
@@ -75,7 +89,12 @@ describe("parseRefRecord — the base (subject-less) 11-field format", () => {
     expect(ann?.objectId).toMatch(/^[0-9a-f]{40}$/);
     expect(ann?.peeledObjectId).toMatch(/^[0-9a-f]{40}$/);
     expect(ann?.objectId).not.toBe(ann?.peeledObjectId);
-    expect(ann?.annotation).toEqual({ tagger: "Test Committer", date: 1_700_006_400, subject: "" });
+    expect(ann?.annotation).toEqual({
+      tagger: "Test Committer",
+      date: 1_700_006_400,
+      subject: "",
+      body: "",
+    });
   });
 
   test("a record whose LAST field is empty parses correctly (framing does not drop a trailing empty field)", async () => {
@@ -93,14 +112,7 @@ describe("parseRefRecord — the base (subject-less) 11-field format", () => {
 
 describe("parseRefRecord — the tags-only, subject-bearing format (refsArgs('tags'))", () => {
   test("version-aware sort: v10, v9, lw, ann — git's --sort=-v:refname, not a JS string/number sort", async () => {
-    const bytes = readFileSync(join(FIXTURES, "tagsWithSubject.bin"));
-    const records = [];
-    for await (const record of splitRecords(toAsyncIterable(bytes), {
-      delimiter: REFS_RECORD_DELIMITER,
-    })) {
-      records.push(record);
-    }
-    const refs = records.map((r) => parseRefRecord(r, true));
+    const refs = await loadRefs(FIXTURES, "tagsWithSubject", true);
     expect(refs.map((r) => r.shortName)).toEqual(["v10", "v9", "lw", "ann"]);
   });
 
@@ -118,6 +130,20 @@ describe("parseRefRecord — the tags-only, subject-bearing format (refsArgs('ta
     const ann = refs.find((r) => r.shortName === "ann");
     expect(ann?.annotation?.subject).toBe("annotated tag subject line");
     expect(ann?.annotation?.tagger).toBe("Test Committer");
+  });
+
+  test("an ANNOTATED tag's multi-line body survives the NUL framing intact, raw LFs and all (probe 7)", async () => {
+    const refs = await loadRefs(FIXTURES, "tagsWithSubject", true);
+    const ann = refs.find((r) => r.shortName === "ann");
+    expect(ann?.annotation?.body).toBe(
+      "Body line one.\nBody line two spans multiple lines,\nexercising the NUL-framing fix (probe 7).\n",
+    );
+  });
+
+  test("a LIGHTWEIGHT tag's body is never populated — gated on objecttype, same as subject", async () => {
+    const refs = await loadRefs(FIXTURES, "tagsWithSubject", true);
+    const lw = refs.find((r) => r.shortName === "lw");
+    expect(lw?.annotation).toBeUndefined();
   });
 });
 

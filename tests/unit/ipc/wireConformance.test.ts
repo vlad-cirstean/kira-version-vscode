@@ -283,7 +283,12 @@ describe("ipc wire conformance", () => {
       (core) => core,
       (wire) => wire,
     );
-    const annotation: CoreTagAnnotation = { tagger: "T <t@t.com>", date: 0, subject: "release" };
+    const annotation: CoreTagAnnotation = {
+      tagger: "T <t@t.com>",
+      date: 0,
+      subject: "release",
+      body: "",
+    };
     const wire: WireTagAnnotation = annotation;
     expect(wire).toEqual(annotation);
   });

@@ -201,6 +201,9 @@ export interface TagAnnotation {
   readonly tagger: string;
   readonly date: number; // unix seconds
   readonly subject: string;
+  /** `docs/plans/P11.md` W4/probe 7: the tag message's full body, from `%(contents:body)` —
+   *  populated only by the tags-only scope's spawn. */
+  readonly body: string;
 }
 
 export interface RefRow {

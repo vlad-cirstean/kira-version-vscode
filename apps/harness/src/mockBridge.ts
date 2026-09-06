@@ -710,6 +710,7 @@ function applyOp(
               tagger: "Kira Fixture <fixture@kira-version.test>",
               date: nowSeconds,
               subject: op.message,
+              body: "",
             }
           : undefined,
       };

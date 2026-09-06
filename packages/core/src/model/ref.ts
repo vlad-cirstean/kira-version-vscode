@@ -18,6 +18,10 @@ export interface TagAnnotation {
   readonly tagger: string;
   readonly date: number; // unix seconds
   readonly subject: string;
+  /** `docs/plans/P11.md` W4/probe 7: the tag message's full body (everything after the subject
+   *  line), from `%(contents:body)` — populated only by the tags-only spawn's NUL framing
+   *  (`parse/refs.ts`), since a raw LF inside a body cannot survive the LF-framed spawns. */
+  readonly body: string;
 }
 
 export interface RefRecord {
