@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { ProcessRunner, SpawnedProcess, SpawnRequest } from "../../packages/core/src/index.ts";
 import { CommitStore, defaultSettings } from "../../packages/core/src/index.ts";
 import { FakeLogger } from "../../packages/core/src/ports/testFakes.ts";
 import { NodeFileWatcher } from "../../packages/git/src/nodeFileWatcher.ts";
@@ -42,9 +43,9 @@ function settingsWithCandidates(candidates: readonly string[]) {
   return { ...defaultSettings(), "kiraVersion.review.baseCandidates": candidates };
 }
 
-async function openService(dir: string, settings = defaultSettings()) {
+async function openService(dir: string, settings = defaultSettings(), runner?: ProcessRunner) {
   const service = await RepoService.create({
-    runner: new NodeProcessRunner(),
+    runner: runner ?? new NodeProcessRunner(),
     fileWatcher: new NodeFileWatcher(),
     logger: new FakeLogger(),
     settings,
@@ -53,6 +54,31 @@ async function openService(dir: string, settings = defaultSettings()) {
   const opened = await service.open(dir);
   if (opened.kind !== "ok") throw new Error("unreachable: repo failed to open");
   return { service, repoId: opened.repoId };
+}
+
+/** `repoService.test.ts`'s own spawn-counting convention (P7 W16), duplicated rather than
+ *  imported — that file's `CountingRunner` is not exported, and this one only needs to name
+ *  processes by their first argv token (V8 counts `symbolic-ref`/`merge-base`/`rev-list`/`log`
+ *  spawns, not argv detail `logSpawnCount`'s narrower filter already covers elsewhere). */
+class CountingRunner implements ProcessRunner {
+  readonly calls: string[][] = [];
+  readonly #inner = new NodeProcessRunner();
+
+  spawn(executable: string, request: SpawnRequest): SpawnedProcess {
+    this.calls.push([...request.argv]);
+    return this.#inner.spawn(executable, request);
+  }
+
+  /** `buildGitArgv` (driver.ts) prefixes every call with `-c` config overrides and `--no-pager`/
+   *  `--no-optional-locks`, so the subcommand is never argv[0] — `.includes` rather than an index
+   *  check, matched against the exact token so `"log"` never also matches `"--topo-order"`. */
+  countOf(subcommand: string): number {
+    return this.calls.filter((argv) => argv.includes(subcommand)).length;
+  }
+
+  reset(): void {
+    this.calls.length = 0;
+  }
 }
 
 function commitEnv(dir: string) {
@@ -410,6 +436,92 @@ describe("isolation (P7 W19; the full four-step claim lives in repoService.test.
       service.endReview(repoId);
 
       expect(service.status(repoId)).toEqual(graphStatusBefore);
+    } finally {
+      service.dispose();
+    }
+  });
+});
+
+describe("spawn count for one review open (V8, P7 W19)", () => {
+  test("resolveReviewBase (defaultBranch path) + the walk's first page: refs cached, one symbolic-ref, merge-base, rev-list --count, and the walk's own two spawns", async () => {
+    // The plan's own W21 phrasing bundles "the walk" as one item; empirically it is two spawns —
+    // `logSession.ts`'s narrowed staleness guard (`rev-parse <base> <branch>`, W3's own endpoint
+    // snapshot) taken before the walk's first `git log` page — so five spawns total is the honest
+    // number for one review open on the defaultBranch path, not four. Recorded in Findings.
+    const repo = withRemote();
+    gitCommit(repo.dir, ["checkout", "--quiet", "-b", "topic", "main"]);
+    writeFileSync(join(repo.dir, "topic.txt"), "topic\n");
+    git(repo.dir, ["add", "topic.txt"]);
+    gitCommit(repo.dir, ["commit", "--quiet", "--no-gpg-sign", "-m", "topic commit"]);
+
+    const runner = new CountingRunner();
+    const { service, repoId } = await openService(repo.dir, defaultSettings(), runner);
+    try {
+      // Warm the refs cache the way a real review-open always finds it already warm (the panel's
+      // own `app.init`/`repo.open` populates it first) — excluded from the count below, since V8
+      // is asking about the *review*'s own honest cost, not repoding.
+      await service.refs(repoId);
+      runner.reset();
+
+      const resolution = await service.resolveReviewBase(repoId, "topic");
+      expect(resolution.reason).toBe("defaultBranch"); // "topic" has no upstream — the probe
+      // falls through, so `detectDefaultBranch` (one `symbolic-ref` spawn) genuinely runs here.
+      expect(resolution.base).toBe("origin/main");
+
+      // The resolved base, not the literal setting — `#ensureReviewWalk` keys its
+      // `lastReviewResolution` reuse off the exact range object, so the walk must open on
+      // `origin/main..topic`, precisely what `resolveReviewBase` itself just computed, or its
+      // own `rev-list --count` is wasted and `remaining()` pays for a second one.
+      const range = { base: resolution.base as string, branch: "topic" };
+      await streamRange(service, repoId, range);
+
+      expect(runner.countOf("for-each-ref")).toBe(0); // refs served from the cache, not respawned
+      expect(runner.countOf("symbolic-ref")).toBe(1);
+      expect(runner.countOf("merge-base")).toBe(1);
+      expect(runner.countOf("rev-list")).toBe(1);
+      expect(runner.countOf("rev-parse")).toBe(1); // the walk's own narrowed staleness snapshot
+      expect(runner.countOf("log")).toBe(1); // the walk's own first-page spawn
+      expect(runner.calls.length).toBe(5);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("a second resolution for an overridden base adds exactly two spawns (merge-base + rev-list --count)", async () => {
+    const repo = withRemote();
+    gitCommit(repo.dir, ["checkout", "--quiet", "-b", "develop"]);
+    writeFileSync(join(repo.dir, "develop.txt"), "develop\n");
+    git(repo.dir, ["add", "develop.txt"]);
+    gitCommit(repo.dir, ["commit", "--quiet", "--no-gpg-sign", "-m", "develop commit"]);
+    git(repo.dir, ["push", "--quiet", "origin", "develop"]);
+    git(repo.dir, ["fetch", "--quiet", "origin"]);
+    gitCommit(repo.dir, ["checkout", "--quiet", "-b", "topic", "main"]);
+    git(repo.dir, ["branch", "--set-upstream-to=origin/develop", "topic"]);
+    writeFileSync(join(repo.dir, "topic.txt"), "topic\n");
+    git(repo.dir, ["add", "topic.txt"]);
+    gitCommit(repo.dir, ["commit", "--quiet", "--no-gpg-sign", "-m", "topic commit"]);
+
+    const runner = new CountingRunner();
+    const { service, repoId } = await openService(repo.dir, defaultSettings(), runner);
+    try {
+      await service.refs(repoId);
+      runner.reset();
+
+      // "topic" tracks "origin/develop" — rule 1's cheap probe (candidates: [], originHead:
+      // undefined) already resolves via upstream, so `detectDefaultBranch` never spawns at all,
+      // on this call or the next: `#naturalResolution`'s own doc comment ("one spawn, only when
+      // rule 1 falls through") means the *override* below repeats the same, now free, probe.
+      const first = await service.resolveReviewBase(repoId, "topic");
+      expect(first.reason).toBe("upstream");
+      expect(runner.countOf("symbolic-ref")).toBe(0);
+      expect(runner.calls.length).toBe(2); // merge-base + rev-list --count, nothing else
+
+      runner.reset();
+      const overridden = await service.resolveReviewBase(repoId, "topic", "main");
+      expect(overridden.reason).toBe("override");
+      expect(runner.countOf("symbolic-ref")).toBe(0);
+      expect(runner.countOf("for-each-ref")).toBe(0);
+      expect(runner.calls.length).toBe(2); // exactly two more: merge-base + rev-list --count
     } finally {
       service.dispose();
     }
