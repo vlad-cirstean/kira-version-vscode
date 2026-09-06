@@ -43,6 +43,15 @@ const sideACommit = decorated.find((c) => c.subject === "side-a");
 if (!sideACommit) throw new Error("merge scenario: no commit named 'side-a'");
 const sideASha = sideACommit.sha;
 const REVERT_CONFLICT_PATHS = ["a-only.ts"];
+// `docs/plans/P10.md` W20's own `cherryPick.spec.ts`: the same posture as the revert fixture just
+// above, and the same path — `defaultCherryPickPreflight` always predicts `clean`, so a scenario
+// states an explicit `preflight.cherryPick` fixture for the one commit this suite needs a
+// conflicting pick from. `side-a` genuinely is an ancestor of `main` (the octopus merge's own tip)
+// — a real pick of it would be an empty one — but this is a hand-stated fixture, not the derived
+// default, so it states `alreadyApplied: false` deliberately: the point here is the conflict path
+// alone, not a second exercise of probe 6 (already covered by `conflictBanner.spec.ts`'s own
+// `cherryPickEmpty` fixture).
+const CHERRY_PICK_CONFLICT_PATHS = ["a-only.ts"];
 
 function detailFixture(body: string, files: CommitDetailFixture["files"]): CommitDetailFixture {
   return { body, trailers: [], signature: { status: "N", signer: "" }, files };
@@ -124,6 +133,19 @@ export const merge: Scenario = {
         inProgress: null,
         prediction: { kind: "conflicts", paths: REVERT_CONFLICT_PATHS },
         predictedFor: sideASha,
+        detachedHead: false,
+        verdict: "willConflict",
+        blockers: [],
+      },
+    },
+    cherryPick: {
+      [sideASha]: {
+        sha: sideASha,
+        subject: sideACommit.subject,
+        mainlineRequired: [],
+        prediction: { kind: "conflicts", paths: CHERRY_PICK_CONFLICT_PATHS },
+        alreadyApplied: false,
+        inProgress: null,
         detachedHead: false,
         verdict: "willConflict",
         blockers: [],

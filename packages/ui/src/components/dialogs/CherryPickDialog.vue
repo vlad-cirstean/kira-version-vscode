@@ -36,11 +36,20 @@ watch(selectedMainline, (mainline) => {
 });
 
 const needsMainline = computed(() => (preflight.value?.mainlineRequired.length ?? 0) > 0);
-const blockers = computed(() => preflight.value?.blockers ?? []);
-// Every blocker `classifyCherryPick` can name is a real git refusal (probe 7's set-intersection
-// blockers, plus the in-progress gate) — unlike `RevertPreflight`'s advisory `dirtyWorktree`,
-// there is no route past any of these short of changing the working tree or resolving the other
-// operation first, so Confirm stays disabled while any is present.
+// `classifyCherryPick` files `mainlineRequired` as a `CherryPickBlocker` alongside the real,
+// nothing-else-to-do refusals (probe 7's set-intersection blockers, plus the in-progress gate) —
+// but unlike those, it has its own dedicated, non-blocking resolution right here (the radio group
+// below), the same way `RevertDialog.vue`'s own `needsMainline` never waits on a generic blocker
+// list at all. Filtered out here so picking a mainline stays reachable on its own: left in,
+// `hasBlocker` would be permanently true the moment `needsMainline` is, the radio group would
+// never render (`v-if="!hasBlocker && needsMainline"` below), and a merge commit's cherry-pick
+// could never be confirmed.
+const blockers = computed(
+  () => preflight.value?.blockers.filter((b) => b.kind !== "mainlineRequired") ?? [],
+);
+// Every remaining blocker is a real git refusal — unlike `RevertPreflight`'s advisory
+// `dirtyWorktree`, there is no route past any of these short of changing the working tree or
+// resolving the other operation first, so Confirm stays disabled while any is present.
 const hasBlocker = computed(() => blockers.value.length > 0);
 const canConfirm = computed(
   () => !hasBlocker.value && (!needsMainline.value || selectedMainline.value !== undefined),
