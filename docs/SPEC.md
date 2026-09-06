@@ -236,9 +236,9 @@ kira-version-vscode/
 │   │       │                       shaTable.ts      20-byte binary sha storage + hex formatting
 │   │       │                       intern.ts        string interning + concatenated subject buffer
 │   │       ├── graph/              layout.ts lanes.ts edges.ts colors.ts types.ts
-│   │       ├── search/             query.ts   parse toggles + scope into a query object
-│   │       │                       matcher.ts client-side matching over the loaded store
-│   │       │                       gitArgs.ts translate a query into git log arguments
+│   │       ├── search/             query.ts   toggles + scope → one compiled RegExp (§7.8)
+│   │       │                       matcher.ts the one matcher both halves run — loaded store,
+│   │       │                                  streamed tail records, and refs
 │   │       ├── preflight/          checkout.ts stashPop.ts reset.ts revert.ts cherryPick.ts push.ts
 │   │       │                       tag.ts
 │   │       │                       types.ts   Hazard / Plan / Resolution unions
@@ -265,6 +265,9 @@ kira-version-vscode/
 │   │       ├── errors.ts           exit code + stderr → typed error union
 │   │       ├── queries.ts          §4.4 read surface: argv + parser bound to typed queries
 │   │       ├── parse/              log.ts refs.ts status.ts diffTree.ts diff.ts stash.ts mergeTree.ts
+│   │       │                       (log.ts's own SCAN_FORMAT/logScanArgs/parseScanRecord, beside
+│   │       │                       logSessionArgs, are §7.8's tail scan: that walk plus one field,
+│   │       │                       kept next to it so the two can never drift apart)
 │   │       └── ops/                fetch.ts pull.ts push.ts stash.ts branch.ts tag.ts
 │   │                               checkout.ts reset.ts revert.ts cherryPick.ts conflict.ts
 │   │
@@ -327,6 +330,8 @@ kira-version-vscode/
 │   │       │   ├── refListModel.ts P6 W13: pure fold — sort/filter/section-cap for
 │   │       │   │                   BranchPicker.vue/TagList.vue, plus the remote-branch →
 │   │       │   │                   local-branch checkout-target resolution (§7.5's DWIM case)
+│   │       │   ├── searchResultsModel.ts P11 W12: pure fold — grouping/ordering/section-cap
+│   │       │   │                   for SearchResults.vue's dropdown, beside refListModel.ts
 │   │       │   ├── rowMenuModel.ts P6 W14: pure builder for the per-commit and per-ref context
 │   │       │   │                   menus — gates each item against `canRunOp`/`describeInProgress`
 │   │       │   ├── RowContextMenu.vue P6 W14: real `menu`/`menuitem`, opens on right-click,
@@ -594,6 +599,12 @@ same `refsChanged` signal (§4.5) that invalidates the ref list, so the UI re-re
 fetch without needing to know whether it is served from cache or re-resolved. Wire format,
 whether a request carries one branch or the visible ref set, and the version number are P12's
 plan to settle, not this document's.
+
+Search (§7.8) adds one request, `search.run` — a compiled query plus a limit, answered with
+the hits, whether the scan was truncated, and whether it completed a full pass — and no events
+or streams of its own: a superseded search cancels the same way an in-flight `graph.loadMore`
+already does, through the request's own `AbortSignal`, not a purpose-built cancel message. It
+took `CONTRACT_VERSION` from 11 to 12.
 
 The contract is defined once, in `packages/ipc`. A host supplies a `Transport`
 (`packages/ipc/src/transport.ts`) rather than a protocol of its own — VS Code's is
@@ -905,9 +916,9 @@ count from a cheap `git rev-list --count --all` run once per refresh. A modifier
 everything, for the user who knows what they are asking for and accepts the memory. Loading
 more never moves the viewport, never disturbs selection, and is cancellable.
 
-Search (§7.8) is unaffected: it queries git across the *whole* history regardless of what is
-loaded, so a commit from page 40 is findable without loading pages 1–39. Selecting such a
-result loads the pages up to it.
+Search (§7.8) is unaffected: it queries git across the *whole* history **within the walk's own
+rev set** regardless of what is *paged in*, so a commit from page 40 is findable without loading
+pages 1–39. Selecting such a result loads the pages up to it.
 
 ### 5.2 Graph layout
 
@@ -1156,7 +1167,7 @@ setting. We do not hide or fight the built-in item.
 Keyboard-first: `↑/↓` move selection, `Enter` open the detail pane (again on the same row
 closes it, matching the click behaviour in §6.4), `Shift+F10` or the Menu key opens the row's
 context menu, `/` focus search, `F5` refresh, `Ctrl/Cmd+F` search, `Esc` closes — in order —
-an open menu, then the diff view, then the detail pane or drawer. Full keyboard reachability and ARIA roles
+an open menu, **then the search results dropdown**, then the diff view, then the detail pane or drawer. Full keyboard reachability and ARIA roles
 on the virtualized list are v1 requirements, not polish.
 
 Every mutating action is available from a context menu on the row it applies to and from the
@@ -1647,16 +1658,39 @@ user expects from VS Code's own find widget.
 Semantics:
 
 - **Commits.** Matches over subject, body, author name/email, committer name/email, and sha
-  prefix. Executed **client-side over already-loaded commits** for instant feedback — this is
-  what makes the ≤120 ms budget achievable — and simultaneously handed to git for the
-  not-yet-walked tail:
-  `git log --all -z --format=… -i? -E? --grep=<pat> --author=<pat> --all-match?` with
-  `--regexp-ignore-case` for case-insensitive, `--extended-regexp`/`--perl-regexp` for regex,
-  `--fixed-strings` for literal. Whole-word is implemented by wrapping the pattern in `\b…\b`
-  (regex mode) or by post-filtering on token boundaries (literal mode), since git has no
-  word-boundary flag.
+  prefix (4 or more hex digits — git's own `--disambiguate` floor, below which a prefix matches
+  too much to be useful). Executed **client-side over already-loaded commits** for instant
+  feedback — this is what makes the ≤120 ms budget achievable — and simultaneously handed to git
+  for the not-yet-walked tail.
+
+  **The pattern itself never reaches git.** The tail query is the *same* `git log` walk the graph
+  already pages (`--decorate=full --topo-order -z --format=…`, the panel's own rev set) with the
+  commit body added to the format; the matching is done on the records as they stream, by the
+  same compiled matcher the client-side half runs. This is not a preference: `git log`'s
+  `--grep`, `--author` and `--committer` are **ANDed across categories**, so a single pattern that
+  must match *any* of six fields cannot be expressed as one invocation (`--all-match` governs how
+  multiple `--grep`s combine with each other and has no effect on `--author` at all); `--grep`
+  cannot match an object name, so a sha prefix needs a separate `rev-parse --disambiguate`; and
+  git's regex dialect is the platform's, so word boundaries (`\b`, `\<`) are a GNU `regcomp`
+  extension and Perl regexes depend on whether the binary was built with PCRE. Measured against a
+  100,000-commit repository, a `--grep` matching *nothing* costs ~700 ms and a full scan of the
+  same history costs ~860 ms, because git walks and inflates every commit either way — so letting
+  git filter buys pipe bytes, not time, and costs one semantics implementation per engine.
+
+  Toggles compile into one regular expression: literal patterns are escaped, case-insensitivity
+  is the `i` flag, and whole-word wraps the pattern in `\b…\b` — or, when an edge character is not
+  a word character, in `(?<!\w)…(?!\w)`, since `\b` before `#` asserts a boundary that is not
+  there and would make `#123` unmatchable.
+
+  The one asymmetry between the two halves is data, not semantics: the loaded-commit store holds
+  no message body (§5.5), so a body-only match is found by the tail scan even for a commit that is
+  already on screen. Such hits are labelled as body matches, since there is nothing in the message
+  column to highlight.
 - **Refs.** Matches local branches, remote-tracking branches, **and tags** by name, over the
-  ref list already in memory. Tags additionally match on their annotation message. Results
+  ref list already in memory. Tags additionally match on their annotation message. Both the
+  annotation's subject line and its remaining paragraphs are matched; the tag query carries the
+  body explicitly, and — because a `for-each-ref` record is line-framed and an annotation body
+  contains newlines — the tag query alone is NUL-framed. Results
   are grouped and labelled by kind (local / remote / tag) so `v1.2.0` the tag is never
   confused with `v1.2.0` the branch. Same three toggles apply. A branch with a resolved pull
   request (§6.7) additionally matches on its **PR number** — with or without the leading `#` —
@@ -1672,7 +1706,12 @@ Semantics:
 
 Behaviour: results are highlighted in place *and* navigable with `Enter`/`Shift+Enter`
 (next/previous match), with a match count. An invalid regex is reported inline as you type,
-never thrown. Search never blocks the UI; a superseded query aborts its git process.
+never thrown: the pattern is compiled once, client-side, in a `try`/`catch`, and an invalid one
+produces a message rather than a search — git is never asked, because git is never given the
+pattern. Search never blocks the UI: the client-side scan is time-boxed and reports how far it
+reached rather than running unbounded, since a user-supplied regex can backtrack catastrophically;
+a superseded query aborts its git process through the request's own cancellation, not through a
+separate cancel call.
 
 A separate, explicitly-labelled **file-content search** (`git log -S`/`-G` pickaxe) is v2 —
 it is a different mental model and does not belong behind the same box.
@@ -2151,7 +2190,7 @@ Phases are sequential; each ends at a checkpoint.
 | **P8** | Remote ops | Fetch (incl. **opt-in background auto-fetch, default off**), push, decomposed pull with strategy selection, force-push with lease + `--force-if-includes`, protected branches, askpass path, progress + typed auth errors. | Met: integration tests against a local bare remote (and, for the auth/timing scenarios, a real `git http-backend` HTTP fixture) cover non-fast-forward rejection, a true lease violation, a `--force-if-includes` violation on a fetched-but-not-integrated remote move, hook rejection with the hook's own stderr preserved onto the result, two independent no-hang paths (a declined credential prompt and the broker's own timeout firing), cancelling a fetch mid-transfer with no orphaned `git` process and refs left consistent, a refused cancel mid-push, all three protected-branch outcomes (typed-confirmation match, mismatch, and plain push left ungated), the auto-fetch scheduler's focused/hidden/busy-skip/disable-after-failure guardrails, all three pull strategies incl. ff-only's diverged refusal, and `--prune-tags` off by default. No operation can hang on a prompt. Full checklist in `docs/plans/P8.md`'s own Findings. |
 | **P9** | Stash | **Done.** Stash create (incl. `-u`, message, pathspec), list, show, apply/pop/drop/branch, stashes rendered in the graph and selectable like a commit (`StashDetailPane.vue`), and the pop-prediction engine via `merge-tree --merge-base=<stash^>` (§7.6) wired into checkout resolution (`stashAndCarry`) and pull's own stash-and-carry route. | Met — `tests/integration/stashLifecycle.test.ts` (W18): clean and conflicting predictions agree with the real executed pop, the `--merge-base` regression is pinned directly, the untracked-collision and local-changes-overwritten blockers are both proven forceable with their documented (non-atomic vs. atomic) outcomes, and `stash branch`'s own non-atomicity is reproduced faithfully. `tests/integration/stashUndo.test.ts` (W19): a dropped stash is recoverable through the undo slot, landing at `stash@{0}` with its original reflog message; a pruned recovery object is refused cleanly; the slot is cleared by the very next op; the byte-identical-shas edge case is pinned as a known, documented limitation rather than silently fixed or ignored. |
 | **P10** | Reset | **Done.** Reset (soft/mixed/hard) and single-commit cherry-pick, both through `op.run`, both gated mid-operation, both undoable. Reset's undo replay is mode-matched (D61) and its typed confirmation is scoped to what `--hard` actually destroys (D62). Cherry-pick reuses P6's sequencer reader, banner and `OpResult` wholesale, adding only `--skip` (D65). | Met — W18's `resetLifecycle.test.ts` asserts repository state for all three modes against probe 1's matrix; `cherryPickLifecycle.test.ts` drives a conflicting pick through the same banner/continue/abort path `revertLifecycle.test.ts` proved for revert, plus skip from the empty state; undo restores per mode and refuses cleanly where `--keep` cannot proceed; both ops return `OperationInProgress` mid-merge with `MERGE_HEAD` intact. |
-| **P11** | Search | Input with case/whole-word/regex toggles, commit/refs(branches+tags)/both scope, hybrid client-side + git-backed matching, next/prev navigation, live regex validation, abort-on-supersede. | Semantics table fully covered by tests (each toggle × scope); ≤120 ms budget met; malformed regex never throws. |
+| **P11** | Search | **Done.** Input with case/whole-word/regex toggles, commit/refs(branches+tags)/both scope, hybrid client-side + git-backed matching, next/prev navigation, live regex validation, abort-on-supersede. The pattern never reaches git (D67): `git log` supplies the records — the panel's own walk plus `%b` (D70) — and one compiled `RegExp` in `core/search/` matches both halves, so the semantics table has a single implementation. The tail is a plain cancellable read, not a third walk session (D68), behind one new request key with no cancel of its own (D69); the toggles persist in the view state, the query does not (D71). | Met — `tests/unit/core/search/` covers the semantics table cell by cell (each toggle × scope, plus the sha-prefix floor, the punctuation-edge whole-word case `\b` gets wrong, and the invalid-pattern path that returns a message instead of throwing); `tests/integration/searchScan.test.ts` proves the six-field OR against real git, the body-only hits the loaded store structurally cannot produce, the prefix/ordering property the result merge depends on, a superseded scan killed with no orphaned process, and an exact match count under truncation; `graphUi.ts`'s gated `searchKeystrokeMs` holds the ≤120 ms budget across six query shapes (literal, case-sensitive, whole-word, regex, no-match, sha-prefix) on a fully-loaded 20,000-commit history — measured ~64–71 ms; `historyPipeline.ts` records (no budget; §5.1 scopes ≤120 ms to already-loaded rows only) the git-backed tail's own cost on 30,000 commits at ~285–325 ms end-to-end, ~20–30 ms to the first hit. |
 | **P12** | GitHub PR links | Branch → pull request resolution (§6.7): GitHub-remote detection from `origin`, the `GitHubAuth` port over VS Code's built-in GitHub authentication provider (D31), the REST lookup, the per-branch cache invalidated by the watcher, `branch.resolvePr` (§3.5), the `#123` badge on branch-picker rows and message-column ref badges opening the PR via `ExternalOpener` (D32), `kiraVersion.github.enabled`, and PR number/title matching added to §7.8's `Refs` scope. | A branch with a pull request shows its badge in both places, distinguishes open/merged/closed, and opens the PR URL externally; search finds that branch by PR number and title within the ≤120 ms budget with no per-keystroke network call; no GitHub remote, no matching PR, the setting off, or a declined session each produce no badge, no request and no repeat prompt, with the rest of the app unaffected; the session is requested on first use only, never at activation, verified by an activation-time assertion. |
 | **P13** | Ship | `.vsix` packaging without `vscode:prepublish`, `extensionKind`/no-browser manifest declarations (2.1.1), **`engines.vscode` floor confirmed (D7)**, **SCM title button and status bar item (6.5)**, the **`kiraVersion.*` command-palette audit** wiring a command for every mutating operation introduced across P6–P10 (6.5/6.6's "every action is palette-reachable", which no earlier row owns), marketplace + OpenVSX metadata, docs, settings surface, telemetry-free release checklist. | Installable `.vsix`; every mutating operation reachable from the palette; full Playwright suite green on macOS. |
 | **P14** | Worktree support | *Not designed yet — planned in full only when this phase's turn comes up, after P13.* Placeholder so the request is not lost: git worktree create/list/switch/remove (building on D12's existing linked-worktree detection from P6), and a user-configurable "prepare script" run after creating a worktree, with visible progress feedback while it runs (it can take a while). | *To be defined at design time.* |
@@ -2241,6 +2280,11 @@ deliberately deferred rather than left undecided.**
 | D64 | Cherry-pick's prediction always passes `--merge-base=<sha>^<mainline>`, with `HEAD` as the base and the commit as the other side | **Left to itself git picks `merge-base(HEAD, sha)`, against which a commit that undoes an earlier commit on its own branch reads as no change at all** — reporting a genuinely conflicting pick as clean (P10 probe 2). This is D56's stash rule in a second shape, and it is the exact inverse arrangement of revert's prediction (which passes `<sha>^<m>` as the *other* side): a revert applies the diff backwards, a pick forwards. |
 | D65 | Cherry-pick's pre-flight blockers are path-scoped, and `--skip` joins the banner | **Git tolerates unrelated unstaged modifications during a pick and refuses any staged change, any unstaged change overlapping the commit's own paths, and any untracked file at a path the commit adds** — three atomic refusals, all computable by set intersection (§7.5's D∩T). A blanket dirty-tree blocker would refuse what git allows. Separately, an *empty* pick leaves `CHERRY_PICK_HEAD` with zero unmerged paths, where Continue cannot succeed; the state is indistinguishable from a fully-resolved pick by state files alone, so the banner offers both Continue and Skip and names the choice rather than guessing. |
 | D66 | A cherry-pick's undo is `reset --keep <prev>`, and is withheld when no commit was created | **A pick is legal with unrelated dirt in the tree, so `reset --hard` would destroy work the operation never touched; `--keep` moves the pointer, resets only what the move changes, and refuses with exit 128 changing nothing when it cannot do that safely** — a refusal `undo.run` surfaces as an ordinary failed result. A `--no-commit` pick and a pick that ended in conflict both moved no ref, so no undo is offered for either: §7.12's "we never present an undo we cannot honour", read literally. |
+| D67 | How one user pattern matches six commit fields | **It never reaches git: `git log` supplies the records, one compiled `RegExp` in `core/search/` supplies the matching — for the already-loaded rows and the streamed tail alike.** §7.8's own `--grep=<p> --author=<p> --all-match?` does not compute what §7.8's prose describes: `--grep`/`--author`/`--committer` are **ANDed across categories** and `--all-match` governs only how multiple `--grep`s combine with each other (P11 probe 1). The union needs three spawns plus a fourth (`rev-parse --disambiguate`) for the sha prefix, which `--grep` cannot match at all — and would still leave two regex dialects to keep in step, with `\b` a GNU extension and `-P` a build-time capability no version comparison can answer. Measured, the argument is not even close: a `--grep` matching *nothing* costs ~700 ms on 100k commits, a full scan ~860 ms, and three spawns 2.7× one scan, because git inflates every commit either way. One matcher means one semantics table to test, which is §10's own exit criterion. |
+| D68 | Where the tail scan's process comes from | **`driver.read(logScanArgs(walk), { signal })` — a plain bounded-pool read. Not a third walk session, and not the paused `LogSession`'s pipe.** D38's reasoning for `reviewWalk` is specific to a walk that **pages, caches and packs chunks for the wire** and would otherwise destroy the panel's cache; a search walk pages nothing, caches nothing and packs nothing, so a `SearchWalk` would be an empty extension of `WalkLike`. Reusing the paused session's pipe is not merely inelegant: its argv is fixed at spawn, its splitter and `#pendingRecords` are mid-page state a reader cannot put back, and its `#loadedCount` — which drives the `--skip` fallback — would be silently wrong afterwards. A ~1 s burst read is exactly what the four-slot pool exists to throttle, and precisely unlike the permanently-paused session and `cat-file --batch`, which sit outside it. |
+| D69 | Search's request key, and its cancel | **`search.run`, and *no* cancel key — the deliberate inverse of D51.** `remote.cancel` exists because cancelling a write is a decision with consequences: it can be refused (D50), its post-state must be read back, and the caller must learn which happened. A search is a read. `rpc.ts` already carries per-request cancellation from `bridge.request(k, p, signal)` to `{t:"cancel", id}` to the handler's `ctx.signal`, and `driver.read` already threads that to the spawn, which dies on SIGTERM in milliseconds leaving no orphan (probe 8). A `search.cancel` would be a second, weaker path to that, and could not even name *which* search it cancels. The result is a discriminated union (`ok` \| `invalidPattern`) so the handler cannot throw on a bad pattern either. |
+| D70 | Which rev set search covers | **The panel's own `WalkSpec` — same `graph.scope`, same stash inclusion, same `stashRowFilter`.** §5.1.1's "across the whole history regardless of what is loaded" is about paging, not scoping: a hit outside the walk's rev set could never be revealed, scrolled to or highlighted, and the reveal loop would page to exhaustion and fail. It also preserves the property the result merge depends on — two invocations of the same argv produce identical order (probe 11), so the loaded rows are a *prefix* of the scan's sequence and de-duplicated tail hits append without any sorting. |
+| D71 | Where the toggles persist, and what does not | **`PersistedViewState` (version 4), not `SETTINGS` — and never the query text.** D25's schema is *configuration*: it generates `contributes.configuration`, appears in VS Code's settings UI, and is for decisions made once. Three toggles flipped several times a minute are widget state, exactly like `dateFormat` and `fileListMode`, which live in `PersistedViewState` for the same reason; putting them in `SETTINGS` would mean a settings write per click of `Aa`. The query text is deliberately excluded: restoring a stale search on reveal is §6.8's own argument against a remembered comparison base, applied to a question about *now*. |
 
 ### 11.3 Behaviour and safety
 
