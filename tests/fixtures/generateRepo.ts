@@ -506,8 +506,18 @@ export interface WithRemoteOptions {
   localOnlyCommits?: number;
 }
 
+/** `withRemote()`'s return value, extending `GeneratedRepo` (whose `dir` is the *local* clone —
+ *  kept that way for every existing call site) with the bare remote's own directory, so a P8
+ *  test can simulate a concurrent push "from someone else" by cloning `remoteDir` a second time
+ *  and pushing to it directly, out from under the fixture's own local clone (the lease-violation
+ *  and non-ff-rejection scenarios in particular need this — neither the bare remote nor the seed
+ *  repo that first populated it was reachable from `GeneratedRepo` alone before P8/W14). */
+export interface GeneratedRepoWithRemote extends GeneratedRepo {
+  readonly remoteDir: string;
+}
+
 /** A local repo with a bare "remote" wired up, for fetch/push/non-ff/lease tests. */
-export function withRemote(opts: WithRemoteOptions = {}): GeneratedRepo {
+export function withRemote(opts: WithRemoteOptions = {}): GeneratedRepoWithRemote {
   const { remoteOnlyCommits = 0, localOnlyCommits = 1 } = opts;
 
   const remote = new Repo(tempRepoDir("remote-bare"));
@@ -543,6 +553,7 @@ export function withRemote(opts: WithRemoteOptions = {}): GeneratedRepo {
   local.git(["fetch", "--quiet", "origin"]);
   return {
     dir: local.dir,
+    remoteDir: remote.dir,
     commits,
     refs: { main: local.head(), "origin/main": local.refSha("origin/main") },
   };

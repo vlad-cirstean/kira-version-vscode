@@ -6,6 +6,8 @@ import { join } from "node:path";
 import type {
   CommitRecord,
   ProcessRunner,
+  RemoteOpKind,
+  RemoteOpRequest,
   SpawnedProcess,
   SpawnRequest,
 } from "../../packages/core/src/index.ts";
@@ -170,6 +172,56 @@ function revListAllCount(dir: string): number {
     encoding: "utf8",
   });
   return Number(out.trim());
+}
+
+/** Clones `remoteDir` into a throwaway directory, independent of the fixture's own local clone
+ *  under test, and pushes one extra commit — a stand-in for "someone else pushed while this
+ *  session wasn't looking." Used by the pull/lease/non-ff tests below, which need the remote to
+ *  move *after* `withRemote()` has already returned. */
+function pushExternalCommit(
+  remoteDir: string,
+  branch: string,
+  message: string,
+  file?: { readonly path: string; readonly content: string },
+): string {
+  const dir = mkdtempSync(join(tmpdir(), "kira-external-push-"));
+  const env = baseEnv(dir);
+  execFileSync("git", ["clone", "--quiet", remoteDir, dir], { env });
+  execFileSync("git", ["config", "user.name", "External Pusher"], { cwd: dir, env });
+  execFileSync("git", ["config", "user.email", "external@kira-version.test"], { cwd: dir, env });
+  const target = file ?? {
+    path: `external-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`,
+    content: `${message}\n`,
+  };
+  writeFileSync(join(dir, target.path), target.content);
+  execFileSync("git", ["add", target.path], { cwd: dir, env });
+  execFileSync("git", ["commit", "--quiet", "--no-gpg-sign", "-m", message], { cwd: dir, env });
+  execFileSync("git", ["push", "--quiet", "origin", `HEAD:${branch}`], { cwd: dir, env });
+  return execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, env, encoding: "utf8" }).trim();
+}
+
+let remoteOpIdCounter = 0;
+function nextOpId(): string {
+  return `test-op-${remoteOpIdCounter++}`;
+}
+
+/** Fills in every field `RemoteOpRequest` requires (none are optional keys — `exactOptionalPropertyTypes`
+ *  just permits `undefined` as a value) with a P8/W14-test-friendly default, so each test only
+ *  states the fields it actually cares about. */
+function remoteOpRequest(
+  overrides: Partial<RemoteOpRequest> & { kind: RemoteOpKind; remote: string },
+): RemoteOpRequest {
+  return {
+    branch: undefined,
+    setUpstream: false,
+    prune: true,
+    pruneTags: false,
+    strategy: undefined,
+    expectedRemoteTip: undefined,
+    plainForce: undefined,
+    confirmToken: undefined,
+    ...overrides,
+  };
 }
 
 describe("RepoService", () => {
@@ -2177,6 +2229,390 @@ describe("RepoService — ranged streamGraph/loadMore/status and endReview (P7 W
       const status = service.status(repoId);
       expect(status.loaded).toBeGreaterThan(0);
       expect(status.exhausted).toBe(true);
+    } finally {
+      service.dispose();
+    }
+  });
+});
+
+describe("RepoService — remote ops (W14)", () => {
+  test("fetch reports the moved ref and leaves the remote-tracking ref updated on disk", async () => {
+    const repo = withRemote({ localOnlyCommits: 0 });
+    const externalTip = pushExternalCommit(repo.remoteDir, "main", "external change");
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: defaultSettings(),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const result = await service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({ kind: "fetch", remote: "origin" }),
+      );
+      expect(result.ok).toBe(true);
+      // `RefUpdate.to` is whatever (abbreviated) sha git's own ref-update line prints — assert
+      // shape/ref-name/forced-ness here, and the actual resulting sha via a fresh read below.
+      expect(result.updates.some((u) => u.ref === "origin/main" && !u.forced)).toBe(true);
+
+      const onDisk = execFileSync("git", ["rev-parse", "origin/main"], {
+        cwd: repo.dir,
+        env: baseEnv(repo.dir),
+        encoding: "utf8",
+      }).trim();
+      expect(onDisk).toBe(externalTip);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("push from an ahead-only clone fast-forwards the remote and reports the update", async () => {
+    const repo = withRemote({ localOnlyCommits: 1 });
+    const localTip = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repo.dir,
+      env: baseEnv(repo.dir),
+      encoding: "utf8",
+    }).trim();
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: defaultSettings(),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const result = await service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({ kind: "push", remote: "origin", branch: "main" }),
+      );
+      expect(result.ok).toBe(true);
+      expect(result.updates.some((u) => u.ref === "main" && !u.forced)).toBe(true);
+
+      const remoteTip = execFileSync("git", ["--git-dir", repo.remoteDir, "rev-parse", "main"], {
+        env: baseEnv(repo.remoteDir),
+        encoding: "utf8",
+      }).trim();
+      expect(remoteTip).toBe(localTip);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("pull with the default (ff-only) strategy fast-forwards a behind-only clone", async () => {
+    const repo = withRemote({ remoteOnlyCommits: 1, localOnlyCommits: 0 });
+    const upstreamTip = execFileSync("git", ["rev-parse", "origin/main"], {
+      cwd: repo.dir,
+      env: baseEnv(repo.dir),
+      encoding: "utf8",
+    }).trim();
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: defaultSettings(),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const preflight = await service.preflightPull(repoId, "main");
+      expect(preflight.strategy).toBe("ff-only");
+
+      const result = await service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({ kind: "pull", remote: "origin", branch: "main" }),
+      );
+      expect(result.ok).toBe(true);
+
+      const headTip = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repo.dir,
+        env: baseEnv(repo.dir),
+        encoding: "utf8",
+      }).trim();
+      expect(headTip).toBe(upstreamTip);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("pull with the merge strategy against a genuinely conflicting change reports Conflict, not Unknown", async () => {
+    // The precise gap `errors.ts` documents: `git merge`'s own "CONFLICT (" text goes to
+    // stdout, never stderr, so `classifyGitError` (stderr-only) cannot see it — `#runPull` must
+    // instead trust the post-failure sequencer-state read (a live MERGE_HEAD) to override the
+    // reported kind to "Conflict" rather than leaving it misclassified as "Unknown".
+    const repo = withRemote({ localOnlyCommits: 0 });
+    const env = baseEnv(repo.dir);
+    pushExternalCommit(repo.remoteDir, "main", "external edit", {
+      path: "file.txt",
+      content: "external change\n",
+    });
+    writeFileSync(join(repo.dir, "file.txt"), "local change\n");
+    execFileSync("git", ["add", "file.txt"], { cwd: repo.dir, env });
+    execFileSync("git", ["commit", "--quiet", "--no-gpg-sign", "-m", "local edit"], {
+      cwd: repo.dir,
+      env,
+    });
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: defaultSettings(),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const result = await service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({
+          kind: "pull",
+          remote: "origin",
+          branch: "main",
+          strategy: "merge",
+        }),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.error?.kind).toBe("Conflict");
+      expect(result.inProgress?.kind).toBe("merge");
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("a second concurrent runRemoteOp on the same repo is rejected with OperationInProgress", async () => {
+    const repo = withRemote({ localOnlyCommits: 0 });
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: defaultSettings(),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const first = service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({ kind: "fetch", remote: "origin" }),
+      );
+      const second = service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({ kind: "fetch", remote: "origin" }),
+      );
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      expect(firstResult.ok).toBe(true);
+      expect(secondResult.ok).toBe(false);
+      expect(secondResult.error?.kind).toBe("OperationInProgress");
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("forcePush succeeds when expectedRemoteTip matches the freshly re-read remote tip", async () => {
+    const repo = withRemote({ localOnlyCommits: 1 });
+    const currentTip = execFileSync("git", ["rev-parse", "origin/main"], {
+      cwd: repo.dir,
+      env: baseEnv(repo.dir),
+      encoding: "utf8",
+    }).trim();
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: defaultSettings(),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const result = await service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({
+          kind: "forcePush",
+          remote: "origin",
+          branch: "main",
+          expectedRemoteTip: currentTip,
+          confirmToken: "main", // main matches the default protectedBranches pattern
+        }),
+      );
+      expect(result.ok).toBe(true);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("forcePush fails with LeaseViolation when the remote moved since expectedRemoteTip was captured, without ever spawning git", async () => {
+    const repo = withRemote({ localOnlyCommits: 1 });
+    // Move the remote after the (simulated) confirmation dialog would have captured its tip —
+    // D48's residual-hazard scenario (a background fetch silently satisfying git's own lease).
+    pushExternalCommit(repo.remoteDir, "main", "external change");
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: defaultSettings(),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const staleTip = "0".repeat(40);
+      const result = await service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({
+          kind: "forcePush",
+          remote: "origin",
+          branch: "main",
+          expectedRemoteTip: staleTip,
+          confirmToken: "main",
+        }),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.error?.kind).toBe("LeaseViolation");
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("forcePush and deleteRemoteBranch against a protected branch are refused without a matching confirmToken", async () => {
+    const repo = withRemote({ localOnlyCommits: 1 });
+    const currentTip = execFileSync("git", ["rev-parse", "origin/main"], {
+      cwd: repo.dir,
+      env: baseEnv(repo.dir),
+      encoding: "utf8",
+    }).trim();
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: defaultSettings(), // protectedBranches defaults to ["main", "master", "release/*"]
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const forcePushResult = await service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({
+          kind: "forcePush",
+          remote: "origin",
+          branch: "main",
+          expectedRemoteTip: currentTip,
+          // no confirmToken
+        }),
+      );
+      expect(forcePushResult.ok).toBe(false);
+      expect(forcePushResult.error?.kind).toBe("ProtectedBranch");
+
+      const deleteResult = await service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({ kind: "deleteRemoteBranch", remote: "origin", branch: "main" }),
+      );
+      expect(deleteResult.ok).toBe(false);
+      expect(deleteResult.error?.kind).toBe("ProtectedBranch");
+
+      // Nothing was actually spawned against the remote — main is untouched.
+      const stillThere = execFileSync("git", ["--git-dir", repo.remoteDir, "rev-parse", "main"], {
+        env: baseEnv(repo.remoteDir),
+        encoding: "utf8",
+      }).trim();
+      expect(stillThere).toBe(currentTip);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("deleteRemoteBranch succeeds against an unprotected branch", async () => {
+    const repo = withRemote({ localOnlyCommits: 0 });
+    const env = baseEnv(repo.dir);
+    execFileSync("git", ["branch", "feature/x", "main"], { cwd: repo.dir, env });
+    execFileSync("git", ["push", "--quiet", "origin", "feature/x"], { cwd: repo.dir, env });
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: defaultSettings(),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const result = await service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({
+          kind: "deleteRemoteBranch",
+          remote: "origin",
+          branch: "feature/x",
+        }),
+      );
+      expect(result.ok).toBe(true);
+
+      const branches = execFileSync(
+        "git",
+        ["--git-dir", repo.remoteDir, "branch", "--list", "feature/x"],
+        { env: baseEnv(repo.remoteDir), encoding: "utf8" },
+      ).trim();
+      expect(branches).toBe("");
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("cancelRemoteOp reports false when no remote op is running for the repo", async () => {
+    const repo = withRemote({ localOnlyCommits: 0 });
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: defaultSettings(),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      expect(service.cancelRemoteOp(opened.repoId)).toBe(false);
     } finally {
       service.dispose();
     }
