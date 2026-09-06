@@ -522,8 +522,14 @@ onMounted(() => {
   void bootstrap();
 });
 
+// `docs/plans/P11.md` W7: the four search fields below are carried through unchanged by every
+// write this file makes (the `watch` callback spreads `...lastPersisted`, and a successful
+// `viewState.read()` at boot replaces this whole literal with the persisted one) — `App.vue`'s
+// own reactive wiring to `SearchState` is W14's, not W7's; until then these four simply hold
+// their default/persisted value across every other field's write, exactly like `fileListMode`
+// did between P5 W11 (when it was added here) and P5 W12 (when `DetailPane` started driving it).
 let lastPersisted: PersistedViewState = {
-  version: 3,
+  version: 4,
   repoId: null,
   loadedRows: 0,
   detailOpen: true,
@@ -533,6 +539,10 @@ let lastPersisted: PersistedViewState = {
   dateFormat: "relative",
   detailWidth: DEFAULT_DETAIL_WIDTH,
   fileListMode: "tree",
+  searchCaseSensitive: false,
+  searchWholeWord: false,
+  searchRegex: false,
+  searchScope: "both",
 };
 
 async function bootstrap(): Promise<void> {
