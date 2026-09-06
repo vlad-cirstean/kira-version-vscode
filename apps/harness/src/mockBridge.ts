@@ -23,6 +23,8 @@ import type {
   OpResult,
   RefKind,
   RefRow,
+  RemoteOpParams,
+  RemoteOpResult,
   RequestHandler,
   RevertParentChoice,
   RevertPreflight,
@@ -841,6 +843,17 @@ export interface RecordedUndo {
   readonly result: OpResult;
 }
 
+/** One `remote.run` call as the mock recorded it — `RecordedOp`'s own P8 analogue (`docs/plans/P8.md`
+ *  W21). Kept distinct from `RecordedOp` rather than folded into it, mirroring `OpsState`'s own
+ *  `#runRemote`/`#runSimple` split (D51): a `RemoteOpParams` is not an `OpRequest`, and a
+ *  `RemoteOpResult` carries no `undo` field. `remoteOps.spec.ts` asserts on this the same way
+ *  `refOps.spec.ts` asserts on `lastOp` — the wire-level request the toolbar/dialogs actually
+ *  built (which strategy, which `confirmToken`, `plainForce`) alongside what the mock decided. */
+export interface RecordedRemoteOp {
+  readonly request: RemoteOpParams;
+  readonly result: RemoteOpResult;
+}
+
 /** One `review.open` call as the mock recorded it — `docs/plans/P7.md` W16's "both entry points
  *  open the review on the right branch" needs something to assert against even though the
  *  harness serves one view per page load and so cannot literally reveal a second one
@@ -864,6 +877,8 @@ interface MockHandlers {
   getLastOp(): RecordedOp | undefined;
   /** P6 W19's own hook — see `RecordedUndo`'s doc comment. */
   getLastUndo(): RecordedUndo | undefined;
+  /** P8 W21's own hook — see `RecordedRemoteOp`'s doc comment. */
+  getLastRemoteOp(): RecordedRemoteOp | undefined;
   /** P7 W15/W16's own hook — see `RecordedReviewOpen`'s doc comment. */
   getLastReviewOpen(): RecordedReviewOpen | undefined;
   /** `docs/plans/P7.md` W16's "a collapsed-then-re-expanded row does not re-request" — `sha`'s
@@ -891,6 +906,7 @@ function createHandlers(
   let lastEditorAction: HarnessEditorAction | undefined;
   let lastOp: RecordedOp | undefined;
   let lastUndo: RecordedUndo | undefined;
+  let lastRemoteOp: RecordedRemoteOp | undefined;
   let lastReviewOpen: RecordedReviewOpen | undefined;
   const commitDetailCallCounts = new Map<string, number>();
 
@@ -1522,13 +1538,15 @@ function createHandlers(
     const session = requireSession(sessions, repoId);
     const outcome = applyRemoteOp(session, request);
     if (outcome.ok && outcome.updates.length > 0) notifyChanged(repoId, "refsChanged");
-    return {
+    const result: RemoteOpResult = {
       ok: outcome.ok,
       error: outcome.error,
       updates: outcome.updates,
       head: session.head,
       inProgress: session.inProgress,
     };
+    lastRemoteOp = { request: { repoId, ...request }, result };
+    return result;
   };
 
   // Every mock remote op above completes synchronously within the same request/response —
@@ -1576,6 +1594,7 @@ function createHandlers(
     getLastEditorAction: () => lastEditorAction,
     getLastOp: () => lastOp,
     getLastUndo: () => lastUndo,
+    getLastRemoteOp: () => lastRemoteOp,
     getLastReviewOpen: () => lastReviewOpen,
     getCommitDetailCallCount: (sha) => commitDetailCallCounts.get(sha) ?? 0,
     resolveOneConflictedPath,
@@ -1603,6 +1622,9 @@ export interface MockBridge extends Transport {
   /** P6 W19: the most recent `undo.run` call the mock recorded — `main.ts` exposes this as
    *  `window.__kiraHarness.lastUndo`. */
   getLastUndo(): RecordedUndo | undefined;
+  /** P8 W21: the most recent `remote.run` call the mock recorded — `main.ts` exposes this as
+   *  `window.__kiraHarness.lastRemoteOp`. See `RecordedRemoteOp`'s own doc comment. */
+  getLastRemoteOp(): RecordedRemoteOp | undefined;
   /** P7 W15/W16: the most recent `review.open` call the mock recorded — `main.ts` exposes this
    *  as `window.__kiraHarness.lastReviewOpen`. See `RecordedReviewOpen`'s own doc comment. */
   getLastReviewOpen(): RecordedReviewOpen | undefined;
@@ -1632,6 +1654,7 @@ export function createMockBridge(scenarioName: string): MockBridge {
     getLastEditorAction,
     getLastOp,
     getLastUndo,
+    getLastRemoteOp,
     getLastReviewOpen,
     getCommitDetailCallCount,
     resolveOneConflictedPath,
@@ -1654,6 +1677,7 @@ export function createMockBridge(scenarioName: string): MockBridge {
     getLastEditorAction,
     getLastOp,
     getLastUndo,
+    getLastRemoteOp,
     getLastReviewOpen,
     getCommitDetailCallCount,
     resolveOneConflictedPath,

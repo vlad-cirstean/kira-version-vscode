@@ -73,6 +73,43 @@ interface HarnessOpResult {
   } | null;
 }
 
+/** Mirrors `@kira-version/ipc`'s own `RemoteOpParams` (`docs/plans/P8.md` W21) — same
+ *  reproduce-structurally convention as `HarnessOpRequest`/`HarnessOpResult` above, for the same
+ *  reason (`HarnessDocumentRef`'s own doc comment). `RemoteOpParams` is one flat interface, not a
+ *  discriminated union, so the whole shape is reproduced rather than only the variants a spec
+ *  touches. */
+interface HarnessRemoteOpParams {
+  readonly repoId: string;
+  readonly kind: "fetch" | "push" | "pull" | "forcePush" | "deleteRemoteBranch";
+  readonly remote: string;
+  readonly branch: string | undefined;
+  readonly setUpstream: boolean;
+  readonly prune: boolean;
+  readonly pruneTags: boolean;
+  readonly strategy: "ff-only" | "merge" | "rebase" | undefined;
+  readonly expectedRemoteTip: string | null | undefined;
+  readonly plainForce: boolean | undefined;
+  readonly confirmToken: string | undefined;
+}
+
+/** Mirrors `@kira-version/ipc`'s own `RemoteOpResult`. */
+interface HarnessRemoteOpResult {
+  readonly ok: boolean;
+  readonly error:
+    | {
+        readonly kind: string;
+        readonly message: string;
+        readonly remoteMessage: string | undefined;
+      }
+    | undefined;
+  readonly updates: readonly {
+    readonly ref: string;
+    readonly from: string | null;
+    readonly to: string | null;
+    readonly forced: boolean;
+  }[];
+}
+
 declare global {
   interface Window {
     __kiraHarness: {
@@ -91,6 +128,13 @@ declare global {
         | undefined;
       /** P6 W19: ditto, for `undo.run`. */
       readonly lastUndo: { readonly id: string; readonly result: HarnessOpResult } | undefined;
+      /** `docs/plans/P8.md` W21: declared once, project-wide, here — `remoteOps.spec.ts` reads
+       *  this without repeating the declaration, mirroring `lastOp`'s own convention for
+       *  `remote.run` instead of `op.run` — see `mockBridge.ts`'s own `RecordedRemoteOp` doc
+       *  comment. */
+      readonly lastRemoteOp:
+        | { readonly request: HarnessRemoteOpParams; readonly result: HarnessRemoteOpResult }
+        | undefined;
       /** P6 W19: `conflictBanner.spec.ts`'s own hook — see `mockBridge.ts`'s
        *  `MockHandlers.resolveOneConflictedPath` doc comment. */
       resolveOneConflictedPath(): boolean;

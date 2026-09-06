@@ -12,6 +12,7 @@ import { merge } from "./merge.ts";
 import { noCapabilities } from "./noCapabilities.ts";
 import { pagedBranch } from "./pagedBranch.ts";
 import { rebasing } from "./rebasing.ts";
+import { remoteOps, remoteOpsDiverged, remoteOpsPull } from "./remoteOps.ts";
 import { review } from "./review.ts";
 import { reviewAsk } from "./reviewAsk.ts";
 import { reviewMerged } from "./reviewMerged.ts";
@@ -44,6 +45,9 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
   reviewMerged,
   reviewMergeFromBase,
   reviewAsk,
+  remoteOps,
+  remoteOpsPull,
+  remoteOpsDiverged,
 };
 
 /** Loadable by exact name via `?scenario=<name>` but deliberately left out of `SCENARIOS` above

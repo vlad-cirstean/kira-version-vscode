@@ -42,40 +42,61 @@ export function unwrapVersioned<T>(envelope: VersionedEnvelope<T>): T {
 // assertContractShape — a per-key structural check on arrival.
 // ---------------------------------------------------------------------------------------
 
-/** The complete method-name lists, mirroring `Contract`'s keys. TypeScript's own exhaustiveness
- *  checking cannot reach across a wire, so these are the runtime half of the same guarantee —
- *  `contract.test.ts` fails if a key here and a key in `Contract` ever drift apart. */
-const REQUEST_KEYS: ReadonlySet<RequestKey> = new Set([
-  "app.init",
-  "repo.list",
-  "repo.pick",
-  "repo.open",
-  "repo.close",
-  "graph.status",
-  "graph.loadMore",
-  "graph.refresh",
-  "commit.detail",
-  "commit.fileDiff",
-  "editor.openDiff",
-  "editor.goToFile",
-  "clipboard.write",
-  "refs.list",
-  "status.get",
-  "preflight.checkout",
-  "preflight.revert",
-  "op.run",
-  "undo.peek",
-  "undo.run",
-  "editor.resolveConflict",
-  "review.resolveBase",
-  "review.open",
-]);
-const EVENT_KEYS: ReadonlySet<EventKey> = new Set([
-  "repo.changed",
-  "settings.changed",
-  "review.target",
-]);
-const STREAM_KEYS: ReadonlySet<StreamKey> = new Set(["graph.stream"]);
+/**
+ * The complete method-name lists, mirroring `Contract`'s keys. TypeScript's own exhaustiveness
+ * checking cannot reach across a wire, so these are the runtime half of the same guarantee — but
+ * a plain `Set<RequestKey>` literal is only checked for *extra* keys, not missing ones (adding a
+ * key to `Contract["requests"]` and forgetting it here compiles cleanly, and previously did:
+ * `docs/plans/P8.md` W21 found all four `remote.*` requests and `remote.progress` missing from
+ * these three sets, silently failing every `assertContractShape` call for them since W17 added
+ * them to `Contract` (`RpcError: ipc contract shape error … unknown request method`) with nothing
+ * short of an E2E test through the real codec ever exercising this path to catch it — `mockBridge`
+ * calls its handlers directly, `repoService`'s own integration tests never round-trip through
+ * `assertContractShape`). Built through a `Record<Key, true>` rather than an array literal so a
+ * *missing* key is a compile error too — TypeScript's mapped-type checker requires every key of
+ * `RequestKey`/`EventKey`/`StreamKey` to be present, which a bare array can never enforce.
+ */
+const REQUEST_KEY_MAP: Record<RequestKey, true> = {
+  "app.init": true,
+  "repo.list": true,
+  "repo.pick": true,
+  "repo.open": true,
+  "repo.close": true,
+  "graph.status": true,
+  "graph.loadMore": true,
+  "graph.refresh": true,
+  "commit.detail": true,
+  "commit.fileDiff": true,
+  "editor.openDiff": true,
+  "editor.goToFile": true,
+  "clipboard.write": true,
+  "refs.list": true,
+  "status.get": true,
+  "preflight.checkout": true,
+  "preflight.revert": true,
+  "op.run": true,
+  "undo.peek": true,
+  "undo.run": true,
+  "editor.resolveConflict": true,
+  "review.resolveBase": true,
+  "review.open": true,
+  "remote.pullPreflight": true,
+  "remote.pushPreflight": true,
+  "remote.run": true,
+  "remote.cancel": true,
+};
+const EVENT_KEY_MAP: Record<EventKey, true> = {
+  "repo.changed": true,
+  "settings.changed": true,
+  "review.target": true,
+  "remote.progress": true,
+};
+const STREAM_KEY_MAP: Record<StreamKey, true> = {
+  "graph.stream": true,
+};
+const REQUEST_KEYS: ReadonlySet<RequestKey> = new Set(Object.keys(REQUEST_KEY_MAP) as RequestKey[]);
+const EVENT_KEYS: ReadonlySet<EventKey> = new Set(Object.keys(EVENT_KEY_MAP) as EventKey[]);
+const STREAM_KEYS: ReadonlySet<StreamKey> = new Set(Object.keys(STREAM_KEY_MAP) as StreamKey[]);
 
 export type ContractChannel = "request" | "event" | "stream";
 
