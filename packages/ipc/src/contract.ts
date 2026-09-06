@@ -808,7 +808,11 @@ export type Contract = {
      *  that's already in flight, it does not enqueue a second). */
     "remote.cancel": {
       params: { repoId: string };
-      result: Record<string, never>;
+      /** false when there was nothing to cancel (already finished, never running, or the op is
+       *  past its killable phase — push/forcePush/deleteRemoteBranch/pull's merge-rebase phase,
+       *  D50) — never an error: a cancel racing a just-finished op is an ordinary outcome, not a
+       *  fault. */
+      result: { readonly cancelled: boolean };
     };
   };
   events: {
