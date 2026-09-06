@@ -124,6 +124,42 @@ describe("resolveReviewBase — every §6.8 resolution rule, against a real repo
     }
   });
 
+  test("a 'gone' upstream (pruned after the fact) falls through exactly like an absent one (V6)", async () => {
+    const repo = withRemote();
+    gitCommit(repo.dir, ["checkout", "--quiet", "-b", "develop"]);
+    writeFileSync(join(repo.dir, "develop.txt"), "develop\n");
+    git(repo.dir, ["add", "develop.txt"]);
+    gitCommit(repo.dir, ["commit", "--quiet", "--no-gpg-sign", "-m", "develop commit"]);
+    git(repo.dir, ["push", "--quiet", "origin", "develop"]);
+    git(repo.dir, ["fetch", "--quiet", "origin"]);
+    gitCommit(repo.dir, ["checkout", "--quiet", "-b", "topic", "main"]);
+    git(repo.dir, ["branch", "--set-upstream-to=origin/develop", "topic"]);
+    // Delete `develop` on the remote, then prune: `topic`'s own `branch.topic.merge`/`.remote`
+    // config (what `%(upstream)` reads) survives this untouched — only the remote-tracking ref
+    // itself disappears, the exact real-git shape of `git branch -vv`'s own "[origin/develop:
+    // gone]" — confirmed by asserting `%(upstream:track)` below before trusting the resolution.
+    git(repo.dir, ["push", "--quiet", "origin", "--delete", "develop"]);
+    git(repo.dir, ["fetch", "--quiet", "--prune", "origin"]);
+    const track = git(repo.dir, [
+      "for-each-ref",
+      "--format=%(upstream:track)",
+      "refs/heads/topic",
+    ]).trim();
+    expect(track).toBe("[gone]");
+
+    const { service, repoId } = await openService(
+      repo.dir,
+      settingsWithCandidates(["main", "master"]),
+    );
+    try {
+      const resolution = await service.resolveReviewBase(repoId, "topic");
+      expect(resolution.reason).toBe("defaultBranch");
+      expect(resolution.base).toBe("origin/main");
+    } finally {
+      service.dispose();
+    }
+  });
+
   test("a branch tracking a LOCAL branch (not a remote) is honoured by rule 1", async () => {
     const repo = branchy({ mergeBack: false });
     gitCommit(repo.dir, ["checkout", "--quiet", "-b", "topic", "main"]);
