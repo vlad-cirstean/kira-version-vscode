@@ -459,6 +459,7 @@ describe("ipc wire conformance", () => {
       prune: true,
       pruneTags: false,
       strategy: undefined,
+      expectedRemoteTip: null,
       confirmToken: undefined,
     };
     const wire: Omit<WireRemoteOpParams, "repoId"> = request;

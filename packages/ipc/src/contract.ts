@@ -389,6 +389,15 @@ export interface RemoteOpParams {
   readonly prune: boolean;
   readonly pruneTags: boolean;
   readonly strategy: PullStrategy | undefined;
+  /** `forcePush` only: the PushPreflight.remoteTip value the confirmation dialog showed the
+   *  user, or null when the dialog showed "nothing to overwrite". The server re-reads the
+   *  remote-tracking ref immediately before spawning and compares against this value, failing
+   *  with LeaseViolation on a mismatch even when git's own bare --force-with-lease
+   *  --force-if-includes would not itself object (D48's residual-hazard mitigation: a
+   *  background auto-fetch can silently satisfy git's own lease between dialog-open and spawn,
+   *  without the user — still looking at the dialog's now-stale remoteTip — ever finding out).
+   *  undefined for every other kind. */
+  readonly expectedRemoteTip: string | null | undefined;
   readonly confirmToken: string | undefined;
 }
 

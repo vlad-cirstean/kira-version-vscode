@@ -54,6 +54,16 @@ export interface RemoteOpRequest {
   /** `pull` only: an explicit override of `resolvePullStrategy`'s ladder for this one
    *  invocation (`PullStrategySource`'s `"explicit"`). `undefined` lets the ladder decide. */
   readonly strategy: PullStrategy | undefined;
+  /** `forcePush` only: the `PushPreflight.remoteTip` the confirmation dialog showed the user,
+   *  `null` when the dialog showed "nothing to overwrite". `RepoService.runRemoteOp` (W14)
+   *  re-reads the remote-tracking ref immediately before spawning and compares — a mismatch
+   *  fails with `LeaseViolation` before any push happens, even when git's own bare
+   *  `--force-with-lease --force-if-includes` would not itself object (D48's residual-hazard
+   *  mitigation: a background auto-fetch can silently satisfy git's own lease between dialog-open
+   *  and spawn by updating the remote-tracking ref to the very value that collided, without the
+   *  user — still looking at the dialog's now-stale `remoteTip` — ever finding out). `undefined`
+   *  for every other kind. */
+  readonly expectedRemoteTip: string | null | undefined;
   /** `forcePush`/`deleteRemoteBranch` against a protected branch only: the typed branch name,
    *  checked server-side against `kiraVersion.protectedBranches` (D52) — never trusted from the
    *  UI alone. `undefined` for every other kind, and for an unprotected branch. */
