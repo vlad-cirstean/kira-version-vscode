@@ -23,8 +23,11 @@ const LOADED_HIT_LIMIT = 500;
  *  twice, so this request omits `limit` entirely. */
 const TAIL_DEBOUNCE_MS = 200;
 /** Hard part 6 / §7.8: below this, a query matches most of a repository, and spawning a ~1 s walk
- *  on the very first keystroke of every search is the wrong trade. Two characters, not one. */
-const MIN_TAIL_QUERY_LENGTH = 2;
+ *  on the very first keystroke of every search is the wrong trade. Two characters, not one.
+ *  Exported so `SearchResults.vue`'s own "search message bodies" affordance can tell a too-short
+ *  query apart from `tailSkippedByExhaustion` below — offering the override makes no sense for a
+ *  query this short regardless of how much history is loaded. */
+export const MIN_TAIL_QUERY_LENGTH = 2;
 /** OQ1: once the whole history is loaded and it is this small, the *only* thing the tail scan
  *  still adds is a body-only match (hard part 1) — not worth a ~1 s walk on every keystroke.
  *  `runBodySearch()` is the on-demand escape hatch `SearchResults.vue`'s "search message bodies"
@@ -174,6 +177,17 @@ export class SearchState {
    *  `CommitGrid.vue`'s own watcher on this re-renders the message column's highlight, mirroring
    *  its existing `graphView.generation` watcher exactly. */
   readonly searchGeneration: ShallowRef<number> = shallowRef(0);
+  /** OQ1's own skip condition, exposed in isolation (rather than only inside `#shouldRunTail`,
+   *  private below) so `SearchResults.vue`'s "search message bodies" affordance (W12) can tell
+   *  *why* the tail did not run — only this reason is worth offering an on-demand override for; a
+   *  too-short query or `scope: "refs"` are not, and the affordance's own visibility condition
+   *  checks those separately with `MIN_TAIL_QUERY_LENGTH` above. */
+  readonly tailSkippedByExhaustion: ComputedRef<boolean>;
+  /** `SearchResults.vue`'s own "searched N of M loaded commits" footer (W12) needs the store's
+   *  total loaded row count, which `LoadedScanResult` itself does not carry (only how far the
+   *  scan actually reached) — a thin proxy onto `#graph.loadedRows` so that component needs no
+   *  second `GraphViewState` prop of its own. */
+  readonly loadedRowCount: ComputedRef<number>;
 
   readonly #bridge: BridgeClient;
   readonly #refs: RefsState;
@@ -248,6 +262,10 @@ export class SearchState {
       return { n, exact: loadedExact && tailExact };
     });
     this.activeHit = computed(() => this.commitHits.value[this.activeIndex.value]);
+    this.tailSkippedByExhaustion = computed(
+      () => this.#graph.exhausted.value && this.#graph.store.rowCount <= SKIP_TAIL_MAX_ROWS,
+    );
+    this.loadedRowCount = computed(() => this.#graph.loadedRows.value);
 
     this.#unsubscribeRefsChanged = bridge.on("repo.changed", (event) => {
       if (this.#repoId !== event.repoId || event.kind !== "refsChanged") return;
@@ -318,9 +336,7 @@ export class SearchState {
   #shouldRunTail(compiled: Extract<CompiledQuery, { kind: "ok" }>): boolean {
     if (this.scope.value === "refs") return false;
     if (this.text.value.length < MIN_TAIL_QUERY_LENGTH) return false;
-    if (this.#graph.exhausted.value && this.#graph.store.rowCount <= SKIP_TAIL_MAX_ROWS) {
-      return false;
-    }
+    if (this.tailSkippedByExhaustion.value) return false;
     void compiled;
     return true;
   }
