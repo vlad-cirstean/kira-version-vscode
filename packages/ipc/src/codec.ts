@@ -7,7 +7,17 @@
  * second encoding exists (P15's W1 finding: a bare `ArrayBuffer` arrives as `{}`), but this file
  * has no opinion about which host wants which — that is `rpc.ts`'s `MessageChannelLike.
  * bufferEncoding` field, set once per transport.
+ *
+ * P16 W6 composes a second, orthogonal seam on top: `encodeStreamPayload`/`decodeStreamPayload`
+ * below turn one stream's chunk (today, only `"graph.stream"`'s `PackedCommitChunk`) into a
+ * single `ArrayBuffer` before it ever reaches the traversal above. That `ArrayBuffer` is not a
+ * new shape this file has to learn — it is carried by the same `$buf`-tagged base64 path (D36)
+ * that already knows how to carry any `ArrayBuffer`, which is the whole point of layering rather
+ * than replacing.
  */
+import type { PackedCommitChunk, StreamKey } from "./contract.ts";
+import { fromWire as graphChunkFromWire, toWire as graphChunkToWire } from "./graphChunkCodec.ts";
+
 export type BufferEncoding = "native" | "base64";
 
 /** The VS Code webview transport's declared encoding, shared by both bundles that must agree on
@@ -215,4 +225,77 @@ export function dedupeTransferList(transfer: readonly ArrayBuffer[]): readonly A
     seen.add(buffer);
   }
   return transfer;
+}
+
+// ---------------------------------------------------------------------------------------
+// P16 W6 — the FlatBuffers seam. Keyed on StreamKey, not on the payload's shape: today only
+// "graph.stream" carries a schema this way, and the never-defaulted switch below means the next
+// stream key added to the contract is a compile error here, not a silent pass-through.
+// ---------------------------------------------------------------------------------------
+
+/** A stream chunk that has been reduced to a single tagged `ArrayBuffer` by a schema-specific
+ *  `toWire`. `$fb` names *which* schema (and, after the slash, which version of this dispatch's
+ *  own wrapping — not the FlatBuffers schema's own append-only evolution, which needs no such
+ *  tag per D46) produced `d`, so `decodeStreamPayload` can fail loudly on a label it does not
+ *  recognise instead of misreading someone else's bytes. */
+interface FlatBufferStreamPayload {
+  readonly $fb: string;
+  readonly d: ArrayBuffer;
+}
+
+function isFlatBufferStreamPayload(value: unknown): value is FlatBufferStreamPayload {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    typeof (value as { $fb?: unknown }).$fb === "string"
+  );
+}
+
+/** Wraps one stream's chunk for the wire. `method` selects the schema-specific `toWire`; every
+ *  `StreamKey` the contract declares must appear here (the `never` default is the compile-time
+ *  guard — the next stream key added to `Contract["streams"]` and not handled below fails `tsc`
+ *  here, not at runtime). */
+export function encodeStreamPayload(method: StreamKey, chunk: unknown): unknown {
+  switch (method) {
+    case "graph.stream": {
+      const payload: FlatBufferStreamPayload = {
+        $fb: "graphChunk/1",
+        d: graphChunkToWire(chunk as PackedCommitChunk),
+      };
+      return payload;
+    }
+    default: {
+      const exhaustive: never = method;
+      throw new Error(
+        `codec.encodeStreamPayload: unhandled stream key ${JSON.stringify(exhaustive)}`,
+      );
+    }
+  }
+}
+
+/** Reverses `encodeStreamPayload`. Throws if `payload` is not a recognised `$fb`-tagged wrapper —
+ *  a webview built against a stale contract must fail loudly (D46/W8's `CONTRACT_VERSION` bump),
+ *  not render an empty graph. */
+export function decodeStreamPayload(method: StreamKey, payload: unknown): unknown {
+  switch (method) {
+    case "graph.stream": {
+      if (!isFlatBufferStreamPayload(payload)) {
+        throw new Error(
+          "codec.decodeStreamPayload: 'graph.stream' chunk is missing its '$fb' FlatBuffers tag",
+        );
+      }
+      if (payload.$fb !== "graphChunk/1") {
+        throw new Error(
+          `codec.decodeStreamPayload: unrecognised '$fb' tag '${payload.$fb}' for 'graph.stream'`,
+        );
+      }
+      return graphChunkFromWire(payload.d);
+    }
+    default: {
+      const exhaustive: never = method;
+      throw new Error(
+        `codec.decodeStreamPayload: unhandled stream key ${JSON.stringify(exhaustive)}`,
+      );
+    }
+  }
 }
