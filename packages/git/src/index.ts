@@ -1,3 +1,10 @@
+export type { AskpassBrokerOptions, AskpassSession } from "./askpass.ts";
+export {
+  AskpassBroker,
+  DEFAULT_ASKPASS_TIMEOUT_MS,
+  deriveMasked,
+  shouldInterposeAskpass,
+} from "./askpass.ts";
 export type { GitCapabilities, RepoCapabilities } from "./capabilities.ts";
 export { CapabilitiesCache, capabilitiesForVersion } from "./capabilities.ts";
 export type { CatFileResult, CatFileSessionOptions } from "./catFile.ts";
