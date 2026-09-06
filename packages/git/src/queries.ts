@@ -33,7 +33,7 @@ import {
 import { logArgs, parseLogRecord, revSetArgs, showMetadataArgs } from "./parse/log.ts";
 import { mergeTreeArgs, parseMergeTreeOutput } from "./parse/mergeTree.ts";
 import { parseRefRecord, REFS_RECORD_DELIMITER, refsArgs } from "./parse/refs.ts";
-import { parseStashRecord, stashListArgs } from "./parse/stash.ts";
+import { parseStashList, stashListArgs } from "./parse/stash.ts";
 import { parseStatus, statusArgs } from "./parse/status.ts";
 
 const decoder = new TextDecoder("utf-8", { fatal: false });
@@ -169,12 +169,15 @@ export async function refsSnapshot(driver: GitDriver): Promise<RefsSnapshot> {
   };
 }
 
+/** §7.6/§4.4: one spawn for the whole stack, per-entry tracked file counts included (P9 probe
+ *  12) — `parseStashList` un-interleaves the header/numstat framing itself, so nothing is
+ *  filtered here beyond a genuinely empty trailing record. */
 export async function stashList(driver: GitDriver): Promise<StashEntry[]> {
   const read = driver.read(stashListArgs());
   const records: Uint8Array[] = [];
   for await (const record of read.records(0x00)) records.push(record);
   await read.done;
-  return records.filter((r) => r.length > 0).map(parseStashRecord);
+  return parseStashList(records);
 }
 
 /** Shared by `countCommits` and `countRange` (P7 W2) — `rev-list --count`'s only possible

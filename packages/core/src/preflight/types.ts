@@ -53,10 +53,14 @@ export interface RevertParentChoice {
   readonly subject: string;
 }
 
-export type RevertPrediction =
+/** One `merge-tree` outcome. Named for what it *is* now that two phases produce it — P6's revert
+ *  prediction and P9's stash-pop prediction are the same three-armed shape from the same call.
+ *  `RevertPrediction` stays as an alias so P6's imports are untouched (OQ11). */
+export type MergeOutcomePrediction =
   | { readonly kind: "clean" }
   | { readonly kind: "conflicts"; readonly paths: readonly string[] }
   | { readonly kind: "unknown"; readonly reason: string };
+export type RevertPrediction = MergeOutcomePrediction;
 
 export interface RevertPreflight {
   readonly shas: readonly string[];
@@ -125,4 +129,41 @@ export interface TagCreatePreflight {
   readonly existingIsAnnotated: boolean;
   readonly requiresAnnotationToPreserve: boolean;
   readonly verdict: "clean" | "invalidName" | "blockedByExisting" | "movesWithForce";
+}
+
+// ---------------------------------------------------------------------------------------
+// P9 — stash pop / stash branch pre-flight (§7.6). Both are wire-carried.
+// ---------------------------------------------------------------------------------------
+
+/** §7.6's two pre-flight blockers, same D∩T pattern as `CheckoutBlocker` — `untrackedCollision`
+ *  is non-atomic (probe 4: git restores the untracked files it *can*, then fails), while
+ *  `localChangesWouldBeOverwritten` is atomic (probe 5: git refuses before touching anything). */
+export type StashPopBlocker =
+  | { readonly kind: "untrackedCollision"; readonly paths: readonly string[] }
+  | { readonly kind: "localChangesWouldBeOverwritten"; readonly paths: readonly string[] }
+  | { readonly kind: "inProgressOperation"; readonly operation: InProgressOperation };
+
+export interface StashPopPreflight {
+  readonly stashSha: string;
+  readonly stashIndex: number;
+  readonly targetSha: string;
+  /** Always predicted with `--merge-base=<stash^>` (probe 2) — never omit this, see
+   *  `MergeOutcomePrediction`'s own callers in `repoService.ts`. */
+  readonly prediction: RevertPrediction;
+  readonly blockers: readonly StashPopBlocker[];
+  readonly verdict: "clean" | "willConflict" | "blocked";
+}
+
+/** `stash branch <name> <sha>` gets no pop prediction — checking out the stash's base then
+ *  applying it against that same base is clean by construction (§7.6) — but it is still
+ *  non-atomic on failure (OQ6: no auto-rollback), which is why this still has a `checkout`
+ *  pre-flight nested in it: the branch-creation half can be blocked exactly like any checkout. */
+export interface StashBranchPreflight {
+  readonly name: {
+    readonly valid: boolean;
+    readonly error: string | undefined;
+    readonly exists: boolean;
+  };
+  readonly checkout: CheckoutPreflight;
+  readonly verdict: "clean" | "invalidName" | "blocked";
 }

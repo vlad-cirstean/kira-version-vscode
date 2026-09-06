@@ -132,6 +132,7 @@ export type {
   CheckoutBlocker,
   CheckoutPreflight,
   DirtyPath,
+  MergeOutcomePrediction,
   PullBlocker,
   PullPreflight,
   PullRoute,
@@ -139,6 +140,9 @@ export type {
   RevertParentChoice,
   RevertPrediction,
   RevertPreflight,
+  StashBranchPreflight,
+  StashPopBlocker,
+  StashPopPreflight,
   TagCreatePreflight,
 } from "./preflight/types.ts";
 export type {
