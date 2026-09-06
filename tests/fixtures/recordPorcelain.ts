@@ -25,6 +25,7 @@ import {
   nameStatusArgs,
   numstatArgs,
   refsArgs,
+  SCAN_FORMAT,
   showMetadataArgs,
   stashListArgs,
   stashPushArgs,
@@ -568,6 +569,54 @@ function recordHandAuthored(): void {
   {
     const { dir } = linear(1);
     save("handAuthored/refsNoUpstream.bin", git(dir, refsArgs()));
+  }
+
+  // `docs/plans/P11.md` W3/W16: `SCAN_FORMAT`'s own eleventh field (`%b`), single-commit — the
+  // same `git show -s -z --format=…` shape `showMetadataArgs`'s own fixtures above use for
+  // `LOG_FORMAT`, just with the body appended. Real git output, not a hand-typed byte string, so
+  // the fixture can never silently drift from what `%b` actually emits (trailing newline and all).
+  const scanArgs = (sha: string): string[] => [
+    "show",
+    "-s",
+    "--decorate=full",
+    "-z",
+    `--format=${SCAN_FORMAT}`,
+    sha,
+  ];
+  {
+    // A real multi-line body — `%b`'s own trailing `\n` before the record's NUL is exactly what
+    // `parseScanRecord`'s one-time trim removes.
+    const dir = tempRepo("scan-multiline-body");
+    writeFileSync(join(dir, "a.txt"), "seed\n");
+    git(dir, ["add", "a.txt"]);
+    const tree = git(dir, ["write-tree"]).toString("utf8").trim();
+    const sha = commitTree(dir, ["-m", "scan subject\n\nfirst body line\nsecond body line", tree]);
+    save("handAuthored/scanMultilineBody-log.bin", git(dir, scanArgs(sha)));
+  }
+  {
+    // A literal 0x1f inside the body — `%b` is `SCAN_FORMAT`'s last field (`log.ts`'s own doc
+    // comment on why), so `splitLimitedFields`'s "final field absorbs extra delimiters" rule must
+    // keep every earlier field (sha, decoration, subject) intact.
+    const dir = tempRepo("scan-body-0x1f");
+    writeFileSync(join(dir, "a.txt"), "seed\n");
+    git(dir, ["add", "a.txt"]);
+    const tree = git(dir, ["write-tree"]).toString("utf8").trim();
+    const sha = commitTree(dir, [
+      "-m",
+      "scan subject\n\nbody with a literal \x1f byte inside it",
+      tree,
+    ]);
+    save("handAuthored/scanBodyWith0x1f-log.bin", git(dir, scanArgs(sha)));
+  }
+  {
+    // No body paragraph at all (a subject-only commit) — `%b` must parse to `""`, not `undefined`
+    // or a field shifted out of place.
+    const dir = tempRepo("scan-empty-body");
+    writeFileSync(join(dir, "a.txt"), "seed\n");
+    git(dir, ["add", "a.txt"]);
+    const tree = git(dir, ["write-tree"]).toString("utf8").trim();
+    const sha = commitTree(dir, ["-m", "scan subject only, no body", tree]);
+    save("handAuthored/scanEmptyBody-log.bin", git(dir, scanArgs(sha)));
   }
 }
 

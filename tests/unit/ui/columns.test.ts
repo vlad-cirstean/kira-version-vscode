@@ -1,8 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { CommitStore } from "../../../packages/core/src/store/commitStore.ts";
 import type { CommitRecord } from "../../../packages/core/src/model/commit.ts";
-import { DEFAULT_COLUMN_WIDTHS } from "../../../packages/ui/src/state/viewState.ts";
-import { GEOMETRY, graphColumnWidth } from "../../../packages/ui/src/graph/geometry.ts";
+import { CommitStore } from "../../../packages/core/src/store/commitStore.ts";
 import {
   AUTHOR_COLUMN_ID,
   buildColumns,
@@ -13,6 +11,8 @@ import {
   rowMetadata,
   SHA_COLUMN_ID,
 } from "../../../packages/ui/src/components/columns.ts";
+import { GEOMETRY, graphColumnWidth } from "../../../packages/ui/src/graph/geometry.ts";
+import { DEFAULT_COLUMN_WIDTHS } from "../../../packages/ui/src/state/viewState.ts";
 import { topology } from "../../fixtures/topology.ts";
 
 // buildColumns takes the graph formatter as a caller-supplied argument (W8: it is built once per

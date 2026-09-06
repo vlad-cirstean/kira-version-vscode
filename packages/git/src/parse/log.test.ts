@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { splitRecords } from "@kira-version/core";
-import { parseLogRecord } from "./log.ts";
+import { parseLogRecord, parseScanRecord } from "./log.ts";
 
 const FIXTURES = join(import.meta.dir, "../../../../tests/fixtures/porcelain/log");
 
@@ -117,5 +117,40 @@ describe("parseLogRecord — hand-authored pathological cases", () => {
       .map((d) => d.name)
       .sort();
     expect(remotes).toEqual(["fork/main", "origin/main", "upstream/main"]);
+  });
+});
+
+// `docs/plans/P11.md` W3/W16: `SCAN_FORMAT` is `LOG_FORMAT` plus one more field (`%b`), recorded
+// the same way — `git show -s -z --format=SCAN_FORMAT <sha>` over a real, hand-authored commit —
+// so these three cases are real git output, not a hand-typed byte string standing in for one.
+describe("parseScanRecord", () => {
+  const HAND_AUTHORED = join(import.meta.dir, "../../../../tests/fixtures/porcelain/handAuthored");
+
+  async function loadOneScan(name: string) {
+    const bytes = readFileSync(join(HAND_AUTHORED, `${name}.bin`));
+    const records = [];
+    for await (const record of splitRecords(toAsyncIterable(bytes))) records.push(record);
+    return records.map(parseScanRecord);
+  }
+
+  test("trims exactly the one trailing LF %b leaves before the record's NUL", async () => {
+    const [commit] = await loadOneScan("scanMultilineBody-log");
+    expect(commit?.subject).toBe("scan subject");
+    expect(commit?.body).toBe("first body line\nsecond body line");
+    expect(commit?.body.endsWith("\n")).toBe(false);
+  });
+
+  test("a literal 0x1f byte inside the body does not shift or corrupt any earlier field", async () => {
+    const [commit] = await loadOneScan("scanBodyWith0x1f-log");
+    expect(commit?.sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(commit?.subject).toBe("scan subject");
+    expect(commit?.body).toContain("body with a literal");
+    expect(commit?.body).toContain("byte inside it");
+  });
+
+  test("a commit with no body paragraph parses body to '', not undefined", async () => {
+    const [commit] = await loadOneScan("scanEmptyBody-log");
+    expect(commit?.subject).toBe("scan subject only, no body");
+    expect(commit?.body).toBe("");
   });
 });
