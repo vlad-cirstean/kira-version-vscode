@@ -471,6 +471,91 @@ export function withStash(opts: WithStashOptions = {}): GeneratedRepo {
   });
 }
 
+export interface WithStashesOptions {
+  /** Number of plain WIP stashes, each its own edit to `base.txt`. Default 1. Pushed first, so
+   *  they end up at the *bottom* of the stack — `includeUntracked`/`conflicting`'s own stashes,
+   *  pushed after, are the ones a test usually wants to name directly and land closer to
+   *  `stash@{0}`. */
+  count?: number;
+  /** Adds probe 3's untracked-collision shape: a stash pushed with `-u` carrying `new.txt`
+   *  (plus an unrelated tracked edit, so the stash is not untracked-only), immediately followed
+   *  by `new.txt` being recreated in the worktree with *different* content — the collision a pop
+   *  of this stash will hit, staged already so the test itself never has to set it up. Pushed
+   *  after the plain stashes. */
+  includeUntracked?: boolean;
+  /** Adds probe 2's merge-base-mandatory shape: on `main`, `a.txt` is committed as `ORIGINAL`
+   *  (this becomes the `side` branch's fork point), advanced to `MAIN-CHANGE`, then reverted back
+   *  to `ORIGINAL` and stashed — so the stash's *real* base is the `MAIN-CHANGE` commit, and its
+   *  diff against that base is a genuine revert. A divergent `side` branch is forked from the
+   *  `ORIGINAL` commit with its own conflicting `a.txt = SIDE-CHANGE`, and is left checked out
+   *  when the fixture returns (`refs.side`), so `merge-base(HEAD, stash)` naturally lands on
+   *  `ORIGINAL` — an ancestor of the stash's real base, and exactly the false-clean case
+   *  `--merge-base=<stash^>` exists to correct (docs/plans/P9.md Probe 2). Pushed last, so this
+   *  stash is always `stash@{0}`. */
+  conflicting?: boolean;
+}
+
+/** `docs/plans/P9.md` W16: a repo carrying some combination of a plain stash, probe 3's
+ *  untracked-collision setup, and probe 2's merge-base-mandatory conflicting setup, composed in
+ *  one fixture rather than three ad hoc ones — every shape W18/W19's integration tests need.
+ *  `withStashes({conflicting: true})`'s own "done when" (W16): the prediction *without*
+ *  `--merge-base` is clean and *with* it is a conflict — that property is this fixture's whole
+ *  reason to exist. */
+export function withStashes(opts: WithStashesOptions = {}): GeneratedRepo {
+  const count = opts.count ?? 1;
+  const includeUntracked = opts.includeUntracked ?? false;
+  const conflicting = opts.conflicting ?? false;
+  return cachedShape("withStashes", { count, includeUntracked, conflicting }, () => {
+    const repo = new Repo(tempRepoDir("with-stashes"));
+    repo.init("main");
+    const commits: string[] = [];
+
+    repo.writeFile("base.txt", "base\n");
+    repo.add("base.txt");
+    commits.push(repo.commit("initial commit"));
+
+    for (let i = 0; i < count; i++) {
+      repo.writeFile("base.txt", `plain change ${i}\n`);
+      repo.stashPush(`plain stash ${i}`);
+    }
+
+    if (includeUntracked) {
+      repo.writeFile("base.txt", "tracked edit alongside the untracked one\n");
+      repo.writeFile("new.txt", "original untracked content\n");
+      repo.stashPush("with untracked", { includeUntracked: true });
+      // Probe 3: the same path reappears in the worktree, with DIFFERENT content — the collision
+      // a pop of this stash will hit. Left in place; not stashed, not committed.
+      repo.writeFile("new.txt", "collision content\n");
+    }
+
+    const refs: Record<string, string> = { main: repo.head() };
+
+    if (conflicting) {
+      repo.writeFile("a.txt", "ORIGINAL\n");
+      repo.add("a.txt");
+      commits.push(repo.commit("a.txt: ORIGINAL"));
+      const originalSha = repo.head();
+
+      repo.writeFile("a.txt", "MAIN-CHANGE\n");
+      repo.add("a.txt");
+      commits.push(repo.commit("a.txt: MAIN-CHANGE"));
+
+      // The revert: back to ORIGINAL, then stashed — its real base is the MAIN-CHANGE commit.
+      repo.writeFile("a.txt", "ORIGINAL\n");
+      repo.stashPush("revert a.txt to ORIGINAL");
+      refs.main = repo.head();
+
+      repo.checkoutNew("side", originalSha);
+      repo.writeFile("a.txt", "SIDE-CHANGE\n");
+      repo.add("a.txt");
+      commits.push(repo.commit("a.txt: SIDE-CHANGE"));
+      refs.side = repo.head();
+    }
+
+    return { dir: repo.dir, commits, refs };
+  });
+}
+
 export interface ConflictingOptions {
   path?: string;
 }
