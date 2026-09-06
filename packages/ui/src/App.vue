@@ -21,6 +21,7 @@ import ConflictBanner from "./components/ConflictBanner.vue";
 import BranchDialog from "./components/dialogs/BranchDialog.vue";
 import CheckoutDialog from "./components/dialogs/CheckoutDialog.vue";
 import ForcePushDialog from "./components/dialogs/ForcePushDialog.vue";
+import PullDialog from "./components/dialogs/PullDialog.vue";
 import RenameRefDialog from "./components/dialogs/RenameRefDialog.vue";
 import RevertDialog from "./components/dialogs/RevertDialog.vue";
 import StashDialog from "./components/dialogs/StashDialog.vue";
@@ -980,6 +981,7 @@ onBeforeUnmount(() => {
         <CheckoutDialog :ops="opsState" />
         <RevertDialog :ops="opsState" />
         <ForcePushDialog :ops="opsState" />
+        <PullDialog :ops="opsState" />
         <StashDialog
           :ops="opsState"
           :create-open="stashCreateOpen"

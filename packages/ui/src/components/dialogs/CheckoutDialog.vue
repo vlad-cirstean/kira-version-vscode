@@ -4,6 +4,12 @@
  * hazard". `OpsState.runCheckout` only ever awaits this dialog for a `"blocked"` verdict (`clean`
  * and `cleanCarry` proceed with no prompt, §7.5 taken literally — see that method's own doc
  * comment) — so this file has nothing to render for either of those and never receives one.
+ *
+ * `docs/plans/P9.md`: a bare `blockedByTracked` (no untracked block alongside it) also offers
+ * `"stashAndCarry"` in `preflight.routes` — the "Stash changes and check out" button below,
+ * calling straight back into `resolveCheckoutDialog` exactly like Discard/Cancel do, since
+ * `runCheckout`'s own inline handling of that route (not a second dialog) is the rest of the
+ * confirm step.
  */
 import type { CheckoutPreflight } from "@kira-version/ipc";
 import { computed, ref } from "vue";
@@ -34,13 +40,18 @@ const trackedBlocker = computed(() =>
   preflight.value?.blockers.find((b) => b.kind === "blockedByTracked"),
 );
 const canDiscard = computed(() => preflight.value?.routes.includes("discard") ?? false);
+const canStashAndCarry = computed(() => preflight.value?.routes.includes("stashAndCarry") ?? false);
 
 function cancel(): void {
   props.ops.resolveCheckoutDialog(null);
 }
 
 function discard(): void {
-  props.ops.resolveCheckoutDialog({ discardLocalChanges: true });
+  props.ops.resolveCheckoutDialog({ kind: "discard" });
+}
+
+function stashAndCarry(): void {
+  props.ops.resolveCheckoutDialog({ kind: "stashAndCarry" });
 }
 </script>
 
@@ -83,12 +94,20 @@ function discard(): void {
           <li v-for="path in trackedBlocker.paths" :key="path"><code>{{ path }}</code></li>
         </ul>
         <p v-if="canDiscard" class="kv-modal-note">
-          Discard permanently deletes these changes — this cannot be undone. (A future version adds
-          stashing them instead.)
+          Discard permanently deletes these changes — this cannot be undone.
+          <template v-if="canStashAndCarry">Stashing them instead keeps them, safely.</template>
         </p>
       </template>
 
       <div class="kv-modal-actions">
+        <button
+          v-if="canStashAndCarry"
+          type="button"
+          class="kv-modal-button kv-modal-button--primary"
+          @click="stashAndCarry"
+        >
+          Stash changes and check out
+        </button>
         <button v-if="canDiscard" type="button" class="kv-modal-button kv-modal-button--danger" @click="discard">
           Discard changes and check out
         </button>

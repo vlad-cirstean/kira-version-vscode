@@ -93,12 +93,11 @@ export interface PullStrategyInfo {
   readonly source: PullStrategySource;
 }
 
-/** The route a confirmed `blockedByTracked` checkout takes — `discardLocalChanges: false` for
- *  every other verdict, since `runCheckout` only ever opens the dialog for `"blocked"` (§7.5:
- *  clean and cleanCarry proceed with no prompt). */
-export interface CheckoutRoute {
-  readonly discardLocalChanges: boolean;
-}
+/** The route a confirmed `blockedByTracked` checkout takes: discard the local changes and
+ *  proceed, or (P9, when `preflight.routes` lists it) push them to a stash first and pop them
+ *  back afterward — §7.5's `stashAndCarry`. `runCheckout` only ever opens the dialog for
+ *  `"blocked"` at all (§7.5: clean and cleanCarry proceed with no prompt). */
+export type CheckoutRoute = { readonly kind: "discard" } | { readonly kind: "stashAndCarry" };
 
 /** The route a confirmed revert takes: the chosen mainline (present only when the preflight's
  *  `mainlineRequired` was non-empty) and whether to stop short of committing. */
@@ -161,6 +160,11 @@ export class OpsState {
   /** Set the moment a strategy is known (preflight response, or an explicit override) and left
    *  in place after the pull finishes — see `PullStrategyInfo`'s own doc comment. */
   readonly pullStrategy: ShallowRef<PullStrategyInfo | undefined> = shallowRef(undefined);
+  /** P9/OQ10: `runPull`'s own confirm step for a `dirtyNonFastForward` blocker — mirrors
+   *  `pendingCheckout`'s shape one field simpler, since `PullPreflight.routes` only ever offers
+   *  `"stashAndCarry"` (its own doc comment): `resolvePullDialog`'s `boolean` says only whether
+   *  to take that one route, there being no second one (no pull analogue of "discard"). */
+  readonly pendingPull: ShallowRef<PullPreflight | undefined> = shallowRef(undefined);
 
   readonly #bridge: BridgeClient;
   readonly #refs: RefsState;
@@ -169,6 +173,7 @@ export class OpsState {
   #resolveRevert: ((route: RevertRoute | null) => void) | undefined;
   #resolveForcePush: ((route: ForcePushRoute | null) => void) | undefined;
   #resolveStashPop: ((proceed: boolean) => void) | undefined;
+  #resolvePull: ((proceed: boolean) => void) | undefined;
   readonly #unsubscribe: () => void;
   readonly #unsubscribeProgress: () => void;
 
@@ -254,7 +259,23 @@ export class OpsState {
           this.announcement.value = "Checkout cancelled.";
           return;
         }
-        discardLocalChanges = route.discardLocalChanges;
+        if (route.kind === "stashAndCarry") {
+          // §7.5's `stashAndCarry` route (P9) — `discardLocalChanges: false` for the checkout
+          // half below; the stash push `#stashAndCarry` runs first is what actually clears the
+          // tree. Handled inline (not via a public `runCheckoutStashAndCarry`) so it shares this
+          // call's own `busy` hold rather than needing a second one of its own.
+          await this.#stashAndCarry(
+            () =>
+              this.#bridge.request("op.run", {
+                repoId,
+                op: { kind: "checkout", target, mode, discardLocalChanges: false },
+              }),
+            "Checkout",
+            () => `Checked out ${target}${mode === "detach" ? " (detached)" : ""}`,
+          );
+          return;
+        }
+        discardLocalChanges = true;
       }
       const result = await this.#bridge.request("op.run", {
         repoId,
@@ -520,8 +541,9 @@ export class OpsState {
 
   /**
    * §7.5/§7.3's `stashAndCarry` route (OQ10: pull ships it in this same phase, W10) — shared
-   * between `runCheckoutStashAndCarry` and `runPullStashAndCarry` below, which differ only in
-   * `runMiddle` (the blocked operation itself) and its own success wording.
+   * between `runCheckout`'s and `runPull`'s own inline calls below (each confirms via its own
+   * dialog first, so there is no separate public `run*StashAndCarry` entry point), which differ
+   * only in `runMiddle` (the blocked operation itself) and its own success wording.
    *
    * **Push, then run, then pop only if predicted clean (OQ1).** The middle op ALWAYS runs once
    * the stash push succeeds — carrying the user's changes across is the entire point of the
@@ -605,63 +627,6 @@ export class OpsState {
       : popResult.ok
         ? announceMiddleOk()
         : composeOpFailureAnnouncement("Stash pop", popResult.error);
-  }
-
-  /** `CheckoutDialog.vue`'s `"stashAndCarry"` route (§7.5) — `discardLocalChanges: false` for the
-   *  checkout half; the stash push is what actually cleared the tree. */
-  async runCheckoutStashAndCarry(target: string, mode: "switch" | "detach"): Promise<void> {
-    const repoId = this.#repoId;
-    if (repoId === undefined || this.busy.value) return;
-    this.busy.value = true;
-    try {
-      await this.#stashAndCarry(
-        () =>
-          this.#bridge.request("op.run", {
-            repoId,
-            op: { kind: "checkout", target, mode, discardLocalChanges: false },
-          }),
-        "Checkout",
-        () => `Checked out ${target}${mode === "detach" ? " (detached)" : ""}`,
-      );
-    } finally {
-      this.busy.value = false;
-    }
-  }
-
-  /** The pull-strategy picker's `"stashAndCarry"` route (§7.3, OQ10/W10) — mirrors
-   *  `runCheckoutStashAndCarry` exactly except for which middle op it runs and how it announces
-   *  success; `strategy` is whatever `runPull`'s own resolution ladder already picked. */
-  async runPullStashAndCarry(
-    remote: string,
-    branch: string,
-    strategy: PullStrategy,
-  ): Promise<void> {
-    const repoId = this.#repoId;
-    if (repoId === undefined || this.busy.value) return;
-    this.busy.value = true;
-    this.pullStrategy.value = { strategy, source: "explicit" };
-    try {
-      await this.#stashAndCarry(
-        () =>
-          this.#bridge.request("remote.run", {
-            repoId,
-            kind: "pull",
-            remote,
-            branch,
-            setUpstream: false,
-            prune: false,
-            pruneTags: false,
-            strategy,
-            expectedRemoteTip: undefined,
-            plainForce: undefined,
-            confirmToken: undefined,
-          }),
-        "Pull",
-        () => `Pulled ${remote}/${branch} (${strategy})`,
-      );
-    } finally {
-      this.busy.value = false;
-    }
   }
 
   // -------------------------------------------------------------------------------------
@@ -805,30 +770,69 @@ export class OpsState {
 
   /**
    * §7.3: the resolved strategy and its provenance are shown before the operation runs, not
-   * after. When the caller has not already picked one (the pull-strategy picker's own override),
-   * `remote.pullPreflight` resolves it first and `pullStrategy` is set from that response before
-   * `remote.run` is ever called — so what the toolbar displays is exactly what is about to run,
-   * not a guess. `explicitStrategy` short-circuits the preflight round trip entirely: the user's
-   * own choice is authoritative (ladder step 1) and the source is "explicit" by construction.
+   * after — `remote.pullPreflight` always runs first (P9: its `blockers`/`routes` are the only
+   * way to learn about a dirty tree that would rewrite history, so this can no longer be
+   * short-circuited the way a bare strategy resolution once was) and `pullStrategy` is set from
+   * it before `remote.run` is ever called, so what the toolbar displays is exactly what is about
+   * to run, not a guess. `explicitStrategy` overrides the *strategy* the preflight resolved (the
+   * user's own choice is authoritative, ladder step 1, `source: "explicit"` by construction) but
+   * not the dirty-tree check: `blockers` is evaluated against the ladder's own default-resolved
+   * strategy regardless, since `remote.pullPreflight` has no way to ask "would this be blocked
+   * under strategy X instead" — a known imprecision (see `docs/plans/P9.md`'s own Findings) that
+   * only matters for the narrow case of an explicit override changing whether history would be
+   * rewritten at all.
+   *
+   * §7.3/§7.5's `stashAndCarry` route (OQ10/W10): a `dirtyNonFastForward` blocker opens
+   * `pendingPull` (`PullDialog.vue`'s own confirm step, mirroring `pendingCheckout`) — cancelling
+   * ends the pull with nothing run; confirming pushes a stash, runs the pull, and pops it back
+   * exactly like `runCheckout`'s own inline call above (`#stashAndCarry`'s shared shape).
    */
   async runPull(remote: string, branch: string, explicitStrategy?: PullStrategy): Promise<void> {
     const repoId = this.#repoId;
     if (repoId === undefined || this.busy.value) return;
-    let strategy: PullStrategy;
-    let source: PullStrategySource;
-    if (explicitStrategy !== undefined) {
-      strategy = explicitStrategy;
-      source = "explicit";
-    } else {
-      const preflight: PullPreflight = await this.#bridge.request("remote.pullPreflight", {
-        repoId,
-        branch,
-      });
-      if (this.#repoId !== repoId) return;
-      strategy = preflight.strategy;
-      source = preflight.source;
-    }
+    const preflight: PullPreflight = await this.#bridge.request("remote.pullPreflight", {
+      repoId,
+      branch,
+    });
+    if (this.#repoId !== repoId) return;
+    const strategy = explicitStrategy ?? preflight.strategy;
+    const source: PullStrategySource =
+      explicitStrategy !== undefined ? "explicit" : preflight.source;
     this.pullStrategy.value = { strategy, source };
+
+    if (preflight.blockers.length > 0) {
+      const proceed = await this.#confirmPull(preflight);
+      if (!proceed) {
+        this.announcement.value = "Pull cancelled.";
+        return;
+      }
+      if (this.busy.value) return; // another op started while the dialog was open
+      this.busy.value = true;
+      try {
+        await this.#stashAndCarry(
+          () =>
+            this.#bridge.request("remote.run", {
+              repoId,
+              kind: "pull",
+              remote,
+              branch,
+              setUpstream: false,
+              prune: false,
+              pruneTags: false,
+              strategy,
+              expectedRemoteTip: undefined,
+              plainForce: undefined,
+              confirmToken: undefined,
+            }),
+          "Pull",
+          () => `Pulled ${remote}/${branch} (${strategy})`,
+        );
+      } finally {
+        this.busy.value = false;
+      }
+      return;
+    }
+
     await this.#runRemote(
       {
         kind: "pull",
@@ -845,6 +849,21 @@ export class OpsState {
       (result) => (result.ok ? `Pulled ${remote}/${branch} (${strategy})` : undefined),
       "Pull",
     );
+  }
+
+  #confirmPull(preflight: PullPreflight): Promise<boolean> {
+    this.pendingPull.value = preflight;
+    return new Promise((resolve) => {
+      this.#resolvePull = resolve;
+    });
+  }
+
+  /** `PullDialog.vue`'s own Stash-and-pull/Cancel buttons call this — `false` for Cancel. */
+  resolvePullDialog(proceed: boolean): void {
+    this.pendingPull.value = undefined;
+    const resolve = this.#resolvePull;
+    this.#resolvePull = undefined;
+    resolve?.(proceed);
   }
 
   /** Plain push is never gated (D52) — no confirm step here, only the upstream question a
