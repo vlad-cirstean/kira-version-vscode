@@ -55,7 +55,8 @@ export {
   switchCreateTrackingArgs,
   switchDetachArgs,
 } from "./ops/checkout.ts";
-export { abortArgs, continueArgs, readInProgressStateFiles } from "./ops/conflict.ts";
+export { abortArgs, continueArgs, readInProgressStateFiles, skipArgs } from "./ops/conflict.ts";
+export { cherryPickArgs } from "./ops/cherryPick.ts";
 export { fetchArgs, parseRefUpdates } from "./ops/fetch.ts";
 export {
   ffOnlyWouldDiverge,
@@ -71,6 +72,7 @@ export {
   forcePushPlainArgs,
   pushArgs,
 } from "./ops/push.ts";
+export { resetArgs, resetKeepArgs } from "./ops/reset.ts";
 export { revertArgs } from "./ops/revert.ts";
 export {
   tagCreateArgs,
@@ -138,7 +140,10 @@ export {
   commitDetail,
   countCommits,
   countRange,
+  countRangeLeftRight,
   detectDefaultBranch,
+  isAncestor,
+  listRange,
   log,
   mergeBase,
   predictMerge,
