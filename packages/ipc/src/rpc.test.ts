@@ -142,6 +142,10 @@ function stubHandlers(
       "undo.run": notImplemented,
       "review.resolveBase": notImplemented,
       "review.open": notImplemented,
+      "remote.run": notImplemented,
+      "remote.cancel": notImplemented,
+      "remote.pullPreflight": notImplemented,
+      "remote.pushPreflight": notImplemented,
       ...requestOverrides,
     },
     streams: {

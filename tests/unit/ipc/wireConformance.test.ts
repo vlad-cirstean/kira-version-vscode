@@ -35,6 +35,12 @@ import type {
   RefRecord as CoreRefRecord,
   TagAnnotation as CoreTagAnnotation,
 } from "../../../packages/core/src/model/ref.ts";
+import type {
+  PullStrategy as CorePullStrategy,
+  PullStrategySource as CorePullStrategySource,
+  RefUpdate as CoreRefUpdate,
+  RemoteOpKind as CoreRemoteOpKind,
+} from "../../../packages/core/src/model/remote.ts";
 import type { HeadState as CoreHeadState } from "../../../packages/core/src/model/repo.ts";
 import type {
   BaseCandidate as CoreBaseCandidate,
@@ -43,6 +49,8 @@ import type {
 import type { StatusSummary as CoreStatusSummary } from "../../../packages/core/src/model/status.ts";
 import type {
   CheckoutPreflight as CoreCheckoutPreflight,
+  PullPreflight as CorePullPreflight,
+  PushPreflight as CorePushPreflight,
   RevertPreflight as CoreRevertPreflight,
 } from "../../../packages/core/src/preflight/types.ts";
 import {
@@ -76,7 +84,13 @@ import type {
   OpErrorKind as WireOpErrorKind,
   OpRequest as WireOpRequest,
   OpResult as WireOpResult,
+  PullPreflight as WirePullPreflight,
+  PullStrategy as WirePullStrategy,
+  PullStrategySource as WirePullStrategySource,
+  PushPreflight as WirePushPreflight,
   RefRow as WireRefRow,
+  RefUpdate as WireRefUpdate,
+  RemoteOpKind as WireRemoteOpKind,
   RevertPreflight as WireRevertPreflight,
   SettingsSnapshot as WireSettingsSnapshot,
   SignatureStatus as WireSignatureStatus,
@@ -341,6 +355,90 @@ describe("ipc wire conformance", () => {
     expect(wire).toEqual(preflight);
   });
 
+  // ---- P8 W4: remote-op vocabulary and pull/push pre-flight -----------------------------
+
+  test("PullStrategy: core and ipc's wire copy are assignable both ways", () => {
+    assertBothWays<WirePullStrategy, CorePullStrategy>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const strategy: CorePullStrategy = "rebase";
+    const wire: WirePullStrategy = strategy;
+    expect(wire).toBe(strategy);
+  });
+
+  test("PullStrategySource: core and ipc's wire copy are assignable both ways", () => {
+    assertBothWays<WirePullStrategySource, CorePullStrategySource>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const source: CorePullStrategySource = "branchConfig";
+    const wire: WirePullStrategySource = source;
+    expect(wire).toBe(source);
+  });
+
+  test("RemoteOpKind: core and ipc's wire copy are assignable both ways", () => {
+    assertBothWays<WireRemoteOpKind, CoreRemoteOpKind>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const kind: CoreRemoteOpKind = "forcePush";
+    const wire: WireRemoteOpKind = kind;
+    expect(wire).toBe(kind);
+  });
+
+  test("RefUpdate: core and ipc's wire copy are assignable both ways", () => {
+    assertBothWays<WireRefUpdate, CoreRefUpdate>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const update: CoreRefUpdate = {
+      ref: "origin/main",
+      from: "abc1234",
+      to: "def5678",
+      forced: false,
+    };
+    const wire: WireRefUpdate = update;
+    expect(wire).toEqual(update);
+  });
+
+  test("PullPreflight: core and ipc's wire copy are assignable both ways", () => {
+    assertBothWays<WirePullPreflight, CorePullPreflight>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const preflight: CorePullPreflight = {
+      strategy: "ff-only",
+      source: "default",
+      upstream: "origin/main",
+      ahead: 0,
+      behind: 2,
+      dirty: false,
+      routes: [],
+      blockers: [],
+    };
+    const wire: WirePullPreflight = preflight;
+    expect(wire).toEqual(preflight);
+  });
+
+  test("PushPreflight: core and ipc's wire copy are assignable both ways", () => {
+    assertBothWays<WirePushPreflight, CorePushPreflight>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const preflight: CorePushPreflight = {
+      upstream: "origin/main",
+      wouldSetUpstream: false,
+      ahead: 1,
+      behind: 0,
+      remoteTip: "abc1234",
+      protectedBy: null,
+      fastForward: true,
+    };
+    const wire: WirePushPreflight = preflight;
+    expect(wire).toEqual(preflight);
+  });
+
   test("OpRequest: core and ipc's wire copy are assignable both ways", () => {
     assertBothWays<WireOpRequest, CoreOpRequest>(
       (core) => core,
@@ -382,11 +480,18 @@ describe("ipc wire conformance", () => {
     expect(wire).toEqual(slot);
   });
 
-  test("OpErrorKind is a structural copy of GitErrorKind minus nothing and plus nothing (W9)", () => {
-    assertBothWays<WireOpErrorKind, CoreGitErrorKind>(
-      (core) => core,
-      (wire) => wire,
-    );
+  test("every GitErrorKind is a valid OpErrorKind (W9; one-directional as of P8)", () => {
+    // Through P7 these two were kept in exact lockstep ("minus nothing and plus nothing").
+    // P8 deliberately breaks that symmetry: `OpErrorKind` gains `ProtectedBranch` and
+    // `Cancelled`, neither of which `classifyGitError` (`packages/git/src/errors.ts`) can ever
+    // produce — a protected-branch refusal and a mid-flight cancellation are both op-level
+    // facts, decided before/around the git spawn rather than read off its exit. So only the
+    // git-classification direction still holds: every `GitErrorKind` git can actually classify
+    // must still be a member of `OpErrorKind`, but not the reverse.
+    function onlyGitKindsAreOpKinds(core: CoreGitErrorKind): WireOpErrorKind {
+      return core;
+    }
+    void onlyGitKindsAreOpKinds;
     const kind: CoreGitErrorKind = "Conflict";
     const wire: WireOpErrorKind = kind;
     expect(wire).toBe(kind);
