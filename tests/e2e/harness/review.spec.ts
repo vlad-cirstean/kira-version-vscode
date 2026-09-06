@@ -83,6 +83,26 @@ test.describe("entry points: both open the review on the right branch", () => {
     await expect(page.locator(".kv-review-commit-count")).toHaveText("1 commit");
   });
 
+  test("the branch picker's own menu via a right-click on the row (not just the kebab)", async ({
+    page,
+  }) => {
+    // Exit criteria: "the branch picker's context menu (kebab *and* right-click)" — the test
+    // above already drives a plain click on the kebab button; `BranchPicker.vue`'s own markup
+    // wires both `@click` and `@contextmenu` to that same "More actions" button (there is no
+    // separate `@contextmenu` handler on the row itself, e.g. `.kv-branch-row-main`), so the
+    // second entry point this exercises is a right-click on that same button.
+    await page.goto("/?scenario=tags");
+    await ready(page);
+    await page.locator(".kv-branch-trigger").click();
+    const row = page.locator('[aria-label="Branches"] .kv-branch-row', { hasText: "main" });
+    await row.locator(".kv-icon-button[title='More actions']").click({ button: "right" });
+    const menu = page.locator('[role="menu"]');
+    await expect(menu).toBeVisible();
+    await expect(menu).toHaveAccessibleName("main actions");
+    await menu.getByRole("menuitem", { name: "Review branch changes" }).click();
+    expect(await lastReviewOpen(page)).toEqual({ repoId: "/repos/tags", branch: "main" });
+  });
+
   test("a right-click on a branch badge in the message column — one pixel to the side still opens the commit menu", async ({
     page,
   }) => {
