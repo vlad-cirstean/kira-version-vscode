@@ -9,11 +9,11 @@
  * bufferEncoding` field, set once per transport.
  *
  * P16 W6 composes a second, orthogonal seam on top: `encodeStreamPayload`/`decodeStreamPayload`
- * below turn one stream's chunk (today, only `"graph.stream"`'s `PackedCommitChunk`) into a
- * single `ArrayBuffer` before it ever reaches the traversal above. That `ArrayBuffer` is not a
- * new shape this file has to learn — it is carried by the same `$buf`-tagged base64 path (D36)
- * that already knows how to carry any `ArrayBuffer`, which is the whole point of layering rather
- * than replacing.
+ * below turn one stream chunk's buffer-bearing sub-field (today, only `"graph.stream"`'s
+ * `commits: PackedCommitChunk`) into a single tagged `ArrayBuffer` before the envelope ever
+ * reaches the traversal above. That `ArrayBuffer` is not a new shape this file has to learn — it
+ * is carried by the same `$buf`-tagged base64 path (D36) that already knows how to carry any
+ * `ArrayBuffer`, which is the whole point of layering rather than replacing.
  */
 import type { PackedCommitChunk, StreamKey } from "./contract.ts";
 import { fromWire as graphChunkFromWire, toWire as graphChunkToWire } from "./graphChunkCodec.ts";
@@ -233,7 +233,7 @@ export function dedupeTransferList(transfer: readonly ArrayBuffer[]): readonly A
 // stream key added to the contract is a compile error here, not a silent pass-through.
 // ---------------------------------------------------------------------------------------
 
-/** A stream chunk that has been reduced to a single tagged `ArrayBuffer` by a schema-specific
+/** The `commits` field, once reduced to a single tagged `ArrayBuffer` by a schema-specific
  *  `toWire`. `$fb` names *which* schema (and, after the slash, which version of this dispatch's
  *  own wrapping — not the FlatBuffers schema's own append-only evolution, which needs no such
  *  tag per D46) produced `d`, so `decodeStreamPayload` can fail loudly on a label it does not
@@ -251,18 +251,30 @@ function isFlatBufferStreamPayload(value: unknown): value is FlatBufferStreamPay
   );
 }
 
-/** Wraps one stream's chunk for the wire. `method` selects the schema-specific `toWire`; every
- *  `StreamKey` the contract declares must appear here (the `never` default is the compile-time
- *  guard — the next stream key added to `Contract["streams"]` and not handled below fails `tsc`
- *  here, not at runtime). */
+/** `graph.stream`'s chunk envelope (`Contract["streams"]["graph.stream"]["chunk"]`), with
+ *  `commits` still a plain `PackedCommitChunk` (pre-`encodeStreamPayload`) or already wrapped
+ *  (post-`encodeStreamPayload`) — the plan's judgment call 2: the envelope's seven scalars
+ *  (`repoId`, `seq`, `from`, `to`, `source`, `remaining`, `exhausted`) cost ~100 bytes and are not
+ *  worth a second schema statement, so only `commits` — the 13 fields that actually carry
+ *  bytes — moves onto FlatBuffers. */
+interface GraphStreamEnvelope<TCommits> {
+  readonly commits: TCommits;
+}
+
+/** Wraps one stream's chunk for the wire. `method` selects the schema-specific `toWire`, applied
+ *  only to the sub-field that actually carries `ArrayBuffer`s — the rest of the envelope crosses
+ *  unchanged, exactly as it always has. Every `StreamKey` the contract declares must appear here
+ *  (the `never` default is the compile-time guard — the next stream key added to
+ *  `Contract["streams"]` and not handled below fails `tsc` here, not at runtime). */
 export function encodeStreamPayload(method: StreamKey, chunk: unknown): unknown {
   switch (method) {
     case "graph.stream": {
-      const payload: FlatBufferStreamPayload = {
+      const envelope = chunk as GraphStreamEnvelope<PackedCommitChunk>;
+      const wrapped: FlatBufferStreamPayload = {
         $fb: "graphChunk/1",
-        d: graphChunkToWire(chunk as PackedCommitChunk),
+        d: graphChunkToWire(envelope.commits),
       };
-      return payload;
+      return { ...envelope, commits: wrapped };
     }
     default: {
       const exhaustive: never = method;
@@ -273,23 +285,25 @@ export function encodeStreamPayload(method: StreamKey, chunk: unknown): unknown 
   }
 }
 
-/** Reverses `encodeStreamPayload`. Throws if `payload` is not a recognised `$fb`-tagged wrapper —
- *  a webview built against a stale contract must fail loudly (D46/W8's `CONTRACT_VERSION` bump),
- *  not render an empty graph. */
+/** Reverses `encodeStreamPayload`. Throws if `payload.commits` is not a recognised `$fb`-tagged
+ *  wrapper — a webview built against a stale contract must fail loudly (D46/W8's
+ *  `CONTRACT_VERSION` bump), not render an empty graph. */
 export function decodeStreamPayload(method: StreamKey, payload: unknown): unknown {
   switch (method) {
     case "graph.stream": {
-      if (!isFlatBufferStreamPayload(payload)) {
+      const envelope = payload as GraphStreamEnvelope<unknown>;
+      const wrapped = envelope.commits;
+      if (!isFlatBufferStreamPayload(wrapped)) {
         throw new Error(
-          "codec.decodeStreamPayload: 'graph.stream' chunk is missing its '$fb' FlatBuffers tag",
+          "codec.decodeStreamPayload: 'graph.stream' chunk's 'commits' is missing its '$fb' FlatBuffers tag",
         );
       }
-      if (payload.$fb !== "graphChunk/1") {
+      if (wrapped.$fb !== "graphChunk/1") {
         throw new Error(
-          `codec.decodeStreamPayload: unrecognised '$fb' tag '${payload.$fb}' for 'graph.stream'`,
+          `codec.decodeStreamPayload: unrecognised '$fb' tag '${wrapped.$fb}' for 'graph.stream'`,
         );
       }
-      return graphChunkFromWire(payload.d);
+      return { ...envelope, commits: graphChunkFromWire(wrapped.d) };
     }
     default: {
       const exhaustive: never = method;

@@ -6,7 +6,13 @@
  * `MessageChannelLike` adapter.
  */
 import type { BufferEncoding } from "./codec.ts";
-import { decode, dedupeTransferList, encode } from "./codec.ts";
+import {
+  decode,
+  decodeStreamPayload,
+  dedupeTransferList,
+  encode,
+  encodeStreamPayload,
+} from "./codec.ts";
 import type {
   EventKey,
   EventPayload,
@@ -195,7 +201,7 @@ export function createRpcClient(channel: MessageChannelLike): Transport {
         if (!entry || entry.done) return;
         entry.queue = entry.queue.then(async () => {
           if (entry.done) return;
-          await entry.onChunk(frame.chunk);
+          await entry.onChunk(decodeStreamPayload(entry.method, frame.chunk));
           if (entry.done) return;
           post(channel, { t: "credit", id: frame.id, n: 1 });
         });
@@ -403,7 +409,7 @@ export function createRpcServer(channel: MessageChannelLike, handlers: ServerHan
         ),
       ]);
       if (controller.signal.aborted) return;
-      post(channel, { t: "chunk", id, seq, chunk });
+      post(channel, { t: "chunk", id, seq, chunk: encodeStreamPayload(method, chunk) });
       seq++;
     }
 
