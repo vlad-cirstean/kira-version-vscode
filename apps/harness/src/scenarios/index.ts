@@ -1,6 +1,7 @@
 import { authFailure } from "./authFailure.ts";
 import { badges } from "./badges.ts";
 import { ceiling } from "./ceiling.ts";
+import { cherryPickEmpty } from "./cherryPickEmpty.ts";
 import { clean } from "./clean.ts";
 import { conflicted } from "./conflicted.ts";
 import { conflictedNoResolve } from "./conflictedNoResolve.ts";
@@ -60,14 +61,16 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
  *  exact name does. `ceiling`'s caller is expected to be `tests/perf/graphUi.ts` (W15);
  *  `pagedBranch`'s (P4 W13) is `graph.spec.ts`'s own "screenshot after a Load more" scenario;
  *  `reviewPaged`'s (P7 W16) is `review.spec.ts`'s own "Load more" test; `reviewPerf`'s (P7 W18)
- *  is `tests/perf/graphUi.ts`'s own `reviewFirstPaintMs` metric — all four are single-purpose
- *  fixtures nobody browsing scenarios by hand needs to stumble on. */
+ *  is `tests/perf/graphUi.ts`'s own `reviewFirstPaintMs` metric; `cherryPickEmpty`'s
+ *  (`docs/plans/P10.md` W13) is `conflictBanner.spec.ts`'s own empty-pick case — all five are
+ *  single-purpose fixtures nobody browsing scenarios by hand needs to stumble on. */
 const HIDDEN_SCENARIOS: Readonly<Record<string, () => Scenario>> = {
   ceiling,
   pagedBranch,
   reviewPaged,
   reviewPerf,
   conflictedNoResolve: () => conflictedNoResolve,
+  cherryPickEmpty: () => cherryPickEmpty,
 };
 
 export function loadScenario(name: string): Scenario {

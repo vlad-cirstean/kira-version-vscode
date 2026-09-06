@@ -30,7 +30,7 @@ const props = defineProps<{
 }>();
 
 const inProgress = computed(() => props.ops.statusSummary.value?.inProgress ?? null);
-const busyAction = ref<"resolve" | "continue" | "abort" | undefined>(undefined);
+const busyAction = ref<"resolve" | "continue" | "skip" | "abort" | undefined>(undefined);
 
 const CONTINUE_REASON_ID = "kv-conflict-continue-reason";
 
@@ -61,6 +61,19 @@ async function onAbort(): Promise<void> {
   busyAction.value = "abort";
   try {
     await props.ops.abortOp();
+  } finally {
+    busyAction.value = undefined;
+  }
+}
+
+/** `docs/plans/P10.md` W13, §7.11's third sequencer verb — rendered only when `canSkip` is true
+ *  (cherry-pick and revert only, probe 6), the same gate `core`'s own `InProgressOperation.canSkip`
+ *  already computes. */
+async function onSkip(): Promise<void> {
+  if (busyAction.value) return;
+  busyAction.value = "skip";
+  try {
+    await props.ops.skipOp();
   } finally {
     busyAction.value = undefined;
   }
@@ -100,6 +113,15 @@ const PATH_DISPLAY_CAP = 20;
         Continue
       </button>
       <button
+        v-if="inProgress.canSkip"
+        type="button"
+        class="kv-conflict-banner-button"
+        :disabled="busyAction !== undefined"
+        @click="onSkip"
+      >
+        Skip
+      </button>
+      <button
         v-if="inProgress.canAbort"
         type="button"
         class="kv-conflict-banner-button kv-conflict-banner-button--danger"
@@ -112,7 +134,12 @@ const PATH_DISPLAY_CAP = 20;
 
     <p v-if="inProgress.unmergedCount > 0" :id="CONTINUE_REASON_ID" class="kv-conflict-banner-reason">
       Resolve the remaining {{ inProgress.unmergedCount }}
-      {{ inProgress.unmergedCount === 1 ? "file" : "files" }} first, then Continue.
+      {{ inProgress.unmergedCount === 1 ? "file" : "files" }} first, then Continue{{
+        inProgress.canSkip ? ", or Skip this commit and move on." : "."
+      }}
+    </p>
+    <p v-else-if="inProgress.canSkip" class="kv-conflict-banner-reason">
+      No conflicts remain. Continue to commit this change, or Skip if it is already present.
     </p>
 
     <ul v-if="inProgress.conflictedPaths.length > 0" class="kv-conflict-banner-paths">
