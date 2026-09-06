@@ -1,0 +1,37 @@
+// The `graph.stream` chunk payload — `PackedCommitChunk` (`packages/ipc/src/contract.ts`,
+// structurally mirroring `packages/core/src/store/commitStore.ts`). Append-only: never
+// renumber, never reorder, never delete — retire with (deprecated). Enforced by
+// `bun run check:schema` (P16 W3). CONTRACT_VERSION, not this file, is the compatibility
+// authority (P16 D46).
+
+namespace KiraVersion.Wire;
+
+table DecorationRef {
+  kind: string;        // the union discriminant, verbatim: branch|remoteBranch|tag|head|stash
+  name: string;        // absent for "head" and "stash"
+  is_head: bool;       // meaningful only for "branch"
+}
+
+table RowDecorations {
+  row: uint32;         // chunk-relative, exactly as PackedCommitChunk.decorations carries it
+  refs: [DecorationRef];
+}
+
+table PackedCommitChunk {
+  from: uint32;
+  to: uint32;
+  sha_width_bytes: uint8;
+  shas: [ubyte];
+  parent_offsets: [ubyte];
+  parent_shas: [ubyte];
+  identity_ids: [ubyte];
+  times: [ubyte];
+  subject_bytes: [ubyte];
+  subject_offsets: [ubyte];
+  dictionary_base: uint32;
+  dictionary: [string];
+  decorations: [RowDecorations];
+}
+
+root_type PackedCommitChunk;
+file_identifier "KVGC";
