@@ -7,12 +7,16 @@ import type {
 } from "@kira-version/core";
 import {
   buildPullPreflight,
+  canRunOp,
   CommitStore,
+  classifyCherryPick,
   classifyPush,
+  classifyReset,
   classifyStashBranch,
   classifyStashPop,
   resolveBase as coreResolveBase,
   defaultSettings,
+  describeInProgress,
   mapLineAcrossDiff,
   matchProtectedBranch,
   resolvePullStrategy,
@@ -22,6 +26,7 @@ import type {
   BaseResolutionReason,
   CheckoutBlocker,
   CheckoutPreflight,
+  CherryPickPreflight,
   CommitRange,
   HeadState,
   InProgressOperation,
@@ -34,6 +39,8 @@ import type {
   RemoteOpParams,
   RemoteOpResult,
   RequestHandler,
+  ResetMode,
+  ResetPreflight,
   RevertParentChoice,
   RevertPreflight,
   ReviewRangeState,
@@ -240,6 +247,36 @@ function updateIsHeadFlags(refs: RefsState, head: HeadState): void {
   }
 }
 
+/** `docs/plans/P10.md` W9: `preflightReset`'s own `resolveCommit`-plus-existence-check, mirrored
+ *  here with no real object database behind it — `target` resolves exactly when it is a ref this
+ *  session knows about, or already one of `Scenario.commits`' own shas (the mock's only two
+ *  sources of "a commit exists" truth). `undefined` is the classifier's `targetResolves: false`
+ *  case (probe 3's bad-target guard). */
+function resolveTargetSha(session: RepoSession, target: string): string | undefined {
+  const ref = findRef(session.refs, target);
+  if (ref) return ref.row.objectId;
+  return session.commits.some((c) => c.sha === target) ? target : undefined;
+}
+
+/** `revert`'s own "advance the checked-out branch's ref to a fabricated sha" move (this file's
+ *  own comment on that case), generalized for `reset`/`cherryPick` to move HEAD to an ALREADY-
+ *  KNOWN sha (reset's own target, or a fresh fabricated one for a successful pick) rather than
+ *  always fabricating one — reset's whole point is landing on a real, named commit. A detached
+ *  HEAD moves in place; a branch HEAD moves that branch's own ref, exactly like `checkout`'s own
+ *  `updateIsHeadFlags` companion leaves the ref rows in sync. */
+function moveHeadTo(session: RepoSession, sha: string): void {
+  const head = session.head;
+  if (head.kind === "branch") {
+    const idx = session.refs.branches.findIndex((b) => b.shortName === head.name);
+    if (idx !== -1) {
+      const existing = session.refs.branches[idx] as RefRow;
+      session.refs.branches[idx] = { ...existing, objectId: sha };
+    }
+  } else if (head.kind === "detached") {
+    session.head = { kind: "detached", sha };
+  }
+}
+
 // ---------------------------------------------------------------------------------------
 // P7 W6/W15 — Branch review. `review.resolveBase` reuses `core`'s own `resolveBase` against
 // the mock's own ref rows (never a hand-rolled re-implementation of §6.8's policy — the plan's
@@ -423,6 +460,112 @@ function defaultStashBranchPreflight(
     name: branch,
     existingBranchNames: new Set(session.refs.branches.map((b) => b.shortName)),
     checkout,
+  });
+}
+
+/** `RepoService`'s own `RESET_LEAVING_COMMITS_CAP` (`packages/git/src/repoService.ts`), mirrored
+ *  here for the same reason `CHUNK_ROWS`/`PAGE_SIZE` are: no scenario's own tiny commit list ever
+ *  gets close to it, but the shape (a capped list plus a `leavingTruncated` flag) is still worth
+ *  exercising honestly rather than always reporting `false`. */
+const RESET_LEAVING_COMMITS_CAP = 10;
+
+/** `preflight.reset`'s default — same posture as `defaultRevertPreflight`: `leaving`/`gaining`
+ *  are computed directly over `Scenario.commits`' own parent links (`ancestorShas`'s own D∩T-
+ *  style set difference), never declared separately. The mock's `status.dirtyPaths` carries no
+ *  staged/unstaged distinction (`RepoSession.stashedPaths`'s own doc comment makes the same
+ *  admission for stash) — every dirty path is reported `unstaged` here, which still exercises
+ *  `classifyReset`'s `destroys` computation correctly for `--hard` (staged vs. unstaged both feed
+ *  it identically), just not the finer three-way split a real repo's status affords. */
+function defaultResetPreflight(
+  session: RepoSession,
+  scenario: Scenario,
+  target: string,
+  mode: ResetMode,
+): ResetPreflight {
+  const currentHead = headSha(session);
+  const branch = session.head.kind === "branch" ? session.head.name : null;
+  const dirty = {
+    staged: [] as string[],
+    unstaged: session.status.dirtyPaths,
+    untracked: [] as string[],
+  };
+  const resolvedSha = resolveTargetSha(session, target);
+  if (resolvedSha === undefined) {
+    return classifyReset({
+      target,
+      targetSubject: "",
+      mode,
+      currentHead,
+      branch,
+      leaving: 0,
+      gaining: 0,
+      leavingCommits: [],
+      leavingTruncated: false,
+      dirty,
+      stagedNew: [],
+      inProgress: session.inProgress,
+      targetResolves: false,
+    });
+  }
+  const targetAncestors = ancestorShas(scenario.commits, resolvedSha);
+  const headAncestors = ancestorShas(scenario.commits, currentHead);
+  const leavingShas = [...headAncestors].filter((sha) => !targetAncestors.has(sha));
+  const gaining = [...targetAncestors].filter((sha) => !headAncestors.has(sha)).length;
+  const leavingCommits = scenario.commits
+    .filter((c) => leavingShas.includes(c.sha))
+    .map((c) => ({ sha: c.sha, subject: c.subject }));
+  return classifyReset({
+    target,
+    targetSubject: scenario.commits.find((c) => c.sha === resolvedSha)?.subject ?? "",
+    mode,
+    currentHead,
+    branch,
+    leaving: leavingShas.length,
+    gaining,
+    leavingCommits: leavingCommits.slice(0, RESET_LEAVING_COMMITS_CAP),
+    leavingTruncated: leavingCommits.length > RESET_LEAVING_COMMITS_CAP,
+    dirty,
+    stagedNew: [],
+    inProgress: session.inProgress,
+    targetResolves: true,
+  });
+}
+
+/** `preflight.cherryPick`'s default, same posture as `defaultRevertPreflight`/
+ *  `defaultResetPreflight`: `mergeParents` is read off `Scenario.commits`' own parent links, and
+ *  `alreadyApplied` off `ancestorShas` — the mock's own stand-in for `isAncestor`. There is no
+ *  real diff-tree behind this, so `commitPaths` is always empty and `prediction` always `clean` —
+ *  a hazard-focused scenario overrides both halves with an exact `Scenario.preflight.cherryPick`
+ *  fixture, exactly as `defaultStashPopPreflight`'s own doc comment already admits for the
+ *  worktree-merge prediction it cannot compute either. */
+function defaultCherryPickPreflight(
+  session: RepoSession,
+  scenario: Scenario,
+  sha: string,
+  mainline: number | undefined,
+): CherryPickPreflight {
+  const commit = scenario.commits.find((c) => c.sha === sha);
+  if (!commit) throw new Error(`mock bridge: preflight.cherryPick: unknown sha '${sha}'`);
+  const mergeParents: RevertParentChoice[] =
+    commit.parents.length > 1
+      ? commit.parents.map((parentSha, index) => ({
+          parentNumber: index + 1,
+          sha: parentSha,
+          subject: scenario.commits.find((c) => c.sha === parentSha)?.subject ?? parentSha,
+        }))
+      : [];
+  const alreadyApplied = ancestorShas(scenario.commits, headSha(session)).has(sha);
+  return classifyCherryPick({
+    sha,
+    subject: commit.subject,
+    mergeParents,
+    mainline,
+    commitPaths: { touched: [], added: [] },
+    dirty: { staged: [], unstaged: session.status.dirtyPaths, untracked: [] },
+    prediction: { kind: "clean" },
+    alreadyApplied,
+    inProgress: session.inProgress,
+    detachedHead: session.head.kind !== "branch",
   });
 }
 
@@ -612,6 +755,7 @@ function applyOp(
           canAbort: true,
           isSequence: op.shas.length > 1,
           unmergedCount: preflight.prediction.paths.length,
+          canSkip: true,
         };
         return {
           result: opError(
@@ -842,6 +986,165 @@ function applyOp(
       // Creates a branch ref, moves HEAD, and (on the clean-by-construction success path) drops
       // the stash — three ref writes. See `stashPush`'s own comment above.
       return { result: opOk(session), changed: "refsChanged" };
+    }
+    // ---- P10 W9: Reset, and cherry-pick -------------------------------------------------
+    case "reset": {
+      if (!canRunOp(session.inProgress, "reset")) {
+        return {
+          result: opError(
+            session,
+            "OperationInProgress",
+            `${describeInProgress(session.inProgress as InProgressOperation)} is in progress — finish or abort it before resetting.`,
+          ),
+        };
+      }
+      const resolvedSha = resolveTargetSha(session, op.target);
+      if (resolvedSha === undefined) {
+        return {
+          result: opError(session, "NotFound", `${op.target} does not resolve to a commit.`),
+        };
+      }
+      const preflight =
+        scenario.preflight?.reset?.[op.target] ??
+        defaultResetPreflight(session, scenario, op.target, op.mode);
+      if (
+        op.mode === "hard" &&
+        preflight.destroys.length > 0 &&
+        op.confirmToken !== resolvedSha.slice(0, 7)
+      ) {
+        return {
+          result: opError(
+            session,
+            "ConfirmationRequired",
+            "Type the target commit's short sha to confirm — this reset would discard uncommitted work.",
+          ),
+        };
+      }
+      const prevSha = headSha(session);
+      moveHeadTo(session, resolvedSha);
+      // `soft` touches neither index nor worktree; `mixed` unstages without touching the
+      // worktree, which this mock's single flat `dirtyPaths` list already reads as unchanged
+      // (`defaultResetPreflight`'s own doc comment on the staged/unstaged simplification);
+      // `hard` alone actually destroys anything.
+      if (op.mode === "hard") {
+        session.status = { ...session.status, dirtyPaths: [], isClean: true };
+      }
+      const targetSubject =
+        scenario.commits.find((c) => c.sha === resolvedSha)?.subject ?? resolvedSha.slice(0, 7);
+      const pendingUndo: PendingUndo = {
+        snapshot: {
+          id: fakeSha(`undo:reset:${prevSha}:${Date.now()}`),
+          label: `Reset (${op.mode}) to ${targetSubject}`,
+          recoverySha: prevSha,
+          createdAt: Date.now(),
+        },
+        restore: () => {
+          moveHeadTo(session, prevSha);
+        },
+      };
+      return { result: opOk(session, pendingUndo), changed: "worktreeChanged" };
+    }
+    case "cherryPick": {
+      if (!canRunOp(session.inProgress, "cherryPick")) {
+        return {
+          result: opError(
+            session,
+            "OperationInProgress",
+            `${describeInProgress(session.inProgress as InProgressOperation)} is in progress — finish or abort it before cherry-picking.`,
+          ),
+        };
+      }
+      const commit = scenario.commits.find((c) => c.sha === op.sha);
+      if (!commit) {
+        return {
+          result: opError(session, "NotFound", `${op.sha} does not resolve to a commit.`),
+        };
+      }
+      if (commit.parents.length > 1 && op.mainline === undefined) {
+        return {
+          result: opError(
+            session,
+            "MainlineRequired",
+            `commit ${op.sha} is a merge but no -m option was given.`,
+          ),
+        };
+      }
+      const preflight =
+        scenario.preflight?.cherryPick?.[op.sha] ??
+        defaultCherryPickPreflight(session, scenario, op.sha, op.mainline);
+      if (preflight.alreadyApplied) {
+        // Probe 6's real shape sets CHERRY_PICK_HEAD with no unmerged paths before reporting
+        // this; the mock has no sequencer state to set up behind a failure that never leaves
+        // one, so it reports the failure directly rather than modelling an `inProgress` step
+        // nothing here would ever exit (recorded in this phase's own Findings).
+        return {
+          result: opError(
+            session,
+            "EmptyCherryPick",
+            "This change is already present on this branch — Skip it, or Continue to commit it anyway.",
+          ),
+        };
+      }
+      if (preflight.prediction.kind === "conflicts") {
+        session.inProgress = {
+          kind: "cherryPick",
+          otherSha: op.sha,
+          headName: undefined,
+          conflictedPaths: preflight.prediction.paths,
+          canContinue: true,
+          canAbort: true,
+          isSequence: false,
+          unmergedCount: preflight.prediction.paths.length,
+          canSkip: true,
+        };
+        return {
+          result: opError(
+            session,
+            "Conflict",
+            "error: could not apply — conflict in the files listed above",
+          ),
+          changed: "worktreeChanged",
+        };
+      }
+      // `--no-commit` stages the picked diff without moving HEAD (D66's own reasoning, mirrored
+      // host-side in `RepoService`) — the mock has no staged/unstaged split to update instead
+      // (`defaultResetPreflight`'s own admission above), so this is a real "nothing else
+      // changed" no-op past the conflict/blocker checks above, and — per D66 — no undo record.
+      if (op.noCommit) {
+        return { result: opOk(session, null), changed: "worktreeChanged" };
+      }
+      const prevSha = headSha(session);
+      moveHeadTo(session, fakeSha(`cherrypick:${op.sha}:${Date.now()}`));
+      const pendingUndo: PendingUndo = {
+        snapshot: {
+          id: fakeSha(`undo:cherrypick:${op.sha}:${Date.now()}`),
+          label: `Undo cherry-pick of ${op.sha.slice(0, 7)}`,
+          recoverySha: prevSha,
+          createdAt: Date.now(),
+        },
+        restore: () => {
+          moveHeadTo(session, prevSha);
+        },
+      };
+      return { result: opOk(session, pendingUndo), changed: "worktreeChanged" };
+    }
+    case "opSkip": {
+      if (!session.inProgress) {
+        return {
+          result: opError(session, "Unknown", "No operation is currently in progress to skip."),
+        };
+      }
+      if (!session.inProgress.canSkip) {
+        return {
+          result: opError(
+            session,
+            "Unknown",
+            `${describeInProgress(session.inProgress)} offers no Skip.`,
+          ),
+        };
+      }
+      session.inProgress = null;
+      return { result: opOk(session), changed: "worktreeChanged" };
     }
   }
 }
@@ -1552,6 +1855,25 @@ function createHandlers(
     );
   };
 
+  const preflightReset: RequestHandler<"preflight.reset"> = async ({ repoId, target, mode }) => {
+    const session = requireSession(sessions, repoId);
+    return (
+      scenario.preflight?.reset?.[target] ?? defaultResetPreflight(session, scenario, target, mode)
+    );
+  };
+
+  const preflightCherryPick: RequestHandler<"preflight.cherryPick"> = async ({
+    repoId,
+    sha,
+    mainline,
+  }) => {
+    const session = requireSession(sessions, repoId);
+    return (
+      scenario.preflight?.cherryPick?.[sha] ??
+      defaultCherryPickPreflight(session, scenario, sha, mainline)
+    );
+  };
+
   // ---- P9 W11: Stash ---------------------------------------------------------------------
 
   const stashList: RequestHandler<"stash.list"> = async ({ repoId }) => {
@@ -1904,6 +2226,8 @@ function createHandlers(
         "status.get": statusGet,
         "preflight.checkout": preflightCheckout,
         "preflight.revert": preflightRevert,
+        "preflight.reset": preflightReset,
+        "preflight.cherryPick": preflightCherryPick,
         "stash.list": stashList,
         "stash.show": stashShow,
         "preflight.stashPop": preflightStashPop,

@@ -106,6 +106,29 @@ test.describe("conflict banner (§7.11)", () => {
     await expect(region.getByRole("button", { name: "Abort" })).toBeEnabled();
   });
 
+  test("docs/plans/P10.md W13: an empty pick offers Skip, with its own reason copy and no unresolved count", async ({
+    page,
+  }) => {
+    // `cherryPickEmpty`: `CHERRY_PICK_HEAD` present, zero unmerged paths — probe 6's own state a
+    // `--skip` exists for, since `--continue` refuses an empty pick outright.
+    await page.goto("/?scenario=cherryPickEmpty");
+    await ready(page);
+    const region = banner(page);
+    await expect(region).toBeVisible();
+    await expect(region).not.toContainText("unresolved");
+    await expect(region).toContainText(
+      "No conflicts remain. Continue to commit this change, or Skip if it is already present.",
+    );
+
+    const continueButton = region.getByRole("button", { name: "Continue" });
+    await expect(continueButton).toBeEnabled();
+    const skipButton = region.getByRole("button", { name: "Skip" });
+    await expect(skipButton).toBeEnabled();
+
+    await skipButton.click();
+    await expect(region).toBeHidden();
+  });
+
   test("with resolveConflict:false the Resolve action is absent, not merely disabled", async ({
     page,
   }) => {

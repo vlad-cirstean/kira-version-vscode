@@ -243,6 +243,84 @@ export async function countRange(driver: GitDriver, base: string, branch: string
   return parseCount(bytes);
 }
 
+/** `docs/plans/P10.md` probe 4: both sides of a symmetric difference in ONE spawn —
+ *  `rev-list --count --left-right <a>...<b>` emits `"<left>\t<right>"`. `countRange` alone is a
+ *  half-truth on a diverged reset target — it counts what leaves and is silent about what
+ *  arrives. */
+export async function countRangeLeftRight(
+  driver: GitDriver,
+  a: string,
+  b: string,
+): Promise<{ left: number; right: number }> {
+  const bytes = await collectOneShot(
+    driver.read(["rev-list", "--count", "--left-right", `${a}...${b}`]),
+  );
+  const [leftRaw, rightRaw] = decoder.decode(bytes).trim().split("\t");
+  return { left: Number(leftRaw), right: Number(rightRaw) };
+}
+
+/** `docs/plans/P10.md` W2: a capped subject list for `ResetPreflight.leavingCommits` — reads
+ *  `cap + 1` so the caller can say "and N more" without a second count. Deliberately `log`, not
+ *  the plan's literally-named `rev-list`: verified empirically that `rev-list --format=... -z`
+ *  prepends a `commit <sha>` line and ignores `-z` for record separation, while `log
+ *  --format=... -z` (this codebase's own established convention — see `stashBaseSubjectsArgs`)
+ *  gives clean NUL-delimited two-field records. See the phase's Findings for the full note. */
+export async function listRange(
+  driver: GitDriver,
+  base: string,
+  tip: string,
+  cap: number,
+): Promise<{ commits: { sha: string; subject: string }[]; truncated: boolean }> {
+  const bytes = await collectOneShot(
+    driver.read(["log", "--format=%H%x1f%s", "-z", `-${cap + 1}`, `${base}..${tip}`]),
+  );
+  const records = splitZ(bytes).filter((r) => r.length > 0);
+  const commits = records.slice(0, cap).map((record) => {
+    const [shaField, subjectField] = splitLimitedFields(record, 0x1f, 2);
+    return {
+      sha: decoder.decode(shaField ?? new Uint8Array()),
+      subject: decoder.decode(subjectField ?? new Uint8Array()),
+    };
+  });
+  return { commits, truncated: records.length > cap };
+}
+
+/** `docs/plans/P10.md` W2: `merge-base --is-ancestor <a> <b>` — exit 0 yes, exit 1 no. Like
+ *  `predictMerge`/`mergeBase`, this reinterprets a non-zero exit as a RESULT, not a failure. */
+export async function isAncestor(driver: GitDriver, a: string, b: string): Promise<boolean> {
+  const read = driver.read(["merge-base", "--is-ancestor", a, b]);
+  await collectBytes(read.bytes);
+  try {
+    await read.done;
+  } catch (err) {
+    if (err instanceof GitError && err.exitCode === 1) return false;
+    throw err;
+  }
+  return true;
+}
+
+/** `docs/plans/P10.md` W8: a single commit's canonical sha and subject, or `null` when `ref`
+ *  cannot be resolved at all (probe 3's bad-target guard — `show -s` exits non-zero with real
+ *  stderr for an unresolvable target, cleanly distinguishable from `merge-base`'s "no common
+ *  ancestor" exit 1 above, which is a real *result*, not a resolution failure). Shared by
+ *  `preflightReset` (target existence + display subject) and `#prepareOp`'s `reset` case (the
+ *  same guard, re-run host-side immediately before the write, plus the canonical sha the typed
+ *  confirmation's short-sha token is checked against) — one query answers both, since a target
+ *  that resolves at all always resolves to exactly one commit and one subject. */
+export async function resolveCommit(
+  driver: GitDriver,
+  ref: string,
+): Promise<{ sha: string; subject: string } | null> {
+  try {
+    const bytes = stripTrailingNul(await collectOneShot(driver.read(showMetadataArgs(ref))));
+    const record = parseLogRecord(bytes);
+    return { sha: record.sha, subject: record.subject };
+  } catch (err) {
+    if (err instanceof GitError) return null;
+    throw err;
+  }
+}
+
 /** `docs/plans/P7.md` W2/§6.8: `git merge-base <a> <b>`, returning the sha or `null` when the two
  *  share no common ancestor — `merge-base` exits 1 with no output in that case (V4), which is
  *  cleanly distinguishable from a bad-ref error (exit 128, real stderr): only exit 1 is caught

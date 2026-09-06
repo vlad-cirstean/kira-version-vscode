@@ -247,6 +247,9 @@ export interface InProgressOperation {
   /** Continue is *enabled* only when this is 0 (§7.11). Kept separate from
    *  `conflictedPaths.length` so a host that caps the path list cannot accidentally enable it. */
   readonly unmergedCount: number;
+  /** P10 probe 6: true for `cherryPick` and `revert` only — the two sequencer operations git
+   *  gives a `--skip`. */
+  readonly canSkip: boolean;
 }
 
 export interface StatusSummary {
@@ -374,6 +377,60 @@ export interface StashBranchPreflight {
    *  stash's own base, so the apply is clean by construction (probe 11). */
   readonly checkout: CheckoutPreflight;
   readonly verdict: "clean" | "invalidName" | "blocked";
+}
+
+// ---------------------------------------------------------------------------------------
+// P10 — reset and cherry-pick pre-flight (§7.7/§7.13). Structural copies of
+// `@kira-version/core`'s own; `tests/unit/ipc/wireConformance.test.ts` keeps the two in step.
+// ---------------------------------------------------------------------------------------
+
+export type ResetMode = "soft" | "mixed" | "hard";
+
+export interface ResetPreflight {
+  readonly target: string;
+  readonly targetSubject: string;
+  readonly mode: ResetMode;
+  readonly currentHead: string;
+  /** `null` on a detached HEAD. */
+  readonly branch: string | null;
+  readonly leaving: number;
+  readonly gaining: number;
+  readonly leavingCommits: readonly { readonly sha: string; readonly subject: string }[];
+  readonly leavingTruncated: boolean;
+  readonly dirty: {
+    readonly staged: readonly string[];
+    readonly unstaged: readonly string[];
+    readonly untracked: readonly string[];
+  };
+  /** What `--hard` will actually destroy. Empty for `soft`/`mixed`, always. */
+  readonly destroys: readonly string[];
+  readonly inProgress: InProgressOperation | null;
+  readonly requiresTypedConfirmation: boolean;
+  readonly routes: readonly "stashFirst"[];
+  readonly verdict: "clean" | "destructive" | "blocked";
+  readonly blockers: readonly ("inProgressOperation" | "unknownTarget")[];
+}
+
+export type CherryPickBlocker =
+  | { readonly kind: "inProgressOperation"; readonly operation: InProgressOperation }
+  | { readonly kind: "mainlineRequired"; readonly parents: readonly RevertParentChoice[] }
+  | { readonly kind: "stagedChanges"; readonly paths: readonly string[] }
+  | { readonly kind: "localChangesWouldBeOverwritten"; readonly paths: readonly string[] }
+  | { readonly kind: "untrackedWouldBeOverwritten"; readonly paths: readonly string[] };
+
+export interface CherryPickPreflight {
+  readonly sha: string;
+  readonly subject: string;
+  readonly mainlineRequired: readonly RevertParentChoice[];
+  readonly prediction:
+    | { readonly kind: "clean" }
+    | { readonly kind: "conflicts"; readonly paths: readonly string[] }
+    | { readonly kind: "unknown"; readonly reason: string };
+  readonly alreadyApplied: boolean;
+  readonly inProgress: InProgressOperation | null;
+  readonly detachedHead: boolean;
+  readonly verdict: "clean" | "willConflict" | "blocked";
+  readonly blockers: readonly CherryPickBlocker[];
 }
 
 // ---------------------------------------------------------------------------------------
@@ -553,7 +610,25 @@ export type OpRequest =
       readonly branch: string;
       readonly sha: string;
       readonly index: number;
-    };
+    }
+  | {
+      readonly kind: "reset";
+      readonly mode: ResetMode;
+      /** A sha, always — resolved by the caller from the graph row. */
+      readonly target: string;
+      /** §7.7's typed confirmation, required (and re-checked host-side) exactly when
+       *  `mode === "hard"` and the pre-flight's `destroys` was non-empty. */
+      readonly confirmToken: string | undefined;
+    }
+  | {
+      readonly kind: "cherryPick";
+      readonly sha: string;
+      /** Required for a merge commit — probe 8: `is a merge but no -m option was given`. */
+      readonly mainline: number | undefined;
+      readonly noCommit: boolean;
+    }
+  /** §7.11's third sequencer verb, for cherry-pick and revert only (probe 6). */
+  | { readonly kind: "opSkip" };
 
 export type OpErrorKind =
   | "AuthFailed"
@@ -600,6 +675,17 @@ export type OpErrorKind =
    *  non-atomic failure in the phase: the tracked half was already applied and the stash was
    *  kept (probe 3). */
   | "StashUntrackedCollision"
+  /** P10: a cherry-pick/revert whose change is already present — `CHERRY_PICK_HEAD`/
+   *  `REVERT_HEAD` is set, the worktree is clean and NO paths are unmerged (probe 6). Detected by
+   *  exit code + read-back, never by pattern: the whole message goes to stdout. The remedy is
+   *  `--skip`. */
+  | "EmptyCherryPick"
+  /** P10: the typed confirmation a destructive `reset --hard` requires was absent or did not
+   *  match, re-checked host-side. Deliberately NOT `ProtectedBranch` (D52's pattern is reused;
+   *  its kind is not). */
+  | "ConfirmationRequired"
+  /** P10, probe 8: `commit <sha> is a merge but no -m option was given.` */
+  | "MainlineRequired"
   | "Unknown";
 
 export interface UndoSlotSnapshot {
@@ -889,6 +975,14 @@ export type Contract = {
     "preflight.stashBranch": {
       params: { repoId: string; sha: string; branch: string };
       result: StashBranchPreflight;
+    };
+    "preflight.reset": {
+      params: { repoId: string; target: string; mode: ResetMode };
+      result: ResetPreflight;
+    };
+    "preflight.cherryPick": {
+      params: { repoId: string; sha: string; mainline?: number };
+      result: CherryPickPreflight;
     };
     "op.run": {
       params: { repoId: string; op: OpRequest };

@@ -126,6 +126,7 @@ describe("classifyStashPop", () => {
       canAbort: true,
       isSequence: false,
       unmergedCount: 0,
+      canSkip: false,
     };
     const result = classifyStashPop(
       base({

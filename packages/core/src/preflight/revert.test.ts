@@ -78,6 +78,7 @@ describe("classifyRevert — the other two blockers", () => {
     canAbort: true,
     isSequence: false,
     unmergedCount: 0,
+    canSkip: false,
   };
 
   test("an in-progress operation blocks", () => {

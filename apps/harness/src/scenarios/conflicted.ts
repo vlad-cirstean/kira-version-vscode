@@ -87,6 +87,7 @@ export const conflicted: Scenario = {
       canAbort: true,
       isSequence: false,
       unmergedCount: CONFLICTED_PATHS.length,
+      canSkip: false,
     },
   },
 };

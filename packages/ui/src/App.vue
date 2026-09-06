@@ -20,9 +20,11 @@ import CommitGrid from "./components/CommitGrid.vue";
 import ConflictBanner from "./components/ConflictBanner.vue";
 import BranchDialog from "./components/dialogs/BranchDialog.vue";
 import CheckoutDialog from "./components/dialogs/CheckoutDialog.vue";
+import CherryPickDialog from "./components/dialogs/CherryPickDialog.vue";
 import ForcePushDialog from "./components/dialogs/ForcePushDialog.vue";
 import PullDialog from "./components/dialogs/PullDialog.vue";
 import RenameRefDialog from "./components/dialogs/RenameRefDialog.vue";
+import ResetDialog from "./components/dialogs/ResetDialog.vue";
 import RevertDialog from "./components/dialogs/RevertDialog.vue";
 import StashDialog from "./components/dialogs/StashDialog.vue";
 import TagDialog from "./components/dialogs/TagDialog.vue";
@@ -298,6 +300,14 @@ async function onCommitMenuSelect(id: string): Promise<void> {
       return;
     case "revertThisCommit":
       await opsState.runRevert([commit.sha]);
+      return;
+    case "resetToThisCommit":
+      // OQ1: mixed is the default mode — git's own default, and the only mode destructive to
+      // nothing on disk. `ResetDialog.vue` may change it before confirming (`previewResetMode`).
+      await opsState.runReset(commit.sha, "mixed");
+      return;
+    case "cherryPickThisCommit":
+      await opsState.runCherryPick(commit.sha);
       return;
     case "copySha":
       actions.value?.copy(commit.sha, "full SHA");
@@ -980,6 +990,8 @@ onBeforeUnmount(() => {
         />
         <CheckoutDialog :ops="opsState" />
         <RevertDialog :ops="opsState" />
+        <ResetDialog :ops="opsState" />
+        <CherryPickDialog :ops="opsState" />
         <ForcePushDialog :ops="opsState" />
         <PullDialog :ops="opsState" />
         <StashDialog

@@ -128,6 +128,39 @@ test.describe("axe: refs & checkout surfaces, no serious/critical violations", (
       expect(await unexpectedSeriousViolations(page, kind)).toEqual([]);
     });
 
+    // `docs/plans/P10.md` W20's own "one a11y pass over both dialogs": `ResetDialog.vue`'s own
+    // richest, most consequential screen — a real leaving commit AND real `--hard` `destroys`
+    // together, the typed-confirmation field included — and `CherryPickDialog.vue`'s predicted-
+    // conflict screen, the `--no-commit` checkbox included. Both count as "new" here exactly as
+    // `StashDialog.vue`'s own P9 entries above already do.
+    test(`ResetDialog open (hard reset, real destroys): ${kind} (${scanLabel(kind)})`, async ({
+      page,
+    }) => {
+      await page.goto(`/?scenario=dirty&theme=${kind}`);
+      await ready(page);
+      const row = page.locator(".slick-row", { hasText: "root" }).first();
+      await row.click({ button: "right" });
+      await page.getByRole("menuitem", { name: "Reset to this commit…" }).click();
+      const modal = page.locator('[aria-labelledby="kv-reset-dialog-title"]');
+      await modal.locator("input[value='hard']").click();
+      await expect(modal).toContainText("This will permanently discard these uncommitted changes:");
+      expect(await unexpectedSeriousViolations(page, kind)).toEqual([]);
+    });
+
+    test(`CherryPickDialog open (predicted conflict): ${kind} (${scanLabel(kind)})`, async ({
+      page,
+    }) => {
+      await page.goto(`/?scenario=merge&theme=${kind}`);
+      await ready(page);
+      const row = page.locator(".slick-row", { hasText: "side-a" }).first();
+      await row.click({ button: "right" });
+      await page.getByRole("menuitem", { name: "Cherry-pick this commit…" }).click();
+      await expect(page.locator('[aria-labelledby="kv-cherry-pick-dialog-title"]')).toContainText(
+        "This will likely conflict in:",
+      );
+      expect(await unexpectedSeriousViolations(page, kind)).toEqual([]);
+    });
+
     test(`TagDialog open (force-move warning): ${kind} (${scanLabel(kind)})`, async ({ page }) => {
       await page.goto(`/?scenario=tags&theme=${kind}`);
       await ready(page);
@@ -342,6 +375,35 @@ test.describe("dialogs: focus trap and return-to-invoker (W20)", () => {
     await expectTrapAndReturn(page, '[aria-labelledby="kv-revert-dialog-title"]', row, async () => {
       await page.getByRole("button", { name: "Cancel" }).click();
     });
+  });
+
+  test("ResetDialog traps focus and returns it to the invoking row on Cancel", async ({ page }) => {
+    await page.goto("/?scenario=dirty");
+    await ready(page);
+    const row = page.locator(".slick-row", { hasText: "root" }).first();
+    await row.click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Reset to this commit…" }).click();
+    await expectTrapAndReturn(page, '[aria-labelledby="kv-reset-dialog-title"]', row, async () => {
+      await page.getByRole("button", { name: "Cancel" }).click();
+    });
+  });
+
+  test("CherryPickDialog traps focus and returns it to the invoking row on Cancel", async ({
+    page,
+  }) => {
+    await page.goto("/?scenario=merge");
+    await ready(page);
+    const row = page.locator(".slick-row", { hasText: "side-a" }).first();
+    await row.click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Cherry-pick this commit…" }).click();
+    await expectTrapAndReturn(
+      page,
+      '[aria-labelledby="kv-cherry-pick-dialog-title"]',
+      row,
+      async () => {
+        await page.getByRole("button", { name: "Cancel" }).click();
+      },
+    );
   });
 
   test("TagDialog traps focus and returns it to the invoking row on Cancel", async ({ page }) => {

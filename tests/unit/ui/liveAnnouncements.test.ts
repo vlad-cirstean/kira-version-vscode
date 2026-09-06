@@ -6,6 +6,7 @@ import {
   composeOpFailureAnnouncement,
   composeRefreshAnnouncement,
   composeRevertAnnouncement,
+  composeUndoTooltip,
   formatCount,
 } from "../../../packages/ui/src/state/liveAnnouncements.ts";
 
@@ -98,6 +99,35 @@ describe("composeRevertAnnouncement", () => {
   test("a multi-sha revert names the count, not any one sha", () => {
     expect(composeRevertAnnouncement(["a".repeat(40), "b".repeat(40)], false)).toBe(
       "Reverted 2 commits",
+    );
+  });
+});
+
+describe("composeUndoTooltip", () => {
+  test("docs/plans/P10.md hard part 1: a soft reset's undo is a full round trip", () => {
+    expect(composeUndoTooltip("Reset (soft) to Add feature X")).toBe(
+      "Reset (soft) to Add feature X — restores the branch pointer, index, and working tree — a full round trip",
+    );
+  });
+
+  test("hard part 1: a mixed reset's undo does not bring back what was staged", () => {
+    expect(composeUndoTooltip("Reset (mixed) to a1b2c3d")).toBe(
+      "Reset (mixed) to a1b2c3d — restores the commits; what was staged before the reset is not recoverable",
+    );
+  });
+
+  test("hard part 1: a hard reset's undo reuses §7.12's own uncommitted-work caveat", () => {
+    expect(composeUndoTooltip("Reset (hard) to a1b2c3d")).toBe(
+      "Reset (hard) to a1b2c3d — restores the commits — does not restore uncommitted work",
+    );
+  });
+
+  test("every non-reset undo (cherry-pick included) keeps the plain, generic caveat", () => {
+    expect(composeUndoTooltip("Undo cherry-pick of a1b2c3d")).toBe(
+      "Undo cherry-pick of a1b2c3d — one level, does not restore uncommitted work",
+    );
+    expect(composeUndoTooltip("Deleted branch feature")).toBe(
+      "Deleted branch feature — one level, does not restore uncommitted work",
     );
   });
 });

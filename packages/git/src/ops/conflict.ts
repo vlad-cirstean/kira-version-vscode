@@ -115,3 +115,20 @@ export function abortArgs(kind: InProgressKind): string[] | undefined {
       return undefined;
   }
 }
+
+/** `docs/plans/P10.md` probe 6: the sequencer's own named remedy for an empty pick or revert —
+ *  `null` rather than a throw for every other kind, because `InProgressOperation.canSkip` is the
+ *  UI's own gate and this function is only the second line of defence, not the first. */
+export function skipArgs(kind: InProgressKind): string[] | null {
+  switch (kind) {
+    case "cherryPick":
+      return ["cherry-pick", "--skip"];
+    case "revert":
+      return ["revert", "--skip"];
+    case "merge":
+    case "rebase":
+    case "bisect":
+    case "unmergedOnly":
+      return null;
+  }
+}

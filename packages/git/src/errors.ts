@@ -54,6 +54,10 @@ export type GitErrorKind =
    *  the stash carries. Non-atomic: the worktree merge (and, per probe 3, the index restore) has
    *  already happened by the time this is reported — the stash is kept regardless. */
   | "StashUntrackedCollision"
+  /** P10, probe 8: `commit <sha> is a merge but no -m option was given.` — a cherry-pick/revert
+   *  of a merge commit with no mainline chosen. Prevented by the pre-flight's `mainlineRequired`;
+   *  classified here because a pre-flight is advice, not an enforcement boundary. */
+  | "MainlineRequired"
   | "Unknown";
 
 export class GitError extends Error {
@@ -191,11 +195,15 @@ const PATTERNS: readonly Pattern[] = [
   // gated op attempted mid-operation) and the three "no operation to continue" shapes — real
   // captures: "fatal: There is no merge in progress (MERGE_HEAD missing)."; "error: no
   // cherry-pick or revert in progress" (both cherry-pick and revert --continue with none
-  // running); "fatal: No rebase in progress?".
+  // running); "fatal: No rebase in progress?". P10/W7 probe 3 adds "fatal: Cannot do a soft
+  // reset in the middle of a merge." (and the same for mixed/hard) — defence in depth: `reset`
+  // is host-gated (§7.11/`GATED_OP_KINDS`) precisely because git does NOT reliably refuse this
+  // on its own (probe 3 found `--mixed`/`--hard` succeed and silently abandon the merge), but
+  // `--soft` genuinely is refused, so this pattern still matters.
   {
     kind: "OperationInProgress",
     pattern:
-      /cannot switch branch while (merging|rebasing|cherry-picking|reverting)|no (merge|rebase) in progress|no cherry-pick or revert in progress/i,
+      /cannot switch branch while (merging|rebasing|cherry-picking|reverting)|no (merge|rebase) in progress|no cherry-pick or revert in progress|Cannot do a (soft|mixed|hard) reset in the middle of a merge/i,
   },
   // GIT_TERMINAL_PROMPT=0 (§4.3) turns a credential prompt into this, always — the realistic
   // auth-failure shape in a driver that never allows an interactive prompt. A credential
@@ -212,8 +220,16 @@ const PATTERNS: readonly Pattern[] = [
     kind: "RemoteRefMissing",
     pattern: /remote ref does not exist|src refspec .* does not match any/,
   },
-  // "error: Your local changes to the following files would be overwritten by checkout:"
-  { kind: "DirtyWorktree", pattern: /local changes to the following files would be overwritten/ },
+  // "error: Your local changes to the following files would be overwritten by checkout:" and,
+  // as of P10/W7 probe 7 B/D, cherry-pick's own shorter form with no "to the following files"
+  // clause at all: "error: Your local changes to 'x' would be overwritten by cherry-pick." /
+  // "... would be overwritten by merge." (a STAGED change, not merely unstaged — probe 7 found
+  // git refuses any staged change here, related to the pick or not).
+  {
+    kind: "DirtyWorktree",
+    pattern:
+      /local changes to the following files would be overwritten|your local changes would be overwritten by/i,
+  },
   // "fatal: invalid reference: x" / "unknown revision or path" / "did not match any file(s)" —
   // plus four more real captures added at P6/W6 (probe P7): "fatal: reference is not a tree: x"
   // (`switch --detach` on a bad sha), "fatal: no branch named 'x'" (`branch -m` on one that
@@ -224,12 +240,19 @@ const PATTERNS: readonly Pattern[] = [
   // "fatal: x is not a stash reference" (`stash apply`/`pop`/`drop`/`branch` given a bad
   // `stash@{N}`) and "fatal: 'x' is not a stash-like commit" (`stash show`/`branch` given a sha
   // that resolves but isn't shaped like a stash commit) — both are the same "no such thing here"
-  // outcome as every other member of this pattern, not a new kind.
+  // outcome as every other member of this pattern, not a new kind. P10/W7 probe 3 adds "fatal:
+  // Could not parse object 'x'." (`reset` given a target that does not resolve) — a pre-existing
+  // hole in this pattern, not new git behaviour.
   {
     kind: "NotFound",
     pattern:
-      /invalid reference:|unknown revision or path|did not match any file\(s\) known to git|bad revision|reference is not a tree:|no branch named|branch '.*' not found|tag '.*' not found|bad object|is not a stash reference|is not a stash-like commit/,
+      /invalid reference:|unknown revision or path|did not match any file\(s\) known to git|bad revision|reference is not a tree:|no branch named|branch '.*' not found|tag '.*' not found|bad object|is not a stash reference|is not a stash-like commit|Could not parse object/,
   },
+  // P10/W7 probe 8: "error: commit <sha> is a merge but no -m option was given." — a
+  // cherry-pick/revert of a merge commit with no mainline. Ordered BEFORE `Conflict`: both are
+  // merge-shaped failures, and keeping them adjacent here (rather than earlier in the list)
+  // documents that relationship, even though their patterns do not actually overlap.
+  { kind: "MainlineRequired", pattern: /is a merge but no -m option was given/ },
   // "error: could not apply <sha>... <subject>" (cherry-pick hitting a real conflict) — and, as
   // of P6/W6, "error: could not revert <sha>... <subject>" (a conflicting revert; probe P8:
   // this was the classifier's inherited P1 gap — a conflicting revert classified as `Unknown`

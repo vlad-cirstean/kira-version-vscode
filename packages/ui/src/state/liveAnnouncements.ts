@@ -10,7 +10,13 @@
  * or failure — is composed here too, per that phase's own rule that a destructive action which
  * silently does nothing is the same failure mode §6.4 already named for the clipboard.
  */
-import type { CheckoutPreflight, OpErrorKind, OpResult, StashEntry } from "@kira-version/ipc";
+import type {
+  CheckoutPreflight,
+  OpErrorKind,
+  OpResult,
+  ResetMode,
+  StashEntry,
+} from "@kira-version/ipc";
 
 const COUNT_FORMATTER = new Intl.NumberFormat();
 
@@ -69,6 +75,48 @@ export function composeRevertAnnouncement(shas: readonly string[], noCommit: boo
   return noCommit ? `Reverted ${subject} — changes staged, not committed` : `Reverted ${subject}`;
 }
 
+/** `docs/plans/P10.md` W10: §7.7's own reset, given a voice — the target's subject is not carried
+ *  here (the live region names *what was done*, not the full advisory the dialog already showed
+ *  and the user already read before confirming). */
+export function composeResetAnnouncement(mode: ResetMode, target: string): string {
+  return `Reset (${mode}) to ${shortTarget(target)}`;
+}
+
+/** `docs/plans/P10.md` W10, §7.10's own `noCommit` wording reused verbatim for cherry-pick
+ *  (§7.13 states the same "staged, not committed" outcome for `--no-commit`). */
+export function composeCherryPickAnnouncement(sha: string, noCommit: boolean): string {
+  const subject = `commit ${shortTarget(sha)}`;
+  return noCommit
+    ? `Cherry-picked ${subject} — changes staged, not committed`
+    : `Cherry-picked ${subject}`;
+}
+
+/** `docs/plans/P10.md` W10, hard part 7's own answer, given a voice: `CherryPickPreflight`'s
+ *  `merge-tree` prediction inherits D57's whole posture (P9's own stash-pop precedent) — exact
+ *  about the merge, reconciled after the fact by `runOp`'s read-back, never swallowed. No
+ *  `stashKept` half exists here (unlike `StashPredictionMismatch`): a cherry-pick never touches
+ *  the stash, so this is its own, one-field-simpler shape rather than a forced reuse. */
+export interface CherryPickPredictionMismatch {
+  readonly predicted: "clean" | "conflicts";
+  readonly actual: "clean" | "conflicts" | "refused";
+}
+
+export function composeCherryPickMismatchAnnouncement(
+  mismatch: CherryPickPredictionMismatch,
+): string {
+  const predictedText = mismatch.predicted === "clean" ? "a clean apply" : "conflicts";
+  const actualText =
+    mismatch.actual === "clean"
+      ? "applied cleanly"
+      : mismatch.actual === "conflicts"
+        ? "conflicted"
+        : "was refused";
+  return (
+    `This cherry-pick ${actualText}, though the pre-flight predicted ${predictedText} — the tree ` +
+    "changed in between."
+  );
+}
+
 const OP_ERROR_TEXT: Record<OpErrorKind, string> = {
   AuthFailed: "authentication failed",
   NonFastForward: "not a fast-forward",
@@ -92,6 +140,9 @@ const OP_ERROR_TEXT: Record<OpErrorKind, string> = {
   StashConflict: "it merged with conflicts — the stash was kept",
   StashIndexConflict: "the index already has conflicts — try again without restoring it",
   StashUntrackedCollision: "untracked files were in the way — the stash was kept",
+  ConfirmationRequired: "the typed confirmation was missing or did not match",
+  EmptyCherryPick: "this change is already present on this branch",
+  MainlineRequired: "a merge commit needs a parent chosen first",
   Unknown: "an unexpected error occurred",
 };
 
@@ -140,6 +191,35 @@ export function composeUndoAnnouncement(label: string): string {
   return label.startsWith(STASH_DROP_UNDO_LABEL_PREFIX)
     ? "Restored as stash@{0}"
     : `Undone: ${label}`;
+}
+
+/** `docs/plans/P10.md` W14, hard part 1's own table, given a voice: the undo button's tooltip is
+ *  the one place a user learns *what a reset's undo actually restores* before they need it, and
+ *  the three modes are not interchangeable (probe 5's own finding — a mixed reset's undo does not
+ *  bring back what was staged, because that index state was never written to the object database
+ *  at all). Detected from `UndoRecord.label`'s own text, the same way `composeUndoAnnouncement`
+ *  detects a dropped stash above: `RepoService`'s reset undo capture (mirrored in the harness's
+ *  own mock bridge) is the only call site that ever labels a record `Reset (<mode>) to …`, so the
+ *  label doubles as the mode carrier without a dedicated field. Every other undoable op — cherry-
+ *  pick's `reset --keep` included — keeps the plain, generic caveat this file has always used:
+ *  §7.12's own "does not restore uncommitted work" already covers what a cherry-pick's undo
+ *  cannot bring back (unrelated dirt `--keep` never touched), so it needs no mode table of its
+ *  own. */
+const RESET_UNDO_LABEL_PATTERN = /^Reset \((soft|mixed|hard)\) to /;
+
+const RESET_UNDO_TOOLTIP_SUFFIX: Record<ResetMode, string> = {
+  soft: "restores the branch pointer, index, and working tree — a full round trip",
+  mixed: "restores the commits; what was staged before the reset is not recoverable",
+  hard: "restores the commits — does not restore uncommitted work",
+};
+
+const DEFAULT_UNDO_TOOLTIP_SUFFIX = "one level, does not restore uncommitted work";
+
+export function composeUndoTooltip(label: string): string {
+  const resetMatch = label.match(RESET_UNDO_LABEL_PATTERN);
+  const mode = resetMatch?.[1] as ResetMode | undefined;
+  const suffix = mode ? RESET_UNDO_TOOLTIP_SUFFIX[mode] : DEFAULT_UNDO_TOOLTIP_SUFFIX;
+  return `${label} — ${suffix}`;
 }
 
 /** §7.6's own worked example, given a voice: *"This pop conflicted, though the pre-flight

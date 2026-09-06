@@ -67,6 +67,8 @@ export type RepoServicePort = Pick<
   | "statusSummary"
   | "preflightCheckout"
   | "preflightRevert"
+  | "preflightReset"
+  | "preflightCherryPick"
   | "runOp"
   | "undoPeek"
   | "undoRun"
@@ -395,6 +397,15 @@ export function createRepoHandlers(deps: RepoHandlersDeps): ServerHandlers {
     mainline,
   }) => deps.service.preflightRevert(repoId, shas, mainline);
 
+  const preflightResetImpl: RequestHandler<"preflight.reset"> = async ({ repoId, target, mode }) =>
+    deps.service.preflightReset(repoId, target, mode);
+
+  const preflightCherryPickImpl: RequestHandler<"preflight.cherryPick"> = async ({
+    repoId,
+    sha,
+    mainline,
+  }) => deps.service.preflightCherryPick(repoId, sha, mainline);
+
   // ---- P9 W11: Stash --------------------------------------------------------------------
 
   const stashListImpl: RequestHandler<"stash.list"> = async ({ repoId }) =>
@@ -506,6 +517,8 @@ export function createRepoHandlers(deps: RepoHandlersDeps): ServerHandlers {
       "status.get": logged("status.get", statusGetImpl),
       "preflight.checkout": logged("preflight.checkout", preflightCheckoutImpl),
       "preflight.revert": logged("preflight.revert", preflightRevertImpl),
+      "preflight.reset": logged("preflight.reset", preflightResetImpl),
+      "preflight.cherryPick": logged("preflight.cherryPick", preflightCherryPickImpl),
       "stash.list": logged("stash.list", stashListImpl),
       "stash.show": logged("stash.show", stashShowImpl),
       "preflight.stashPop": logged("preflight.stashPop", preflightStashPopImpl),

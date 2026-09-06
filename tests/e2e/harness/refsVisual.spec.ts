@@ -136,6 +136,27 @@ test.describe("visual baseline: dialogs in their hazardous state", () => {
   }
 });
 
+test.describe("visual baseline: reset destructive state (P10 W20)", () => {
+  test("ResetDialog — hard reset with real destroys, a leaving commit, and the typed-confirmation field", async ({
+    page,
+  }) => {
+    // `dirty`'s own dirty tree (`src/tracked.ts`, `README.md`) plus a real leaving commit
+    // (resetting `main` back to `root`) makes `--hard` here the phase's most consequential
+    // screen: both `destroys` and the leaving-commit list render at once, typed-confirmation
+    // field included — one baseline, not the full four-theme sweep this suite's own a11y pass
+    // (`refsA11y.spec.ts`) already covers across themes.
+    await page.goto("/?scenario=dirty&theme=vscode-dark");
+    await ready(page);
+    const row = page.locator(".slick-row", { hasText: "root" }).first();
+    await row.click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Reset to this commit…" }).click();
+    const modal = page.locator('[aria-labelledby="kv-reset-dialog-title"]');
+    await modal.locator("input[value='hard']").click();
+    await expect(modal).toContainText("This will permanently discard these uncommitted changes:");
+    await expect(page).toHaveScreenshot("reset-dialog-destructive-vscode-dark.png");
+  });
+});
+
 test.describe("visual baseline: stash (P9 W21)", () => {
   for (const kind of THEME_KINDS) {
     test(`StashList.vue: ${kind}`, async ({ page }) => {

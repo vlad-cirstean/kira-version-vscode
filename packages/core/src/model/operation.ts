@@ -36,6 +36,11 @@ export interface InProgressOperation {
   /** Continue is *enabled* only when this is 0 (§7.11). Kept separate from
    *  `conflictedPaths.length` so a host that caps the path list cannot accidentally enable it. */
   readonly unmergedCount: number;
+  /** P10 probe 6: true for `cherryPick` and `revert` only — the two sequencer operations git
+   *  gives a `--skip`. Without this the banner would offer a Continue that cannot succeed on an
+   *  empty pick (`CHERRY_PICK_HEAD` present, zero unmerged paths — Continue refuses, `--skip` is
+   *  git's own named remedy). */
+  readonly canSkip: boolean;
 }
 
 /** What `git/src/ops/conflict.ts` reads off disk (per-worktree `gitDir`, never `commonDir` —
@@ -77,6 +82,7 @@ function operationOf(
     canAbort: input.canAbort,
     isSequence: input.isSequence,
     unmergedCount: input.unmergedPaths.length,
+    canSkip: kind === "cherryPick" || kind === "revert",
   };
 }
 
@@ -162,6 +168,9 @@ export function classifyInProgress(input: {
 // the wire by packages/ipc — see that package's contract.ts).
 // ---------------------------------------------------------------------------------------
 
+/** §7.7's three reset modes, named exactly as git's own flags. */
+export type ResetMode = "soft" | "mixed" | "hard";
+
 export type OpRequest =
   | {
       readonly kind: "checkout";
@@ -227,7 +236,30 @@ export type OpRequest =
       readonly branch: string;
       readonly sha: string;
       readonly index: number;
-    };
+    }
+  | {
+      readonly kind: "reset";
+      readonly mode: ResetMode;
+      /** A sha, always — resolved by the caller from the graph row. Never a ref name: the
+       *  pre-flight resolved and counted against this exact object, and re-resolving a name
+       *  host-side could move the target between advice and act. */
+      readonly target: string;
+      /** §7.7's typed confirmation, required (and re-checked host-side, hard part 2) exactly when
+       *  `mode === "hard"` and the pre-flight's `destroys` was non-empty. The short sha of
+       *  `target`, mirroring `ForcePushDialog`'s branch-name token (D19/D52). */
+      readonly confirmToken: string | undefined;
+    }
+  | {
+      readonly kind: "cherryPick";
+      readonly sha: string;
+      /** Required for a merge commit — probe 8: `is a merge but no -m option was given`. */
+      readonly mainline: number | undefined;
+      readonly noCommit: boolean;
+    }
+  /** §7.13/probe 6: the sequencer's own named remedy for an empty pick or revert — distinct from
+   *  `opContinue`, which git refuses outright when `CHERRY_PICK_HEAD`/`REVERT_HEAD` is present but
+   *  the change is already applied (`canSkip` is what the banner uses to know this is offered). */
+  | { readonly kind: "opSkip" };
 
 export type OpErrorKind =
   | "AuthFailed"
@@ -275,6 +307,16 @@ export type OpErrorKind =
    *  non-atomic failure in the phase: the tracked half was already applied and the stash was
    *  kept (probe 3). */
   | "StashUntrackedCollision"
+  /** P10 probe 6: `cherry-pick`/`revert` refused because the change is already present — nothing
+   *  left to commit, and `--skip` (not `--continue`) is git's own remedy (`canSkip`). */
+  | "EmptyCherryPick"
+  /** P10: the typed confirmation a destructive `reset --hard` requires was absent or did not
+   *  match, re-checked host-side. Deliberately NOT `ProtectedBranch` (D52's pattern is reused;
+   *  its kind is not — the taxonomy should not claim a branch protection that does not exist). */
+  | "ConfirmationRequired"
+  /** P10 probe 2: cherry-picking/reverting a merge commit without `-m` — git's own
+   *  `is a merge but no -m option was given`. */
+  | "MainlineRequired"
   | "Unknown";
 
 export interface UndoSlotSnapshot {
@@ -306,6 +348,12 @@ export interface OpResult {
 // three, and GATED_OP_KINDS is what additionally makes the toolbar disable them. `stashPush`
 // and `stashDrop` are deliberately NOT gated: stashing during a conflicted state is a
 // legitimate escape hatch, and dropping touches only the stash stack, never the worktree.
+// P10 probe 3 adds `reset`: git does NOT refuse `reset --mixed`/`--hard` mid-merge/mid-pick — it
+// silently succeeds and abandons the sequencer state — so this gate is the ONLY thing standing
+// between a user and that data loss, unlike every op above it, which merely mirrors git's own
+// refusal. `cherryPick` is gated for the ordinary reason (git does refuse a second cherry-pick
+// mid-sequence). `opSkip` is deliberately NOT gated: it is only ever offered *from within* the
+// gated state itself (`canSkip`), never a way to bypass it.
 // ---------------------------------------------------------------------------------------
 
 const GATED_OP_KINDS: ReadonlySet<OpRequest["kind"]> = new Set([
@@ -314,6 +362,8 @@ const GATED_OP_KINDS: ReadonlySet<OpRequest["kind"]> = new Set([
   "stashPop",
   "stashApply",
   "stashBranch",
+  "reset",
+  "cherryPick",
 ]);
 
 /** Pure predicate over `(inProgress, opKind)` — no component may reimplement this as a chain of

@@ -41,7 +41,7 @@ export const UNDO_POLICY: { readonly [K in OpRequest["kind"]]: UndoPolicy } = {
   tagDelete: { kind: "undoable" },
   tagPush: { kind: "notUndoable", reason: "A push is not undone locally (§7.12)." },
   tagDeleteRemote: { kind: "notUndoable", reason: "Push the tag again to undo this." },
-  revert: { kind: "notUndoable", reason: "Revert the revert, or use Reset once it ships." },
+  revert: { kind: "notUndoable", reason: "Revert the revert, or reset to before it." },
   opContinue: { kind: "notUndoable", reason: "Continuing an operation has no undo." },
   opAbort: { kind: "notUndoable", reason: "Aborting an operation has no undo." },
   stashPush: { kind: "notUndoable", reason: "Pop the stash to undo this." },
@@ -55,6 +55,9 @@ export const UNDO_POLICY: { readonly [K in OpRequest["kind"]]: UndoPolicy } = {
   },
   stashDrop: { kind: "undoable" },
   stashBranch: { kind: "notUndoable", reason: "Delete the branch and stash again to undo this." },
+  reset: { kind: "undoable" },
+  cherryPick: { kind: "undoable" },
+  opSkip: { kind: "notUndoable", reason: "Skipping a commit in an operation has no undo." },
 };
 
 /**
