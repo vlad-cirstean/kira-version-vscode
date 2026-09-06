@@ -199,7 +199,35 @@ export type OpRequest =
       readonly noCommit: boolean;
     }
   | { readonly kind: "opContinue" }
-  | { readonly kind: "opAbort" };
+  | { readonly kind: "opAbort" }
+  | {
+      readonly kind: "stashPush";
+      /** Undefined → git's own `WIP on <branch>: …`. */
+      readonly message: string | undefined;
+      readonly includeUntracked: boolean;
+      readonly keepIndex: boolean;
+      /** Joined after a literal `--`. Empty ⇒ the whole worktree. */
+      readonly paths: readonly string[];
+    }
+  /** `apply` accepts a raw sha, so this addresses by sha and needs no index guard (probe 8). */
+  | { readonly kind: "stashApply"; readonly sha: string; readonly restoreIndex: boolean }
+  /** `pop` REFUSES a raw sha, so the argv must use `stash@{index}` and the service verifies
+   *  `rev-parse stash@{index} === sha` immediately before writing (probe 8). */
+  | {
+      readonly kind: "stashPop";
+      readonly sha: string;
+      readonly index: number;
+      readonly restoreIndex: boolean;
+    }
+  | { readonly kind: "stashDrop"; readonly sha: string; readonly index: number }
+  /** Addressed by `stash@{index}`: given a raw sha, `stash branch` applies but silently never
+   *  drops (probe 8). */
+  | {
+      readonly kind: "stashBranch";
+      readonly branch: string;
+      readonly sha: string;
+      readonly index: number;
+    };
 
 export type OpErrorKind =
   | "AuthFailed"
@@ -233,6 +261,20 @@ export type OpErrorKind =
   | "ProtectedBranch"
   /** P8: a remote op was cancelled mid-flight (D50) — never a git-reported failure either. */
   | "Cancelled"
+  /** P9: a pop/apply merged with conflicts. Deliberately NOT detected from a stderr pattern — a
+   *  conflicting pop writes to stdout and leaves stderr empty (probe 5) — `RepoService`
+   *  classifies it from `exitCode !== 0` plus a post-op status read-back finding unmerged paths.
+   *  The stash is ALWAYS kept (§7.6); the message says so. */
+  | "StashConflict"
+  /** P9: `apply --index`/`pop --index` onto an already-conflicted index —
+   *  `error: conflicts in index. Try without --index.` (probe 10). Distinct from `StashConflict`
+   *  because the remedy is different and git names it exactly: retry the same op with
+   *  `restoreIndex: false`. */
+  | "StashIndexConflict"
+  /** P9: untracked files in the way of restoring the stash's own untracked half — the ONE
+   *  non-atomic failure in the phase: the tracked half was already applied and the stash was
+   *  kept (probe 3). */
+  | "StashUntrackedCollision"
   | "Unknown";
 
 export interface UndoSlotSnapshot {
@@ -259,11 +301,20 @@ export interface OpResult {
 // The gate (§7.11): "operations that git would refuse anyway" while an operation is in
 // progress. Probed exhaustively — git refuses switch during merge/cherry-pick/rebase/revert,
 // and would refuse reset and another revert; it does NOT refuse branch/tag creation. So the
-// gate is scoped to exactly checkout and revert (reset/stash-pop join it at P9/P10, when
-// `OpRequest` actually gains those members).
+// gate is scoped to exactly checkout and revert at P6, plus, at P9, stashPop/stashApply/
+// stashBranch — `classifyStashPop` already emits an `inProgressOperation` blocker for these
+// three, and GATED_OP_KINDS is what additionally makes the toolbar disable them. `stashPush`
+// and `stashDrop` are deliberately NOT gated: stashing during a conflicted state is a
+// legitimate escape hatch, and dropping touches only the stash stack, never the worktree.
 // ---------------------------------------------------------------------------------------
 
-const GATED_OP_KINDS: ReadonlySet<OpRequest["kind"]> = new Set(["checkout", "revert"]);
+const GATED_OP_KINDS: ReadonlySet<OpRequest["kind"]> = new Set([
+  "checkout",
+  "revert",
+  "stashPop",
+  "stashApply",
+  "stashBranch",
+]);
 
 /** Pure predicate over `(inProgress, opKind)` — no component may reimplement this as a chain of
  *  `v-if`s (W12's own "Done when"). */

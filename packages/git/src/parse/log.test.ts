@@ -69,7 +69,7 @@ describe("parseLogRecord", () => {
     const records = await loadRecords("withStash");
     const commits = records.map(parseLogRecord);
     const stashCommit = commits.find((c) => c.parents.length === 2);
-    expect(stashCommit?.decoration).toEqual([{ kind: "stash" }]);
+    expect(stashCommit?.decoration).toEqual([{ kind: "stash", index: 0 }]);
   });
 });
 

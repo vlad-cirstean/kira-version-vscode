@@ -43,7 +43,7 @@ describe("badgeSpecFor", () => {
   });
 
   test("a stash is a dashed square on the stash token, labelled 'stash'", () => {
-    const spec = badgeSpecFor({ kind: "stash" });
+    const spec = badgeSpecFor({ kind: "stash", index: 0 });
     expect(spec.shape).toBe("square");
     expect(spec.dashed).toBe(true);
     expect(spec.colorClass).toBe("kv-badge-stash");
@@ -62,7 +62,7 @@ describe("badgeSpecFor", () => {
   test("docs/plans/P7.md W14: only branch/remoteBranch carry refKind/refName — tag/stash/HEAD carry neither", () => {
     expect(badgeSpecFor({ kind: "tag", name: "v1.0.0" }).refKind).toBeUndefined();
     expect(badgeSpecFor({ kind: "tag", name: "v1.0.0" }).refName).toBeUndefined();
-    expect(badgeSpecFor({ kind: "stash" }).refKind).toBeUndefined();
+    expect(badgeSpecFor({ kind: "stash", index: 0 }).refKind).toBeUndefined();
     expect(badgeSpecFor({ kind: "head" }).refKind).toBeUndefined();
   });
 });
@@ -77,7 +77,7 @@ describe("planBadges", () => {
       refs(
         { kind: "branch", name: "main", isHead: true },
         { kind: "tag", name: "v1.0.0" },
-        { kind: "stash" },
+        { kind: "stash", index: 0 },
       ),
     );
     expect(plan.visible).toHaveLength(3);
@@ -97,7 +97,7 @@ describe("planBadges", () => {
       { kind: "remoteBranch", name: "origin/dev" },
       { kind: "tag", name: "v1.0.0" },
       { kind: "tag", name: "v1.0.1" },
-      { kind: "stash" },
+      { kind: "stash", index: 0 },
     );
     const plan = planBadges(decorations);
     expect(plan.visible).toHaveLength(3);

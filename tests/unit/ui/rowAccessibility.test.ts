@@ -39,7 +39,7 @@ describe("describeDecoration", () => {
   });
 
   test("a stash", () => {
-    expect(describeDecoration({ kind: "stash" })).toBe("stash");
+    expect(describeDecoration({ kind: "stash", index: 0 })).toBe("stash");
   });
 
   test("detached HEAD", () => {

@@ -98,7 +98,11 @@ function parseDecorationToken(token: string): DecorationRef {
   // `revSetArgs("all")` walks `refs/stash` explicitly (this file's own doc comment on why), and
   // `--decorate=full` names it exactly this way — distinct from a `refs/heads/stash` branch,
   // which would arrive as `refs/heads/stash` and fall through to the branch case below instead.
-  if (token === "refs/stash") return { kind: "stash" };
+  // `refs/stash` the REF only ever points at the top of the stack, so `%D` can only ever mean
+  // `stash@{0}` here (probe 7) — every other stack member's decoration is synthesised
+  // separately, by sha membership against the fetched stash list (P9 W12), never parsed from a
+  // log record's own `%D` field.
+  if (token === "refs/stash") return { kind: "stash", index: 0 };
   const branch = stripPrefix(token, "refs/heads/");
   if (branch !== undefined) return { kind: "branch", name: branch, isHead: false };
   const remote = stripPrefix(token, "refs/remotes/");

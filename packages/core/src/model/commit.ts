@@ -17,10 +17,15 @@ export type DecorationRef =
   | { readonly kind: "tag"; readonly name: string }
   /** Detached HEAD pointing directly at this commit, with no branch in the decoration list. */
   | { readonly kind: "head" }
-  /** The tip of `refs/stash` (P4 W7/W8: badge and node shape both key off this, the single
-   *  source `git/src/parse/log.ts`'s `parseDecorationToken` recognizes by name — never a second
-   *  heuristic over the subject line, which a normal commit could coincidentally match). */
-  | { readonly kind: "stash" };
+  /** A stash entry (P4 W7/W8: badge and node shape both key off this, the single source
+   *  `git/src/parse/log.ts`'s `parseDecorationToken` recognizes by name — never a second
+   *  heuristic over the subject line, which a normal commit could coincidentally match).
+   *  `index` is the `stash@{N}` position at chunk-build time — P9 synthesises it by sha
+   *  membership against the fetched stash list, not parsed from `%D`: `--decorate` only ever
+   *  names the *tip* of `refs/stash` literally, so `parseDecorationToken` alone can produce this
+   *  variant only for `stash@{0}` (`index: 0`, probe 7) — every other stack member gets its
+   *  decoration from that same synthesis pass, never from the log walk's own `%D` field. */
+  | { readonly kind: "stash"; readonly index: number };
 
 export interface CommitRecord {
   readonly sha: string;

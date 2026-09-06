@@ -103,6 +103,23 @@ export const SETTINGS = {
       'remote-branch deletion. "*" matches any characters except "/". Ordinary pushes are ' +
       "never gated.",
   },
+  "kiraVersion.stash.includeUntracked": {
+    key: "kiraVersion.stash.includeUntracked",
+    type: "boolean",
+    default: false,
+    description:
+      'Whether the Stash dialog\'s "include untracked files" box starts checked. Untracked ' +
+      "files are restored by a checkout, not a merge, so a pop can fail on a name collision " +
+      "even when the merge itself is clean (§7.6).",
+  },
+  "kiraVersion.stash.showInGraph": {
+    key: "kiraVersion.stash.showInGraph",
+    type: "boolean",
+    default: true,
+    description:
+      "Whether stash entries appear as nodes in the commit graph. When off, the walk drops " +
+      "refs/stash entirely and stashes are visible only in the stash list.",
+  },
 } as const satisfies Record<string, SettingDef<unknown>>;
 
 export type SettingKey = keyof typeof SETTINGS;

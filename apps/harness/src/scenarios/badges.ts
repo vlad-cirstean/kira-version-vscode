@@ -43,7 +43,7 @@ const DECORATIONS: Readonly<Record<string, readonly DecorationRef[]>> = {
   "tag-point": [{ kind: "tag", name: "v1.0.0" }],
   "detached-point": [{ kind: "head" }],
   "unmerged-tip": [{ kind: "branch", name: "experiment", isHead: false }],
-  "stash-point": [{ kind: "stash" }],
+  "stash-point": [{ kind: "stash", index: 0 }],
   // Six refs on one row (§6.2's "a row with more than three badges collapses into a +N badge",
   // exercised here as +3): two local branches, two remote branches, two tags.
   "many-refs-point": [

@@ -66,6 +66,8 @@ describe("ipc codec", () => {
         "kiraVersion.fetch.autoInterval": 0,
         "kiraVersion.pull.strategy": "auto",
         "kiraVersion.protectedBranches": ["main", "master", "release/*"],
+        "kiraVersion.stash.includeUntracked": false,
+        "kiraVersion.stash.showInGraph": true,
       },
       git: { kind: "ok", path: "/usr/bin/git", version: "2.43.0" },
       capabilities: { openInEditor: true, goToFile: true, clipboard: true, resolveConflict: true },
@@ -136,6 +138,91 @@ describe("ipc codec", () => {
     expect(shas.byteLength).toBe(0);
     expect(result.commits.shas.byteLength).toBe(60);
     expect(new Uint8Array(result.commits.shas).every((b) => b === 0xab)).toBe(true);
+  });
+
+  test("round-trips the four P9 stash requests/results", async () => {
+    const stashListParams: ParamsOf<"stash.list"> = { repoId: "r1" };
+    const stashListResult: ResultOf<"stash.list"> = {
+      entries: [
+        {
+          index: 0,
+          sha: "a".repeat(40),
+          baseSha: "b".repeat(40),
+          indexSha: "c".repeat(40),
+          untrackedSha: undefined,
+          message: "WIP on main: abc1234 subject",
+          branch: "main",
+          timestamp: 1700000000,
+          fileCount: 2,
+          includedUntracked: false,
+        },
+      ],
+    };
+    const { payload: p1, transfer: t1 } = encode(stashListParams);
+    expect(await roundTrip<typeof stashListParams>(p1, t1)).toEqual(stashListParams);
+    const { payload: r1, transfer: rt1 } = encode(stashListResult);
+    expect(await roundTrip<typeof stashListResult>(r1, rt1)).toEqual(stashListResult);
+
+    const stashShowParams: ParamsOf<"stash.show"> = { repoId: "r1", sha: "a".repeat(40) };
+    const stashShowResult: ResultOf<"stash.show"> = {
+      sha: "a".repeat(40),
+      changes: [
+        {
+          kind: "modified",
+          path: "a.txt",
+          originalPath: undefined,
+          similarity: undefined,
+          additions: 1,
+          deletions: 1,
+          isBinary: false,
+        },
+      ],
+    };
+    const { payload: p2, transfer: t2 } = encode(stashShowParams);
+    expect(await roundTrip<typeof stashShowParams>(p2, t2)).toEqual(stashShowParams);
+    const { payload: r2, transfer: rt2 } = encode(stashShowResult);
+    expect(await roundTrip<typeof stashShowResult>(r2, rt2)).toEqual(stashShowResult);
+
+    const stashPopParams: ParamsOf<"preflight.stashPop"> = {
+      repoId: "r1",
+      sha: "a".repeat(40),
+      index: 0,
+    };
+    const stashPopResult: ResultOf<"preflight.stashPop"> = {
+      stashSha: "a".repeat(40),
+      stashIndex: 0,
+      targetSha: "b".repeat(40),
+      prediction: { kind: "clean" },
+      blockers: [],
+      verdict: "clean",
+    };
+    const { payload: p3, transfer: t3 } = encode(stashPopParams);
+    expect(await roundTrip<typeof stashPopParams>(p3, t3)).toEqual(stashPopParams);
+    const { payload: r3, transfer: rt3 } = encode(stashPopResult);
+    expect(await roundTrip<typeof stashPopResult>(r3, rt3)).toEqual(stashPopResult);
+
+    const stashBranchParams: ParamsOf<"preflight.stashBranch"> = {
+      repoId: "r1",
+      sha: "a".repeat(40),
+      branch: "recovered",
+    };
+    const stashBranchResult: ResultOf<"preflight.stashBranch"> = {
+      name: { valid: true, error: undefined, exists: false },
+      checkout: {
+        target: { kind: "sha", name: "a".repeat(40) },
+        detaches: false,
+        createsTracking: undefined,
+        carried: [],
+        blockers: [],
+        verdict: "clean",
+        routes: [],
+      },
+      verdict: "clean",
+    };
+    const { payload: p4, transfer: t4 } = encode(stashBranchParams);
+    expect(await roundTrip<typeof stashBranchParams>(p4, t4)).toEqual(stashBranchParams);
+    const { payload: r4, transfer: rt4 } = encode(stashBranchResult);
+    expect(await roundTrip<typeof stashBranchResult>(r4, rt4)).toEqual(stashBranchResult);
   });
 
   test("dedupeTransferList throws on a buffer listed twice", () => {

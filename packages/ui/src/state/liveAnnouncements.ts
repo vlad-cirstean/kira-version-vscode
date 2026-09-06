@@ -89,6 +89,9 @@ const OP_ERROR_TEXT: Record<OpErrorKind, string> = {
   RemoteNotFound: "the remote repository was not found",
   ProtectedBranch: "the branch is protected",
   Cancelled: "it was cancelled",
+  StashConflict: "it merged with conflicts — the stash was kept",
+  StashIndexConflict: "the index already has conflicts — try again without restoring it",
+  StashUntrackedCollision: "untracked files were in the way — the stash was kept",
   Unknown: "an unexpected error occurred",
 };
 

@@ -596,6 +596,8 @@ function toSettingsSnapshot(): SettingsSnapshot {
     "kiraVersion.fetch.autoInterval": settings["kiraVersion.fetch.autoInterval"],
     "kiraVersion.pull.strategy": settings["kiraVersion.pull.strategy"],
     "kiraVersion.protectedBranches": settings["kiraVersion.protectedBranches"],
+    "kiraVersion.stash.includeUntracked": settings["kiraVersion.stash.includeUntracked"],
+    "kiraVersion.stash.showInGraph": settings["kiraVersion.stash.showInGraph"],
   };
 }
 

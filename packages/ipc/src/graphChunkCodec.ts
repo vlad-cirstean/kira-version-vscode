@@ -73,7 +73,13 @@ function addDecorationRef(builder: flatbuffers.Builder, ref: DecorationRef): num
       nameOffset = builder.createString(ref.name);
       break;
     case "head":
+      break;
+    // P9: no new wire field for `index` — the FlatBuffers schema has no numeric slot for a
+    // stash decoration and adding one means a schema/codegen change this phase does not need;
+    // the `name` string slot is otherwise unused for "stash" (and always was), so the index
+    // travels there as its decimal string form instead.
     case "stash":
+      nameOffset = builder.createString(String(ref.index));
       break;
     default: {
       const exhaustive: never = ref;
@@ -216,8 +222,11 @@ function readDecorationRef(ref: GeneratedDecorationRef): DecorationRef {
     }
     case "head":
       return { kind: "head" };
-    case "stash":
-      return { kind: "stash" };
+    case "stash": {
+      const name = ref.name();
+      if (name === null) throw new Error("graphChunkCodec.fromWire: 'stash' ref has no index");
+      return { kind: "stash", index: Number(name) };
+    }
     default:
       throw new Error(`graphChunkCodec.fromWire: unrecognised DecorationRef kind '${kind}'`);
   }

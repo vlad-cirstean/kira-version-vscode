@@ -837,7 +837,7 @@ describe("ipc wire conformance — runtime round trip over the real boundary (P1
       { kind: "remoteBranch", name: "origin/main" },
       { kind: "tag", name: "v2.0.0" },
       { kind: "head" },
-      { kind: "stash" },
+      { kind: "stash", index: 0 },
     ];
     const records: CommitRecord[] = topology(["c0", "c1:c0", "c2:c1", "c3:c2", "c4:c3"]).map(
       (record, i): CommitRecord => {
@@ -868,7 +868,10 @@ describe("ipc wire conformance — runtime round trip over the real boundary (P1
 
     const stashRow = variants.findIndex((v) => v.kind === "stash");
     const stashRef = byRow.get(stashRow)?.[0];
-    expect(Object.keys(stashRef as object)).toEqual(["kind"]);
+    // Unlike 'head', 'stash' carries a real payload (P9's `index`) — round-tripped through the
+    // unused `name` wire slot as a decimal string (graphChunkCodec.ts's own doc comment on why),
+    // never a bare `{kind}`.
+    expect(stashRef).toEqual({ kind: "stash", index: 0 });
   });
 
   // ---- P16 W12: corruption is loud, not silent -------------------------------------------
