@@ -21,6 +21,7 @@
     "gen:settings": "bun run scripts/gen-settings.ts",
     "check:lane-palette": "bun run scripts/gen-lane-palette.ts --check",
     "gen:lane-palette": "bun run scripts/gen-lane-palette.ts",
+    "fetch:flatc": "bun run scripts/fetch-flatc.ts",
     "build": "bun run scripts/build.ts",
     "test:unit": "bun test packages tests/fixtures tests/unit",
     "test:integration": "bun test tests/integration",

@@ -125,6 +125,9 @@ dist
 # Stores VSCode versions used for testing VSCode extensions
 .vscode-test
 
+# P16 W1 — the pinned flatc binary, fetched on demand by scripts/fetch-flatc.ts, never committed
+.flatc/
+
 # pnpm
 .pnpm-store
 
