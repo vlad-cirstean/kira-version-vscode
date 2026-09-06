@@ -59,7 +59,11 @@ function parseCgiHeaders(
 }
 
 /** Trickles `chunk` into `res` a small slice at a time, `delayMs` apart — real, observable
- *  backpressure rather than one fast write followed by a sleep nobody is waiting on. */
+ *  backpressure rather than one fast write followed by a sleep nobody is waiting on. Bails out
+ *  early once the connection is gone (a genuine client-side cancel, W19's own scenario) rather
+ *  than writing to a destroyed socket — `res`'s own `error` listener (installed alongside this)
+ *  is what keeps that from ever becoming an unhandled `error` event either way; this check just
+ *  stops the otherwise-pointless remaining slices promptly. */
 async function writeThrottled(
   res: http.ServerResponse,
   chunk: Buffer,
@@ -67,6 +71,7 @@ async function writeThrottled(
 ): Promise<void> {
   const SLICE = 512;
   for (let offset = 0; offset < chunk.length; offset += SLICE) {
+    if (res.destroyed || res.writableEnded) return;
     res.write(chunk.subarray(offset, offset + SLICE));
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
@@ -78,6 +83,11 @@ export function startGitHttpBackend(
 ): Promise<GitHttpBackend> {
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
+      // A cancelled client can make a write racing the abort land on an already-destroyed
+      // socket — `writeThrottled`'s own `destroyed`/`writableEnded` check closes most of that
+      // window, but not a write already in flight when the abort lands. Without this listener
+      // that would be an unhandled `error` event, which Node treats as fatal.
+      res.on("error", () => {});
       if (opts.auth) {
         const expected = `Basic ${Buffer.from(`${opts.auth.username}:${opts.auth.password}`).toString("base64")}`;
         if (req.headers.authorization !== expected) {
@@ -106,10 +116,24 @@ export function startGitHttpBackend(
 
       let headerBuf = Buffer.alloc(0);
       let headersSent = false;
+      // Every write — throttled or not — is chained onto this single promise, never fired
+      // independently per `data` event: `child.stdout`'s pipe can deliver a large pack in several
+      // reads, and two independent `writeThrottled` calls racing each other would interleave their
+      // slices into a corrupted byte stream. `child.on("close")` below awaits this same chain
+      // before ending the response, for the same reason a *smaller* payload needs it too — git
+      // http-backend can finish (and close) well before a slow, still-draining trickle of writes
+      // this loop hasn't caught up to yet; ending the response then would silently truncate it.
+      let pendingWrites: Promise<void> = Promise.resolve();
+      function enqueueWrite(chunk: Buffer): void {
+        pendingWrites = pendingWrites.then(() =>
+          opts.delayMs
+            ? writeThrottled(res, chunk, opts.delayMs)
+            : Promise.resolve(void res.write(chunk)),
+        );
+      }
       child.stdout.on("data", (chunk: Buffer) => {
         if (headersSent) {
-          if (opts.delayMs) void writeThrottled(res, chunk, opts.delayMs);
-          else res.write(chunk);
+          enqueueWrite(chunk);
           return;
         }
         headerBuf = Buffer.concat([headerBuf, chunk]);
@@ -118,17 +142,16 @@ export function startGitHttpBackend(
         headersSent = true;
         res.writeHead(parsed.status, parsed.headers);
         const body = headerBuf.subarray(parsed.bodyStart);
-        if (body.length > 0) {
-          if (opts.delayMs) void writeThrottled(res, body, opts.delayMs);
-          else res.write(body);
-        }
+        if (body.length > 0) enqueueWrite(body);
       });
       child.stderr.on("data", () => {
         // git http-backend's own diagnostics — not part of the CGI response, and not needed by
         // any test; swallowed so it never interleaves with this process's own stdout.
       });
       child.on("close", () => {
-        if (!res.writableEnded) res.end();
+        void pendingWrites.then(() => {
+          if (!res.writableEnded) res.end();
+        });
       });
       child.on("error", (err) => {
         if (!res.headersSent) res.writeHead(500);

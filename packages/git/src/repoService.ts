@@ -596,6 +596,10 @@ interface RepoServiceOptions {
    *  `kiraVersion.fetch.autoInterval: 1` as a few real milliseconds instead of a real minute.
    *  Additive, defaults to the real constant. */
   readonly autoFetchMsPerMinute?: number;
+  /** Testability hook for `DEFAULT_ASKPASS_TIMEOUT_MS` (W13/W19) — lets a test that never answers
+   *  a credential prompt observe the broker's own timeout-to-`AuthFailed` path inside a normal
+   *  test timeout, rather than the real 120s. Additive, defaults to the real constant. */
+  readonly askpassTimeoutMs?: number;
 }
 
 interface RepoSession {
@@ -725,6 +729,7 @@ export class RepoService {
   readonly #autoFetchPollMs: number;
   readonly #autoFetchMsPerMinute: number;
   readonly #autoFetchTimer: ReturnType<typeof setInterval>;
+  readonly #askpassTimeoutMs: number | undefined;
 
   readonly git: GitStatus;
 
@@ -736,6 +741,7 @@ export class RepoService {
     detailCacheMaxEntries: number,
     autoFetchPollMs: number,
     autoFetchMsPerMinute: number,
+    askpassTimeoutMs: number | undefined,
   ) {
     this.#deps = deps;
     this.#resolution = resolution;
@@ -746,6 +752,7 @@ export class RepoService {
     this.git = toGitStatus(resolution);
     this.#autoFetchPollMs = autoFetchPollMs;
     this.#autoFetchMsPerMinute = autoFetchMsPerMinute;
+    this.#askpassTimeoutMs = askpassTimeoutMs;
     // `unref()`: a pending poll must never be the reason a process (the harness under bun, a test
     // runner) stays alive — every other timer in this file (`evictTimer`) is a plain `setTimeout`
     // an explicit `close()`/test teardown clears; this one lives for the service's whole lifetime
@@ -767,6 +774,7 @@ export class RepoService {
       opts.detailCacheMaxEntries ?? DETAIL_CACHE_MAX_ENTRIES,
       opts.autoFetchPollMs ?? AUTO_FETCH_POLL_MS,
       opts.autoFetchMsPerMinute ?? AUTO_FETCH_MS_PER_MINUTE,
+      opts.askpassTimeoutMs,
     );
   }
 
@@ -2154,7 +2162,9 @@ export class RepoService {
 
   async #ensureAskpassSession(): Promise<AskpassSession> {
     if (this.#askpassSessionPromise === undefined) {
-      const broker = new AskpassBroker();
+      const broker = new AskpassBroker(
+        this.#askpassTimeoutMs !== undefined ? { timeoutMs: this.#askpassTimeoutMs } : {},
+      );
       this.#askpassBroker = broker;
       this.#askpassSessionPromise = broker.start();
     }

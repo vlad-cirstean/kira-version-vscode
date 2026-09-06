@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -12,7 +12,7 @@ import type {
   SpawnRequest,
 } from "../../packages/core/src/index.ts";
 import { CommitStore, defaultSettings } from "../../packages/core/src/index.ts";
-import { FakeLogger } from "../../packages/core/src/ports/testFakes.ts";
+import { FakeCredentialPrompt, FakeLogger } from "../../packages/core/src/ports/testFakes.ts";
 import { locateGit, resolveRepoIdentity } from "../../packages/git/src/discovery.ts";
 import { GitCancelled } from "../../packages/git/src/errors.ts";
 import { openLogSession } from "../../packages/git/src/logSession.ts";
@@ -203,6 +203,33 @@ function pushExternalCommit(
 let remoteOpIdCounter = 0;
 function nextOpId(): string {
   return `test-op-${remoteOpIdCounter++}`;
+}
+
+/** Every live `git http-backend` process (any test's) whose own `cwd` is exactly `bareRepoDir` —
+ *  `pgrep -f`'s argv match alone can't tell two fixtures' bare repos apart (`GIT_PROJECT_ROOT` is
+ *  an env var, never an argv), so this cross-checks each candidate pid's real `/proc/<pid>/cwd`
+ *  against the one repo this test cares about. Used by the cancel-a-slow-fetch scenario (W19 item
+ *  7) to prove a killed fetch leaves nothing running server-side, not just that the client call
+ *  returned. */
+function livingHttpBackendPidsFor(bareRepoDir: string): number[] {
+  let pids: string[];
+  try {
+    pids = execFileSync("pgrep", ["-f", "git http-backend"], { encoding: "utf8" })
+      .trim()
+      .split("\n")
+      .filter((line) => line.length > 0);
+  } catch {
+    return []; // pgrep's own "no processes matched" exit code
+  }
+  return pids
+    .map((pid) => Number(pid))
+    .filter((pid) => {
+      try {
+        return readlinkSync(`/proc/${pid}/cwd`) === bareRepoDir;
+      } catch {
+        return false; // exited between pgrep and this check — not an orphan
+      }
+    });
 }
 
 /** Fills in every field `RemoteOpRequest` requires (none are optional keys — `exactOptionalPropertyTypes`
@@ -2619,6 +2646,539 @@ describe("RepoService — remote ops (W14)", () => {
   });
 });
 
+/**
+ * `docs/plans/P8.md` W19 — the plan's own twelve numbered exit-criteria scenarios, one test each
+ * (some folded together where they share a fixture and are trivially adjacent, e.g. the three
+ * protected-branch outcomes). Everything here runs against a real local bare remote or a real
+ * `git http-backend` (`tests/fixtures/gitHttpBackend.ts`, W18) — nothing simulated.
+ */
+describe("RepoService — remote ops (W19 exit criteria)", () => {
+  // 1. Non-ff rejection.
+  test("push is rejected with NonFastForward when the remote has diverged, and the remote is left untouched", async () => {
+    const repo = await withRemote({ localOnlyCommits: 1 });
+    pushExternalCommit(repo.remoteDir, "main", "external change");
+    const beforeTip = execFileSync("git", ["--git-dir", repo.remoteDir, "rev-parse", "main"], {
+      env: baseEnv(repo.remoteDir),
+      encoding: "utf8",
+    }).trim();
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: () => defaultSettings(),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      // A plain push, deliberately not forcePush — §7.2: the rejection itself carries no force
+      // affordance; offering one is a separate, explicit op the UI chooses to start.
+      const result = await service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({ kind: "push", remote: "origin", branch: "main" }),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.error?.kind).toBe("NonFastForward");
+
+      const afterTip = execFileSync("git", ["--git-dir", repo.remoteDir, "rev-parse", "main"], {
+        env: baseEnv(repo.remoteDir),
+        encoding: "utf8",
+      }).trim();
+      expect(afterTip).toBe(beforeTip);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  // 3. --force-if-includes violation (D48's own reason for existing).
+  test("forcePush fails with RemoteRefUpdated when the remote-tracking ref was fetched but never integrated", async () => {
+    const repo = await withRemote({ localOnlyCommits: 1 });
+    const env = baseEnv(repo.dir);
+    // Someone else pushes, based on the same original tip local's own commit forked from — a
+    // genuine divergence, not a fast-forward.
+    const externalTip = pushExternalCommit(repo.remoteDir, "main", "external change");
+    // Local fetches it (origin/main now == externalTip, and — the whole point — git's own reflog
+    // for refs/remotes/origin/main now records that update) but never merges or rebases onto it.
+    execFileSync("git", ["fetch", "--quiet", "origin"], { cwd: repo.dir, env });
+    const fetchedOriginMain = execFileSync("git", ["rev-parse", "origin/main"], {
+      cwd: repo.dir,
+      env,
+      encoding: "utf8",
+    }).trim();
+    expect(fetchedOriginMain).toBe(externalTip);
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: () => defaultSettings(),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      // expectedRemoteTip matches the *actual* current remote tip (RepoService's own lease
+      // re-check passes) — this only fails because plain `--force-with-lease` alone would have
+      // let it through; `--force-if-includes` is what catches "fetched but not integrated" (D48).
+      const result = await service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({
+          kind: "forcePush",
+          remote: "origin",
+          branch: "main",
+          expectedRemoteTip: fetchedOriginMain,
+          confirmToken: "main",
+        }),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.error?.kind).toBe("RemoteRefUpdated");
+
+      const remoteStillAt = execFileSync(
+        "git",
+        ["--git-dir", repo.remoteDir, "rev-parse", "main"],
+        {
+          env: baseEnv(repo.remoteDir),
+          encoding: "utf8",
+        },
+      ).trim();
+      expect(remoteStillAt).toBe(externalTip);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  // 4. Hook rejection, through the full runRemoteOp path (errors.test.ts's own HookRejected test
+  // exercises classifyGitError directly against the driver; this proves the same text survives
+  // RemoteOpResult's own error.remoteMessage assembly end to end).
+  test("HookRejected — a pre-receive hook's stderr survives verbatim on RemoteOpResult.error.remoteMessage", async () => {
+    const repo = await withRemote({
+      localOnlyCommits: 1,
+      hook: {
+        type: "pre-receive",
+        exitCode: 1,
+        message: "policy: direct pushes to main are blocked",
+      },
+    });
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: () => defaultSettings(),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const result = await service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({ kind: "push", remote: "origin", branch: "main" }),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.error?.kind).toBe("HookRejected");
+      expect(result.error?.remoteMessage).toContain("policy: direct pushes to main are blocked");
+    } finally {
+      service.dispose();
+    }
+  });
+
+  // 5. No hang, no askpass answer: a CredentialPrompt is configured but declines (resolves
+  // undefined) rather than hanging — completes with AuthFailed well inside this test's own
+  // timeout, not the broker's 120s default.
+  test("AuthFailed, no hang — a configured CredentialPrompt that declines completes promptly", async () => {
+    const repo = await withRemote({ localOnlyCommits: 1, requireAuth: true });
+    execFileSync("git", ["remote", "set-url", "origin", repo.remoteUrl ?? ""], {
+      cwd: repo.dir,
+      env: baseEnv(repo.dir),
+    });
+    const credentialPrompt = new FakeCredentialPrompt(); // no queued answers — declines instantly
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: () => defaultSettings(),
+      configuredGitCandidates: [],
+      credentialPrompt,
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const result = await service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({ kind: "push", remote: "origin", branch: "main" }),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.error?.kind).toBe("AuthFailed");
+      expect(credentialPrompt.calls.length).toBeGreaterThan(0);
+    } finally {
+      service.dispose();
+      await repo.closeRemoteServer();
+    }
+  }, 10_000);
+
+  // 6. No hang, prompt never answers — "this is the criterion's real teeth" (the plan's own
+  // words): the broker's OWN timeout, not the prompt, is what unblocks this, proven with a
+  // shortened askpassTimeoutMs so the test proves it in milliseconds rather than real minutes.
+  test("AuthFailed, no hang — the askpass broker's own timeout fires when the prompt never resolves", async () => {
+    const repo = await withRemote({ localOnlyCommits: 1, requireAuth: true });
+    execFileSync("git", ["remote", "set-url", "origin", repo.remoteUrl ?? ""], {
+      cwd: repo.dir,
+      env: baseEnv(repo.dir),
+    });
+    const credentialPrompt = new FakeCredentialPrompt();
+    credentialPrompt.hang = true;
+
+    const service = await RepoService.create(
+      {
+        runner: new NodeProcessRunner(),
+        fileWatcher: new NodeFileWatcher(),
+        logger: new FakeLogger(),
+        settings: () => defaultSettings(),
+        configuredGitCandidates: [],
+        credentialPrompt,
+      },
+      { askpassTimeoutMs: 200 },
+    );
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const start = Date.now();
+      const result = await service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({ kind: "push", remote: "origin", branch: "main" }),
+      );
+      const elapsedMs = Date.now() - start;
+      expect(result.ok).toBe(false);
+      expect(result.error?.kind).toBe("AuthFailed");
+      // Comfortably above the 200ms timeout (broker overhead) and comfortably below the real
+      // 120s default — proves the *shortened* timeout is what fired, not a coincidence.
+      expect(elapsedMs).toBeLessThan(10_000);
+    } finally {
+      service.dispose();
+      await repo.closeRemoteServer();
+    }
+  }, 15_000);
+
+  // 7. Cancel a slow fetch.
+  test("cancelling a slow fetch resolves Cancelled promptly, leaves no orphaned git http-backend, and leaves refs untouched", async () => {
+    const repo = await withRemote({ localOnlyCommits: 0, slow: { delayMs: 15 } });
+    execFileSync("git", ["remote", "set-url", "origin", repo.remoteUrl ?? ""], {
+      cwd: repo.dir,
+      env: baseEnv(repo.dir),
+    });
+    // Big enough that, throttled at 512 bytes/15ms, the transfer is still running well after
+    // this test issues its cancel — not so big a slow machine could ever race past that window.
+    pushExternalCommit(repo.remoteDir, "main", "big change", {
+      path: "big.txt",
+      content: "x".repeat(400_000),
+    });
+    const preTip = execFileSync("git", ["rev-parse", "origin/main"], {
+      cwd: repo.dir,
+      env: baseEnv(repo.dir),
+      encoding: "utf8",
+    }).trim();
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: () => defaultSettings(),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const running = service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({ kind: "fetch", remote: "origin" }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100)); // let the transfer actually start
+      expect(service.cancelRemoteOp(repoId)).toBe(true);
+
+      const result = await running;
+      expect(result.ok).toBe(false);
+      expect(result.error?.kind).toBe("Cancelled");
+
+      await waitFor(() => livingHttpBackendPidsFor(repo.remoteDir).length === 0, 3000);
+      expect(livingHttpBackendPidsFor(repo.remoteDir)).toEqual([]);
+
+      const postTip = execFileSync("git", ["rev-parse", "origin/main"], {
+        cwd: repo.dir,
+        env: baseEnv(repo.dir),
+        encoding: "utf8",
+      }).trim();
+      expect(postTip).toBe(preTip); // the interrupted fetch never landed a ref update
+    } finally {
+      service.dispose();
+      await repo.closeRemoteServer();
+    }
+  }, 15_000);
+
+  // 8. Cancel is refused mid-push (D50's cancellability table: push's phase is never killable,
+  // regardless of how fast or slow the transfer actually is — no `slow` fixture needed to prove
+  // it, since the refusal is `killable`-flag-based, decided synchronously before any spawn).
+  test("cancelRemoteOp is refused while a push is running, and the push still completes", async () => {
+    const repo = await withRemote({ localOnlyCommits: 1 });
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: () => defaultSettings(),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const running = service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({ kind: "push", remote: "origin", branch: "main" }),
+      );
+      expect(service.cancelRemoteOp(repoId)).toBe(false);
+
+      const result = await running;
+      expect(result.ok).toBe(true);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  // 9. Protected branch: all three outcomes (missing / wrong / matching confirmToken). The
+  // "missing" case already has its own test above (W14); this adds "wrong".
+  test("forcePush against a protected branch with a WRONG confirmToken is still refused", async () => {
+    const repo = await withRemote({ localOnlyCommits: 1 });
+    const currentTip = execFileSync("git", ["rev-parse", "origin/main"], {
+      cwd: repo.dir,
+      env: baseEnv(repo.dir),
+      encoding: "utf8",
+    }).trim();
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: () => defaultSettings(),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const result = await service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({
+          kind: "forcePush",
+          remote: "origin",
+          branch: "main",
+          expectedRemoteTip: currentTip,
+          confirmToken: "not-main",
+        }),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.error?.kind).toBe("ProtectedBranch");
+
+      const stillThere = execFileSync("git", ["--git-dir", repo.remoteDir, "rev-parse", "main"], {
+        env: baseEnv(repo.remoteDir),
+        encoding: "utf8",
+      }).trim();
+      expect(stillThere).toBe(currentTip);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  // 11. Pull, all three strategies — merge (with a real conflict) is already covered above (W14);
+  // this adds rebase and ff-only's diverged refusal.
+  test("pull with the rebase strategy replays the local commit on top of the moved upstream", async () => {
+    const repo = await withRemote({ remoteOnlyCommits: 1, localOnlyCommits: 1 });
+    const env = baseEnv(repo.dir);
+    const localCommitMessage = execFileSync("git", ["log", "-1", "--format=%s"], {
+      cwd: repo.dir,
+      env,
+      encoding: "utf8",
+    }).trim();
+    const upstreamTip = execFileSync("git", ["rev-parse", "origin/main"], {
+      cwd: repo.dir,
+      env,
+      encoding: "utf8",
+    }).trim();
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: () => defaultSettings(),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const result = await service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({ kind: "pull", remote: "origin", branch: "main", strategy: "rebase" }),
+      );
+      expect(result.ok).toBe(true);
+
+      // Rebased, not merged: the moved upstream is a straight-line ancestor of the new HEAD (no
+      // merge commit), and the local commit's own message survived the replay.
+      const isAncestor = execFileSync("git", ["merge-base", "--is-ancestor", upstreamTip, "HEAD"], {
+        cwd: repo.dir,
+        env,
+      });
+      expect(isAncestor).toBeDefined(); // exits 0 (does not throw) — that alone is the assertion
+      const headMessage = execFileSync("git", ["log", "-1", "--format=%s"], {
+        cwd: repo.dir,
+        env,
+        encoding: "utf8",
+      }).trim();
+      expect(headMessage).toBe(localCommitMessage);
+      const parentCount = execFileSync("git", ["log", "-1", "--format=%P"], {
+        cwd: repo.dir,
+        env,
+        encoding: "utf8",
+      }).trim();
+      expect(parentCount.split(" ").length).toBe(1); // one parent — a replay, not a merge commit
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("pull with the ff-only strategy refuses a diverged branch with NonFastForward, spawning no merge", async () => {
+    const repo = await withRemote({ remoteOnlyCommits: 1, localOnlyCommits: 1 });
+    const localTip = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repo.dir,
+      env: baseEnv(repo.dir),
+      encoding: "utf8",
+    }).trim();
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: () => defaultSettings(),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const result = await service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({ kind: "pull", remote: "origin", branch: "main", strategy: "ff-only" }),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.error?.kind).toBe("NonFastForward");
+      expect(result.inProgress).toBeNull(); // refused before any merge ever spawned
+
+      const stillLocalTip = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repo.dir,
+        env: baseEnv(repo.dir),
+        encoding: "utf8",
+      }).trim();
+      expect(stillLocalTip).toBe(localTip);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  // 12. --prune-tags off by default (D49).
+  test("fetch prunes stale remote-tracking branches by default but leaves a locally-fetched stale tag alone", async () => {
+    const repo = await withRemote({ localOnlyCommits: 0 });
+    const env = baseEnv(repo.dir);
+    // A tag on the remote, fetched locally, then deleted server-side — the D49 scenario:
+    // `--prune` (on by default) would remove a stale remote-tracking *branch* the same way, but
+    // tags are a separate `--prune-tags` switch, off by default.
+    execFileSync("git", ["tag", "stale-tag", "HEAD"], {
+      cwd: repo.remoteDir,
+      env: baseEnv(repo.remoteDir),
+    });
+    execFileSync("git", ["fetch", "--quiet", "--tags", "origin"], { cwd: repo.dir, env });
+    expect(
+      execFileSync("git", ["tag", "--list", "stale-tag"], {
+        cwd: repo.dir,
+        env,
+        encoding: "utf8",
+      }).trim(),
+    ).toBe("stale-tag");
+    execFileSync("git", ["tag", "-d", "stale-tag"], {
+      cwd: repo.remoteDir,
+      env: baseEnv(repo.remoteDir),
+    });
+
+    const service = await RepoService.create({
+      runner: new NodeProcessRunner(),
+      fileWatcher: new NodeFileWatcher(),
+      logger: new FakeLogger(),
+      settings: () => defaultSettings(),
+      configuredGitCandidates: [],
+    });
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const defaultResult = await service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({ kind: "fetch", remote: "origin" }), // prune: true, pruneTags: false (helper default)
+      );
+      expect(defaultResult.ok).toBe(true);
+      expect(
+        execFileSync("git", ["tag", "--list", "stale-tag"], {
+          cwd: repo.dir,
+          env,
+          encoding: "utf8",
+        }).trim(),
+      ).toBe("stale-tag"); // survives — D49
+
+      const prunedResult = await service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({ kind: "fetch", remote: "origin", pruneTags: true }),
+      );
+      expect(prunedResult.ok).toBe(true);
+      expect(
+        execFileSync("git", ["tag", "--list", "stale-tag"], {
+          cwd: repo.dir,
+          env,
+          encoding: "utf8",
+        }).trim(),
+      ).toBe(""); // gone once explicitly opted in
+    } finally {
+      service.dispose();
+    }
+  });
+});
+
 describe("RepoService — auto-fetch scheduler (W15)", () => {
   function autoFetchSettings(intervalMinutes: number) {
     return { ...defaultSettings(), "kiraVersion.fetch.autoInterval": intervalMinutes };
@@ -2773,6 +3333,109 @@ describe("RepoService — auto-fetch scheduler (W15)", () => {
       expect(logger.entries.some((e) => e.level === "warn")).toBe(false);
     } finally {
       service.dispose();
+    }
+  });
+
+  // W19 item 10's other two guardrails ("hidden" and "busy") — "focused" and "disables after a
+  // failure" are already covered above.
+  test("never runs while the UI is hidden, and resumes once visible", async () => {
+    const repo = await withRemote({ localOnlyCommits: 0 });
+    const service = await RepoService.create(
+      {
+        runner: new NodeProcessRunner(),
+        fileWatcher: new NodeFileWatcher(),
+        logger: new FakeLogger(),
+        settings: () => autoFetchSettings(1),
+        configuredGitCandidates: [],
+      },
+      { autoFetchPollMs: 5, autoFetchMsPerMinute: 5 },
+    );
+    try {
+      service.setUiVisible(false);
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const preTip = execFileSync("git", ["rev-parse", "origin/main"], {
+        cwd: repo.dir,
+        env: baseEnv(repo.dir),
+        encoding: "utf8",
+      }).trim();
+
+      const externalTip = pushExternalCommit(repo.remoteDir, "main", "external change");
+
+      // Several poll cycles' worth of real time, hidden throughout — the tracking ref must not
+      // move.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const stillPreTip = execFileSync("git", ["rev-parse", "origin/main"], {
+        cwd: repo.dir,
+        env: baseEnv(repo.dir),
+        encoding: "utf8",
+      }).trim();
+      expect(stillPreTip).toBe(preTip);
+
+      service.setUiVisible(true);
+      await waitFor(() => {
+        const onDisk = execFileSync("git", ["rev-parse", "origin/main"], {
+          cwd: repo.dir,
+          env: baseEnv(repo.dir),
+          encoding: "utf8",
+        }).trim();
+        return onDisk === externalTip;
+      }, 2000);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("skips a poll while a remote op is already in flight, and catches up once it frees", async () => {
+    // A large enough remote-side payload, over the throttled HTTP transport, that a manually
+    // started fetch is still genuinely in flight — holding `session.activeRemoteOp` — across
+    // several 5ms poll ticks, not merely for the length of one synchronous call.
+    const repo = await withRemote({ localOnlyCommits: 0, slow: { delayMs: 20 } });
+    execFileSync("git", ["remote", "set-url", "origin", repo.remoteUrl ?? ""], {
+      cwd: repo.dir,
+      env: baseEnv(repo.dir),
+    });
+    pushExternalCommit(repo.remoteDir, "main", "big change", {
+      path: "big.txt",
+      content: "x".repeat(60_000),
+    });
+
+    const runner = new CountingRunner();
+    const service = await RepoService.create(
+      {
+        runner,
+        fileWatcher: new NodeFileWatcher(),
+        logger: new FakeLogger(),
+        settings: () => autoFetchSettings(1),
+        configuredGitCandidates: [],
+      },
+      { autoFetchPollMs: 5, autoFetchMsPerMinute: 5 },
+    );
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened;
+
+      const manualFetch = service.runRemoteOp(
+        repoId,
+        nextOpId(),
+        remoteOpRequest({ kind: "fetch", remote: "origin" }),
+      );
+      // Several poll ticks' worth of time while the manual fetch is (by construction) still
+      // transferring — the scheduler must see `activeRemoteOp` set and skip every one of them.
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      const fetchSpawnsWhileBusy = runner.calls.filter((c) => c.argv.includes("fetch")).length;
+      expect(fetchSpawnsWhileBusy).toBe(1); // the manual one only — no auto-fetch snuck in
+
+      const manualResult = await manualFetch;
+      expect(manualResult.ok).toBe(true);
+
+      // Now that the repo is free again, the very next tick catches up rather than staying
+      // skipped forever (`autoFetchLastAt` is left untouched on a skip — this is what proves it).
+      await waitFor(() => runner.calls.filter((c) => c.argv.includes("fetch")).length > 1, 2000);
+    } finally {
+      service.dispose();
+      await repo.closeRemoteServer();
     }
   });
 });
