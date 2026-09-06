@@ -42,17 +42,8 @@ describe("buildRowMenu", () => {
     expect(findItem(sections, "createBranchHere")?.disabled).toBe(false);
     expect(findItem(sections, "createTagHere")?.disabled).toBe(false);
     expect(findItem(sections, "revertThisCommit")?.disabled).toBe(false);
-  });
-
-  test("cherry-pick and reset are absent, not disabled", () => {
-    const sections = buildRowMenu({
-      sha: "a".repeat(40),
-      decorations: [],
-      inProgress: null,
-      clipboardEnabled: true,
-    });
-    expect(findItem(sections, "cherryPick")).toBeUndefined();
-    expect(findItem(sections, "resetToHere")).toBeUndefined();
+    expect(findItem(sections, "resetToThisCommit")?.disabled).toBe(false);
+    expect(findItem(sections, "cherryPickThisCommit")?.disabled).toBe(false);
   });
 
   test("copy actions are absent (not disabled) when clipboard is unavailable", () => {
@@ -80,6 +71,8 @@ describe("buildRowMenu", () => {
       disabledReason: "Rebasing side",
     });
     expect(findItem(sections, "revertThisCommit")?.disabled).toBe(true);
+    expect(findItem(sections, "resetToThisCommit")?.disabled).toBe(true);
+    expect(findItem(sections, "cherryPickThisCommit")?.disabled).toBe(true);
     expect(findItem(sections, "createBranchHere")?.disabled).toBe(false);
     expect(findItem(sections, "createTagHere")?.disabled).toBe(false);
   });
@@ -96,6 +89,8 @@ describe("buildRowMenu", () => {
       "createBranchHere",
       "createTagHere",
       "revertThisCommit",
+      "resetToThisCommit",
+      "cherryPickThisCommit",
       "copySha",
       "copyMessage",
     ]);

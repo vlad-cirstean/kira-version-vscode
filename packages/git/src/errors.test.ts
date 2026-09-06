@@ -540,9 +540,7 @@ describe("classifyGitError — P10/W7 pattern edits (reset, cherry-pick, mainlin
 
   test("MainlineRequired — a merge commit picked/reverted with no -m (probe 8)", () => {
     const stderr = "error: commit dbc4b7b... is a merge but no -m option was given.\n";
-    expect(classifyGitError(["cherry-pick", "dbc4b7b"], 128, stderr).kind).toBe(
-      "MainlineRequired",
-    );
+    expect(classifyGitError(["cherry-pick", "dbc4b7b"], 128, stderr).kind).toBe("MainlineRequired");
   });
 
   test("Conflict — a real cherry-pick conflict still classifies as Conflict, not MainlineRequired", () => {

@@ -86,7 +86,9 @@ export function composeResetAnnouncement(mode: ResetMode, target: string): strin
  *  (§7.13 states the same "staged, not committed" outcome for `--no-commit`). */
 export function composeCherryPickAnnouncement(sha: string, noCommit: boolean): string {
   const subject = `commit ${shortTarget(sha)}`;
-  return noCommit ? `Cherry-picked ${subject} — changes staged, not committed` : `Cherry-picked ${subject}`;
+  return noCommit
+    ? `Cherry-picked ${subject} — changes staged, not committed`
+    : `Cherry-picked ${subject}`;
 }
 
 /** `docs/plans/P10.md` W10, hard part 7's own answer, given a voice: `CherryPickPreflight`'s

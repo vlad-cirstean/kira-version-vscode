@@ -7,7 +7,12 @@
  * touches (probe 7 B/D).
  */
 import type { InProgressOperation } from "../model/operation.ts";
-import type { CherryPickBlocker, CherryPickPreflight, MergeOutcomePrediction, RevertParentChoice } from "./types.ts";
+import type {
+  CherryPickBlocker,
+  CherryPickPreflight,
+  MergeOutcomePrediction,
+  RevertParentChoice,
+} from "./types.ts";
 
 function intersect(a: readonly string[], b: readonly string[]): string[] {
   const set = new Set(b);
@@ -56,7 +61,11 @@ export function classifyCherryPick(input: {
   }
 
   const verdict: CherryPickPreflight["verdict"] =
-    blockers.length > 0 ? "blocked" : input.prediction.kind === "conflicts" ? "willConflict" : "clean";
+    blockers.length > 0
+      ? "blocked"
+      : input.prediction.kind === "conflicts"
+        ? "willConflict"
+        : "clean";
 
   return {
     sha: input.sha,

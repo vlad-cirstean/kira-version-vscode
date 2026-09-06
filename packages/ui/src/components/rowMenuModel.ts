@@ -50,10 +50,11 @@ export interface CommitMenuContext {
  * §6.4's per-commit menu, against the phase's own table: checkout (detached, gated same as the
  * picker's own checkout — §7.11 is scoped to the op kind, not to where it was invoked from),
  * create branch/tag here (never gated — git does not refuse either mid-op), revert this commit
- * (gated). Cherry-pick and reset are open question 2/absent-by-plan — not rendered disabled,
- * simply not items at all, so a disabled entry never implies "coming later in this same menu".
- * Copy sha/copy message reuse P5's `clipboardActions.ts` and are absent (not disabled) when the
- * host has no clipboard port, matching `FileTree.vue`'s own `actions.capabilities.clipboard` gate.
+ * (gated). `docs/plans/P10.md` W15 fills in the two items P6's own comment here used to call
+ * "open question 2/absent-by-plan": reset and cherry-pick, both gated the same way, placed after
+ * revert. Copy sha/copy message reuse P5's `clipboardActions.ts` and are absent (not disabled)
+ * when the host has no clipboard port, matching `FileTree.vue`'s own
+ * `actions.capabilities.clipboard` gate.
  */
 export function buildRowMenu(ctx: CommitMenuContext): MenuSection[] {
   const mutating: MenuItem[] = [
@@ -66,6 +67,8 @@ export function buildRowMenu(ctx: CommitMenuContext): MenuSection[] {
     plainItem("createBranchHere", "Create branch here…"),
     plainItem("createTagHere", "Create tag here…"),
     gatedItem("revertThisCommit", "Revert this commit…", "revert", ctx.inProgress),
+    gatedItem("resetToThisCommit", "Reset to this commit…", "reset", ctx.inProgress),
+    gatedItem("cherryPickThisCommit", "Cherry-pick this commit…", "cherryPick", ctx.inProgress),
   ];
   const sections: MenuSection[] = [{ items: mutating }];
   if (ctx.clipboardEnabled) {

@@ -397,11 +397,8 @@ export function createRepoHandlers(deps: RepoHandlersDeps): ServerHandlers {
     mainline,
   }) => deps.service.preflightRevert(repoId, shas, mainline);
 
-  const preflightResetImpl: RequestHandler<"preflight.reset"> = async ({
-    repoId,
-    target,
-    mode,
-  }) => deps.service.preflightReset(repoId, target, mode);
+  const preflightResetImpl: RequestHandler<"preflight.reset"> = async ({ repoId, target, mode }) =>
+    deps.service.preflightReset(repoId, target, mode);
 
   const preflightCherryPickImpl: RequestHandler<"preflight.cherryPick"> = async ({
     repoId,

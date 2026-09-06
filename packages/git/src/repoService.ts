@@ -510,9 +510,7 @@ function dirtySplitFrom(result: StatusResult): {
  *  its `untracked` (the index already has it staged) list, so `classifyReset`'s `destroys` needs
  *  this as its own third input rather than reading it off either. */
 function stagedNewPathsFrom(result: StatusResult): string[] {
-  return result.entries
-    .filter((e) => e.kind === "ordinary" && e.staged === "A")
-    .map((e) => e.path);
+  return result.entries.filter((e) => e.kind === "ordinary" && e.staged === "A").map((e) => e.path);
 }
 
 /**
@@ -1916,7 +1914,8 @@ export class RepoService {
     ) {
       error = {
         kind: "EmptyCherryPick",
-        message: "This change is already present on this branch — Skip it, or Continue to commit it anyway.",
+        message:
+          "This change is already present on this branch — Skip it, or Continue to commit it anyway.",
       };
     }
 
@@ -2365,7 +2364,10 @@ export class RepoService {
           return {
             argvList: [],
             undo: null,
-            earlyError: { kind: "Unknown", message: "No operation is currently in progress to skip." },
+            earlyError: {
+              kind: "Unknown",
+              message: "No operation is currently in progress to skip.",
+            },
           };
         }
         const argv = skipArgs(inProgress.kind);

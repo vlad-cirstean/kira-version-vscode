@@ -250,21 +250,33 @@ describe("canRunOp — the gate (§7.11)", () => {
 
 describe("classifyInProgress — canSkip (P10 probe 6)", () => {
   test("cherryPick and revert can skip; every other kind cannot", () => {
-    expect(classifyInProgress({ stateFiles: stateFiles({ cherryPickHead: "c0ffee" }), unmergedPaths: [] })?.canSkip).toBe(true);
-    expect(classifyInProgress({ stateFiles: stateFiles({ revertHead: "f00d" }), unmergedPaths: [] })?.canSkip).toBe(true);
-    expect(classifyInProgress({ stateFiles: stateFiles({ mergeHead: "m" }), unmergedPaths: [] })?.canSkip).toBe(false);
+    expect(
+      classifyInProgress({
+        stateFiles: stateFiles({ cherryPickHead: "c0ffee" }),
+        unmergedPaths: [],
+      })?.canSkip,
+    ).toBe(true);
+    expect(
+      classifyInProgress({ stateFiles: stateFiles({ revertHead: "f00d" }), unmergedPaths: [] })
+        ?.canSkip,
+    ).toBe(true);
+    expect(
+      classifyInProgress({ stateFiles: stateFiles({ mergeHead: "m" }), unmergedPaths: [] })
+        ?.canSkip,
+    ).toBe(false);
     expect(
       classifyInProgress({
         stateFiles: stateFiles({ rebaseMergeDir: true }),
         unmergedPaths: [],
       })?.canSkip,
     ).toBe(false);
-    expect(classifyInProgress({ stateFiles: stateFiles({ bisectLog: true }), unmergedPaths: [] })?.canSkip).toBe(
+    expect(
+      classifyInProgress({ stateFiles: stateFiles({ bisectLog: true }), unmergedPaths: [] })
+        ?.canSkip,
+    ).toBe(false);
+    expect(classifyInProgress({ stateFiles: stateFiles({}), unmergedPaths: ["x"] })?.canSkip).toBe(
       false,
     );
-    expect(
-      classifyInProgress({ stateFiles: stateFiles({}), unmergedPaths: ["x"] })?.canSkip,
-    ).toBe(false);
   });
 });
 
