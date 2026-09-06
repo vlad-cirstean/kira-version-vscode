@@ -136,6 +136,7 @@ export type {
   BlobResult,
   GitStatus,
   GraphChunkPayload,
+  RemoteOpProgress,
   RepoOpenOutcome,
   RepoServiceDeps,
 } from "./repoService.ts";
@@ -145,6 +146,7 @@ export {
   DIFF_CACHE_MAX_BYTES,
   HIDDEN_EVICT_MS,
   MAX_PATCH_BYTES,
+  PROGRESS_THROTTLE_MS,
   RepoService,
 } from "./repoService.ts";
 export type { RepoHandlersDeps, RepoServicePort } from "./rpcHandlers.ts";
