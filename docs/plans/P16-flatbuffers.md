@@ -968,6 +968,15 @@ Complete when all of the following hold, verified by running them:
       P15 committed it, so `bun run test:perf` continues to report this as a regression on every
       future run until the orchestrating session weighs in. Flagged below as a Finding; the
       FlatBuffers implementation shipped anyway, per the override.
+      **W11 follow-up (post-checklist):** the coordinator identified that the seven generated
+      `create<Field>Vector()` byte-column builders in `graphChunk.ts` loop `addInt8()` per element
+      instead of using the `flatbuffers` runtime's own bulk `Builder.createByteVector()`. Swapping
+      to `builder.createByteVector(...)` in `toWire` (wire format unchanged — a `[ubyte]` vector is
+      length + raw bytes regardless of which builder call wrote it) roughly **halved** the
+      regression: two fresh runs measured `hostBoundaryMs` at **12.17 ms (+156.4%)** and
+      **10.42 ms (+119.6%)** against the same 4.74 ms baseline — down from 22.95/24.74 ms, but
+      **still materially worse**, still outside the ±20% ladder tolerance. The budget remains
+      untouched; see V3 in Findings for the full before/after and what remains unexplained.
 - [x] **`CONTRACT_VERSION` is 8**, and a version mismatch still fails loudly (unchanged
       `validateVersion`/`ContractVersionMismatchError` machinery in `validate.ts`).
 - [x] **Nothing else moved.** `rpc.test.ts` and `codec.test.ts` have zero diff against the pre-P16
@@ -1020,7 +1029,7 @@ recorded in `graphChunk.ts`'s generated-file header rather than re-invoking `fla
 makes this possible: the schema-drift check never touches the toolchain at all in the common case,
 only `gen:schema` (an explicit, separate command) does.
 
-### V3 — The host-boundary regression (W11 escalation)
+### V3 — The host-boundary regression (W11 escalation, plus a coordinator-directed follow-up)
 
 Measured twice, independently, against a 100k-commit `largeBranchy` repo, using
 `tests/perf/streamRoundTrip.ts`'s gated `hostBoundaryMs` metric (the shipping FlatBuffers
@@ -1060,6 +1069,52 @@ buffer, and `fromWire` performs a `ByteBuffer` wrap plus per-column `slice()` co
 allocation/copy passes than the old path's single `JSON.stringify`/base64 encode, on payloads whose
 absolute byte counts are already small (hundreds of KB) enough that constant-factor overhead
 dominates.
+
+**Follow-up (post-checklist, coordinator-directed):** the coordinator reviewed the diff and this
+Finding and, with a microbenchmark of their own, identified a specific root cause: flatc's generated
+`create<Field>Vector()` wrappers for `[ubyte]` columns (`createShasVector`, `createParentOffsetsVector`,
+`createParentShasVector`, `createIdentityIdsVector`, `createTimesVector`, `createSubjectBytesVector`,
+`createSubjectOffsetsVector` in `packages/ipc/src/generated/graphChunk.ts`) loop `builder.addInt8()`
+once per element — an *O(n)* call per byte — rather than using the `flatbuffers` runtime's own
+`Builder.createByteVector(v: Uint8Array): Offset`, which does one bulk `this.bb.bytes().set(v,
+this.space)` copy. `PackedCommitChunk` has seven such byte columns per chunk, and the coordinator's
+microbenchmark (500,000-byte column, 20 iterations) measured 2.087 ms/iter for the loop vs.
+0.578 ms/iter for the bulk method — a 3.6x difference on one column alone.
+
+`toWire` in `graphChunkCodec.ts` was changed to call `builder.createByteVector(new
+Uint8Array(...))` directly (the runtime's own bulk method) for all seven byte columns instead of
+the generated per-column wrappers, passing the resulting offset to the same `add<Field>()` calls as
+before. This is a wire-format-neutral change: a FlatBuffers `[ubyte]` vector is length-prefixed raw
+bytes on the wire regardless of which builder method wrote it, so `fromWire`, the `.fbs` schema, all
+four drift guards, and every existing round-trip/no-defaults test needed zero changes — confirmed by
+re-running `bun run test:unit` (922 pass, 0 fail, unchanged) and `bun run test:integration` (230
+pass, 0 fail, unchanged) after the edit, and by a clean `tsc --build --force`.
+
+Re-measuring `hostBoundaryMs` twice, independently, against the same 100k-commit repo, after the
+fix:
+
+| metric | baseline (P15) | before fix (run 1 / run 2) | after fix (run 1 / run 2) |
+|---|---|---|---|
+| `hostBoundaryMs` (gated) | 4.74 ms | 22.95 ms (+383.8%) / 24.74 ms (+421.4%) | 12.17 ms (+156.4%) / 10.42 ms (+119.6%) |
+| `hostWireBytes` (gated) | 563,748 B | 563,697 B / 563,748 B | 563,697 B / 563,748 B (unchanged) |
+
+The fix **roughly halved** the regression — a real, substantial improvement, confirming the
+coordinator's hypothesis was at least a major contributor — but `hostBoundaryMs` is **still
+materially worse** than baseline, still well outside the ±20% ladder tolerance. Per the same
+escalation ladder and the coordinator's own explicit instruction for this branch ("if it's still
+materially worse even after this fix, leave the budget untouched"): `streamRoundTrip.budget.json`
+remains **untouched** at its original P15 values; `bun run test:perf` continues to report
+`hostBoundaryMs` as a failing regression by design. What this rules out: the byte-vector codegen
+inefficiency was a large but not sole contributor. What remains unexplained: roughly a 2.2–2.6x
+gap between the post-fix `hostBoundaryMs` (~10–12 ms) and the old plain-JSON-plus-base64 path's
+~3 ms (`hostBoundaryBase64Ms`, recorded alongside, unaffected by this fix since it doesn't touch
+FlatBuffers at all) — plausibly the remaining `Builder`/`ByteBuffer` construction and copy overhead
+inherent to `toWire`/`fromWire`'s object-table structure (nested `RowDecorations`/`DecorationRef`
+tables, the `dictionary` string vector, the nine separate typed-array `.slice()` copies in
+`fromWire`'s `copyColumn`), none of which this scoped follow-up touched. A deeper investigation
+(e.g. whether `fromWire`'s per-column `.slice()` copies could be views in cases where the caller
+doesn't need an independent buffer) is left to a future decision by the orchestrating session,
+consistent with this follow-up's scope being one targeted fix, not a broader optimization pass.
 
 ### V4 — Review sidebar uses the same path
 

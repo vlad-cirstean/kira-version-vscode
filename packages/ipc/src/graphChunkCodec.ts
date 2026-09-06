@@ -136,28 +136,22 @@ export function toWire(chunk: PackedCommitChunk): ArrayBuffer {
   // columns (emptyPackedChunk(), a single root commit's empty parentShas) round-trip as
   // zero-length vectors rather than an absent field reading back as FlatBuffers' scalar/vector
   // default (rpc.test.ts's emptyPackedChunk() depends on this).
-  const shasVector = GeneratedPackedCommitChunk.createShasVector(builder, new Uint8Array(shas));
-  const parentOffsetsVector = GeneratedPackedCommitChunk.createParentOffsetsVector(
-    builder,
-    new Uint8Array(parentOffsets),
-  );
-  const parentShasVector = GeneratedPackedCommitChunk.createParentShasVector(
-    builder,
-    new Uint8Array(parentShas),
-  );
-  const identityIdsVector = GeneratedPackedCommitChunk.createIdentityIdsVector(
-    builder,
-    new Uint8Array(identityIds),
-  );
-  const timesVector = GeneratedPackedCommitChunk.createTimesVector(builder, new Uint8Array(times));
-  const subjectBytesVector = GeneratedPackedCommitChunk.createSubjectBytesVector(
-    builder,
-    new Uint8Array(subjectBytes),
-  );
-  const subjectOffsetsVector = GeneratedPackedCommitChunk.createSubjectOffsetsVector(
-    builder,
-    new Uint8Array(subjectOffsets),
-  );
+  //
+  // These seven `[ubyte]` columns use `builder.createByteVector()` — the `flatbuffers` runtime's
+  // own bulk method (one `TypedArray.set()` copy) — rather than the generated
+  // `create<Field>Vector()` wrappers flatc emits for byte columns, which loop `addInt8()` once per
+  // element. Both produce byte-identical wire output (a `[ubyte]` vector is just length + raw
+  // bytes, regardless of which builder call wrote it); this is a sender-side perf fix only (P16
+  // W11 follow-up), not a wire-format change. String/offset vectors (dictionary, decorations,
+  // refs) still use their generated per-element builders below — `createByteVector` only applies
+  // to raw byte vectors.
+  const shasVector = builder.createByteVector(new Uint8Array(shas));
+  const parentOffsetsVector = builder.createByteVector(new Uint8Array(parentOffsets));
+  const parentShasVector = builder.createByteVector(new Uint8Array(parentShas));
+  const identityIdsVector = builder.createByteVector(new Uint8Array(identityIds));
+  const timesVector = builder.createByteVector(new Uint8Array(times));
+  const subjectBytesVector = builder.createByteVector(new Uint8Array(subjectBytes));
+  const subjectOffsetsVector = builder.createByteVector(new Uint8Array(subjectOffsets));
 
   GeneratedPackedCommitChunk.startPackedCommitChunk(builder);
   GeneratedPackedCommitChunk.addFrom(builder, from);
