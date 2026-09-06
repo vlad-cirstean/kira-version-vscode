@@ -1,0 +1,19 @@
+{
+  "DecorationRef": ["kind", "name", "is_head"],
+  "RowDecorations": ["row", "refs"],
+  "PackedCommitChunk": [
+    "from",
+    "to",
+    "sha_width_bytes",
+    "shas",
+    "parent_offsets",
+    "parent_shas",
+    "identity_ids",
+    "times",
+    "subject_bytes",
+    "subject_offsets",
+    "dictionary_base",
+    "dictionary",
+    "decorations"
+  ]
+}

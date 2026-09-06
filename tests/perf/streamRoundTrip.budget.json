@@ -6,6 +6,8 @@
   "wireBytesFirstPage": 420028,
   "wireBytes100k": 8397970,
   "roundTripMs100k": 789.2900260000001,
-  "hostBoundaryMs": 4.743741000000227,
-  "hostWireBytes": 563748
+  "hostBoundaryMs": 11.10118599999987,
+  "hostWireBytes": 563748,
+  "hostBoundaryBase64Ms": 3.075079000000187,
+  "hostWireBytesBase64": 563748
 }

@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!**/dist", "!**/.gitkeep", "!docs"]
+    "includes": ["**", "!**/dist", "!**/.gitkeep", "!docs", "!**/src/generated"]
   },
   "formatter": {
     "enabled": true,

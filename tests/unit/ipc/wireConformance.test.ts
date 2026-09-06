@@ -52,9 +52,15 @@ import {
 import { CommitStore } from "../../../packages/core/src/store/commitStore.ts";
 import type { GitErrorKind as CoreGitErrorKind } from "../../../packages/git/src/errors.ts";
 import type { BufferEncoding } from "../../../packages/ipc/src/codec.ts";
-import { decode, encode } from "../../../packages/ipc/src/codec.ts";
+import {
+  decode,
+  decodeStreamPayload,
+  encode,
+  encodeStreamPayload,
+} from "../../../packages/ipc/src/codec.ts";
 import type {
   PackedCommitChunk,
+  StreamChunkOf,
   BaseCandidate as WireBaseCandidate,
   BaseResolutionReason as WireBaseResolutionReason,
   CheckoutPreflight as WireCheckoutPreflight,
@@ -78,6 +84,10 @@ import type {
   TagAnnotation as WireTagAnnotation,
   UndoSlotSnapshot as WireUndoSlotSnapshot,
 } from "../../../packages/ipc/src/contract.ts";
+import {
+  fromWire as graphChunkFromWire,
+  toWire as graphChunkToWire,
+} from "../../../packages/ipc/src/graphChunkCodec.ts";
 import { topology } from "../../fixtures/topology.ts";
 
 /** Never called — its only job is to make the assignments inside it part of the compiled
@@ -446,6 +456,33 @@ function crossRealBoundary<T>(message: T, encoding: BufferEncoding): T {
   return decode<T>(wire, encoding);
 }
 
+/** P16 W9's "the seam, end to end": routes a `PackedCommitChunk` through the actual production
+ *  path — `encodeStreamPayload` (FlatBuffers `toWire` on `commits`, D45) -> `crossRealBoundary`
+ *  (the base64/native boundary, D34-D36, unchanged) -> `decodeStreamPayload` (FlatBuffers
+ *  `fromWire`) — rather than `crossRealBoundary` alone, which after P16 tests only the layer
+ *  `PackedCommitChunk` no longer crosses directly. Wraps `commits` in a plausible
+ *  `graph.stream` envelope (the other seven scalars this dispatch leaves untouched, plan
+ *  judgment call 2) and unwraps it again, so callers still deal only in `PackedCommitChunk`. */
+function crossGraphStreamBoundary(
+  commits: PackedCommitChunk,
+  encoding: BufferEncoding,
+): PackedCommitChunk {
+  const envelope: StreamChunkOf<"graph.stream"> = {
+    repoId: "r1",
+    seq: 0,
+    from: commits.from,
+    to: commits.to,
+    source: "git",
+    remaining: 0,
+    exhausted: true,
+    commits,
+  };
+  const encoded = encodeStreamPayload("graph.stream", envelope);
+  const crossed = crossRealBoundary(encoded, encoding);
+  const decoded = decodeStreamPayload("graph.stream", crossed) as StreamChunkOf<"graph.stream">;
+  return decoded.commits;
+}
+
 /** A plain-number-array copy of every column — taken *before* a "native" round trip, since that
  *  transfers (and so detaches) the chunk's own buffers; comparing against this snapshot rather
  *  than against the original chunk after the fact is what makes the "native" case testable at
@@ -487,7 +524,7 @@ describe("ipc wire conformance — runtime round trip over the real boundary (P1
       const chunk = source.packSlice(0, source.rowCount, 0);
       const snapshot = snapshotColumns(chunk);
 
-      const result = crossRealBoundary(chunk, encoding);
+      const result = crossGraphStreamBoundary(chunk, encoding);
       expectColumnsMatchSnapshot(snapshot, result);
 
       const receiver = new CommitStore();
@@ -515,7 +552,7 @@ describe("ipc wire conformance — runtime round trip over the real boundary (P1
       const chunk = source.packSlice(0, source.rowCount, 0);
       expect(chunk.parentShas.byteLength).toBe(0);
 
-      const result = crossRealBoundary(chunk, encoding);
+      const result = crossGraphStreamBoundary(chunk, encoding);
       expect(result.parentShas.byteLength).toBe(0);
       const receiver = new CommitStore();
       receiver.appendPacked(result);
@@ -524,6 +561,12 @@ describe("ipc wire conformance — runtime round trip over the real boundary (P1
   });
 
   test('a chunk where the same buffer appears twice still round-trips under "base64" (native already throws, codec.test.ts)', () => {
+    // Deliberately still on the generic codec (crossRealBoundary), not crossGraphStreamBoundary:
+    // this exercises D36's buffer-aliasing/dedup behaviour in codec.ts's own traversal, which
+    // graph.stream's production path no longer exhibits once P16 lands — toWire always emits
+    // exactly one ArrayBuffer, so two contract fields aliasing the same JS ArrayBuffer object is
+    // no longer observable at the wire. The scenario this test protects is real for any other
+    // (non-FlatBuffers) payload the contract might carry, so it stays.
     const source = new CommitStore();
     source.appendPage(records);
     const chunk = source.packSlice(0, source.rowCount, 0);
@@ -542,5 +585,187 @@ describe("ipc wire conformance — runtime round trip over the real boundary (P1
     const result = crossRealBoundary({ view }, "base64");
     expect(result.view).toBeInstanceOf(Uint8Array);
     expect(Array.from(result.view)).toEqual(Array.from(view));
+  });
+
+  // ---- P16 W9: the no-defaults structural test -------------------------------------------
+  //
+  // A fixture with a field at its FlatBuffers scalar/vector default does not actually test that
+  // field: FlatBuffers omits defaults on write and reads them back as the default regardless of
+  // whether a write happened at all. This test asserts every one of PackedCommitChunk's 13
+  // fields is genuinely away from its default *before* trusting the round trip that follows, and
+  // pins the exact 13-name key set so a field added to the contract and forgotten here is a
+  // failing literal, not a tautology against `Object.keys` of the very value being checked.
+
+  const PACKED_COMMIT_CHUNK_KEYS = [
+    "decorations",
+    "dictionary",
+    "dictionaryBase",
+    "from",
+    "identityIds",
+    "parentOffsets",
+    "parentShas",
+    "shaWidthBytes",
+    "shas",
+    "subjectBytes",
+    "subjectOffsets",
+    "times",
+    "to",
+  ].sort();
+
+  test("no field of a packSlice(from>0, dictionaryBase>0) chunk with decorations is at a FlatBuffers default, and the round trip preserves exactly the 13-field contract shape", () => {
+    const records: CommitRecord[] = topology(["root", "a:root", "b:root", "merge:a,b"]).map(
+      (record, i): CommitRecord =>
+        i === 2
+          ? { ...record, decoration: [{ kind: "branch", name: "feature/x", isHead: false }] }
+          : record,
+    );
+    const source = new CommitStore();
+    source.appendPage(records);
+
+    // dictionaryBase=0 always returns the store's *entire* dictionary (packSlice's dictionary
+    // field is store-wide and independent of the row range, `commitStore.ts`'s own packSlice),
+    // so its length is exactly the interner's total size — from which any value strictly between
+    // 0 and that total is a valid, non-default dictionaryBase for the slice below.
+    const totalDictionarySize = source.packSlice(0, source.rowCount, 0).dictionary.length;
+    expect(totalDictionarySize).toBeGreaterThan(1);
+    const dictionaryBase = totalDictionarySize - 1;
+
+    const chunk = source.packSlice(2, 4, dictionaryBase);
+
+    expect(chunk.from).not.toBe(0);
+    expect(chunk.to).not.toBe(0);
+    expect(chunk.shaWidthBytes).not.toBe(0);
+    expect(chunk.shas.byteLength).toBeGreaterThan(0);
+    expect(chunk.parentOffsets.byteLength).toBeGreaterThan(0);
+    expect(chunk.parentShas.byteLength).toBeGreaterThan(0);
+    expect(chunk.identityIds.byteLength).toBeGreaterThan(0);
+    expect(chunk.times.byteLength).toBeGreaterThan(0);
+    expect(chunk.subjectBytes.byteLength).toBeGreaterThan(0);
+    expect(chunk.subjectOffsets.byteLength).toBeGreaterThan(0);
+    expect(chunk.dictionaryBase).not.toBe(0);
+    expect(chunk.dictionary.length).toBeGreaterThan(0);
+    expect(chunk.decorations.length).toBeGreaterThan(0);
+
+    expect(Object.keys(chunk).sort()).toEqual(PACKED_COMMIT_CHUNK_KEYS);
+
+    for (const encoding of ["native", "base64"] as const) {
+      // A fresh packSlice per iteration: "native" transfers (and so detaches) its input.
+      const fresh = source.packSlice(2, 4, dictionaryBase);
+      const result = crossGraphStreamBoundary(fresh, encoding);
+
+      expect(Object.keys(result).sort()).toEqual(PACKED_COMMIT_CHUNK_KEYS);
+      for (const key of PACKED_COMMIT_CHUNK_KEYS) {
+        const expected = fresh[key as keyof PackedCommitChunk];
+        const actual = result[key as keyof PackedCommitChunk];
+        if (expected instanceof ArrayBuffer) {
+          expect(Array.from(new Uint8Array(actual as ArrayBuffer))).toEqual(
+            Array.from(new Uint8Array(expected)),
+          );
+        } else {
+          expect(actual).toEqual(expected);
+        }
+      }
+    }
+  });
+
+  // ---- P16 W9: all five DecorationRef variants, through the FlatBuffers seam -------------
+
+  test("all five DecorationRef variants round-trip through the FlatBuffers seam exactly, including exactOptionalPropertyTypes' no-'name'-on-'head' distinction", () => {
+    const variants: readonly CoreDecorationRef[] = [
+      { kind: "branch", name: "feature/x", isHead: false },
+      { kind: "remoteBranch", name: "origin/main" },
+      { kind: "tag", name: "v2.0.0" },
+      { kind: "head" },
+      { kind: "stash" },
+    ];
+    const records: CommitRecord[] = topology(["c0", "c1:c0", "c2:c1", "c3:c2", "c4:c3"]).map(
+      (record, i): CommitRecord => {
+        const variant = variants[i];
+        if (!variant) throw new Error("unreachable: fewer DecorationRef variants than records");
+        return { ...record, decoration: [variant] };
+      },
+    );
+    const source = new CommitStore();
+    source.appendPage(records);
+    const chunk = source.packSlice(0, source.rowCount, 0);
+    expect(chunk.decorations.length).toBe(5);
+
+    const result = crossGraphStreamBoundary(chunk, "native");
+    expect(result.decorations.length).toBe(5);
+
+    const byRow = new Map(result.decorations);
+    for (const [row, variant] of variants.entries()) {
+      expect(byRow.get(row)).toEqual([variant]);
+    }
+
+    const headRow = variants.findIndex((v) => v.kind === "head");
+    const headRef = byRow.get(headRow)?.[0];
+    expect(headRef).toBeDefined();
+    // exactOptionalPropertyTypes makes this a real distinction: 'head' must come back with no
+    // 'name' property at all, not `name: undefined`.
+    expect(Object.keys(headRef as object)).toEqual(["kind"]);
+
+    const stashRow = variants.findIndex((v) => v.kind === "stash");
+    const stashRef = byRow.get(stashRow)?.[0];
+    expect(Object.keys(stashRef as object)).toEqual(["kind"]);
+  });
+
+  // ---- P16 W12: corruption is loud, not silent -------------------------------------------
+  //
+  // W12's "done when" is stated in terms of the VS Code e2e tier ("forcing `toWire` to emit a
+  // buffer with the wrong `file_identifier` fails these specs loudly rather than rendering an
+  // empty list"), but that tier needs a real downloaded VS Code build this sandbox cannot reach
+  // (`bun run test:e2e:vscode`'s own attempt here aborts mid-download). These three tests are
+  // the unit-level substitute: they exercise the exact three ways a `graph.stream` chunk can
+  // arrive corrupted or foreign — a `commits` payload with no `$fb` tag at all, one tagged with
+  // a version this build does not recognise, and a buffer that is tagged as FlatBuffers but was
+  // never actually built by `toWire` (wrong `file_identifier`) — and confirm every one of them
+  // throws instead of silently decoding into nonsense or an empty chunk.
+
+  test("decodeStreamPayload throws when 'graph.stream' arrives with no '$fb' tag on commits", () => {
+    const envelope = {
+      repoId: "r1",
+      seq: 0,
+      from: 0,
+      to: 0,
+      source: "git",
+      remaining: 0,
+      exhausted: true,
+      commits: { notFlatBuffers: true },
+    };
+    expect(() => decodeStreamPayload("graph.stream", envelope)).toThrow(/\$fb/);
+  });
+
+  test("decodeStreamPayload throws on an unrecognised '$fb' tag", () => {
+    const envelope = {
+      repoId: "r1",
+      seq: 0,
+      from: 0,
+      to: 0,
+      source: "git",
+      remaining: 0,
+      exhausted: true,
+      commits: { $fb: "graphChunk/99", d: new ArrayBuffer(0) },
+    };
+    expect(() => decodeStreamPayload("graph.stream", envelope)).toThrow(/graphChunk\/99/);
+  });
+
+  test("graphChunkCodec.fromWire throws on a buffer with the wrong file_identifier", () => {
+    const source = new CommitStore();
+    source.appendPage(topology(["root"]));
+    const chunk = source.packSlice(0, source.rowCount, 0);
+    const good = graphChunkToWire(chunk);
+
+    // FlatBuffers' file identifier is a fixed 4-byte ASCII tag at a fixed offset (bytes 4-7 of
+    // the buffer, right after the root table's own 4-byte offset) — corrupting just those bytes
+    // simulates "tagged as FlatBuffers but not this schema" without needing a second, unrelated
+    // schema compiled just to produce one.
+    const corrupted = good.slice(0);
+    new Uint8Array(corrupted, 4, 4).set([0x58, 0x58, 0x58, 0x58]); // "XXXX", not "KVGC"
+
+    expect(() => graphChunkFromWire(corrupted)).toThrow(/file identifier/);
+    // The good buffer alongside it proves the corruption, not some unrelated fromWire bug, is
+    // what throws.
+    expect(() => graphChunkFromWire(good)).not.toThrow();
   });
 });

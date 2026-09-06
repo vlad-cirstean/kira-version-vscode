@@ -1,0 +1,19 @@
+{
+  "version": "25.9.23",
+  "releaseTag": "https://github.com/google/flatbuffers/releases/tag/v25.9.23",
+  "license": "Apache-2.0",
+  "source": "https://github.com/google/flatbuffers",
+  "note": "Pinned to match the flatbuffers npm runtime package exactly (packages/ipc's flatbuffers dependency), so the generator and the runtime can never skew. v25.9.23 predates flatbuffers' SLSA attestation (multiple.intoto.jsonl on later tags) — the sha256 below is the integrity mechanism until a future re-pin can prefer an attested tag.",
+  "platforms": {
+    "linux-x64": {
+      "asset": "Linux.flatc.binary.g++-13.zip",
+      "url": "https://github.com/google/flatbuffers/releases/download/v25.9.23/Linux.flatc.binary.g++-13.zip",
+      "sha256": "de0c6ad114a5a686ecf64322528c602c7d4512446a93f290f54f00ee5abea487"
+    },
+    "darwin-arm64": {
+      "asset": "Mac.flatc.binary.zip",
+      "url": "https://github.com/google/flatbuffers/releases/download/v25.9.23/Mac.flatc.binary.zip",
+      "sha256": "1e14d2feade6d109fa9c102e6e5ead68f325ed3da1d3022ce08d3222f828d983"
+    }
+  }
+}

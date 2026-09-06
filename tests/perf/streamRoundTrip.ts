@@ -18,6 +18,15 @@
  * own accounting wanted.
  *
  * §5.1 gives the panel 300ms to first paint and 400ms to a first page.
+ *
+ * P16 W11 (F8, made concrete): `hostBoundaryMs`/`hostWireBytes` keep their names and their 20%
+ * gate, and now measure **the shipping path** — `encodeStreamPayload` (FlatBuffers `toWire` on
+ * `commits`) -> `encode("base64")` -> `JSON.stringify` -> `JSON.parse` -> `decode` ->
+ * `decodeStreamPayload` (FlatBuffers `fromWire`) — instead of the plain base64 codec P15 measured.
+ * `hostBoundaryBase64Ms`/`hostWireBytesBase64` are two new **recorded-but-not-gated** metrics: the
+ * *old* plain-base64 path (no FlatBuffers at all) over the identical ten chunks, so the two numbers
+ * are a direct A/B, not a comparison against a stale baseline measured on different hardware or a
+ * different repository shape.
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -25,7 +34,14 @@ import { CommitStore, packedTransferList } from "../../packages/core/src/store/c
 import { locateGit } from "../../packages/git/src/discovery.ts";
 import { openLogSession } from "../../packages/git/src/logSession.ts";
 import { NodeProcessRunner } from "../../packages/git/src/nodeProcessRunner.ts";
-import { decode, encode, VSCODE_WEBVIEW_BUFFER_ENCODING } from "../../packages/ipc/src/codec.ts";
+import {
+  decode,
+  decodeStreamPayload,
+  encode,
+  encodeStreamPayload,
+  VSCODE_WEBVIEW_BUFFER_ENCODING,
+} from "../../packages/ipc/src/codec.ts";
+import type { StreamChunkOf } from "../../packages/ipc/src/contract.ts";
 import { largeBranchy } from "../fixtures/generateRepo.ts";
 
 const BASELINE_PATH = join(import.meta.dir, "streamRoundTrip.budget.json");
@@ -45,16 +61,26 @@ interface Measurement {
   readonly wireBytesFirstPage: number;
   readonly wireBytes100k: number;
   readonly roundTripMs100k: number;
-  /** P15 W8: the real host boundary — `encode` (declaring `VSCODE_WEBVIEW_BUFFER_ENCODING`) ->
-   *  `JSON.stringify` -> `JSON.parse` -> `decode` -> `appendPacked`, over one 5,000-row page as
-   *  ten 500-row chunks (production's `CHUNK_ROWS`), exactly as `host-vscode/src/transport.ts`
-   *  and `webview/main.ts` put a real page through today. */
+  /** P15 W8, P16 W11: the real host boundary — `encodeStreamPayload` (FlatBuffers `toWire`) ->
+   *  `encode` (declaring `VSCODE_WEBVIEW_BUFFER_ENCODING`) -> `JSON.stringify` -> `JSON.parse` ->
+   *  `decode` -> `decodeStreamPayload` (FlatBuffers `fromWire`) -> `appendPacked`, over one
+   *  5,000-row page as ten 500-row chunks (production's `CHUNK_ROWS`), exactly as
+   *  `host-vscode/src/transport.ts` and `webview/main.ts` put a real page through today. */
   readonly hostBoundaryMs: number;
   /** The `JSON.stringify`ed string's own byte length, summed over the same ten chunks — the
    *  thing an actual `postMessage` call moves across the boundary under `"base64"`. Deterministic
    *  for a given page, so a 20% tolerance on it is a real tripwire against the payload quietly
    *  growing rather than a flaky one. */
   readonly hostWireBytes: number;
+  /** P16 W11: recorded, not gated. The *old* plain-base64 path (no FlatBuffers) — `encode` ->
+   *  `JSON.stringify` -> `JSON.parse` -> `decode` — over the identical ten chunks `hostBoundaryMs`
+   *  measures, for a direct A/B rather than a comparison against a baseline captured on different
+   *  hardware or a different repository shape (W11's explicit instruction: this run *is* the
+   *  experiment). */
+  readonly hostBoundaryBase64Ms: number;
+  /** The plain-base64 path's own wire byte count over the same ten chunks — paired with
+   *  `hostBoundaryBase64Ms` for the same A/B. Recorded, not gated. */
+  readonly hostWireBytesBase64: number;
 }
 
 function transferListBytes(chunk: ReturnType<CommitStore["packSlice"]>): number {
@@ -146,17 +172,44 @@ async function measure(): Promise<Measurement> {
     }
   }
 
+  // The shipping path (P16 W11): each chunk wrapped in a plausible graph.stream envelope — the
+  // real production shape (`repoId`/`seq`/`from`/`to`/`source`/`remaining`/`exhausted`/`commits`),
+  // since `encodeStreamPayload` operates on that envelope, not a bare `PackedCommitChunk` (plan
+  // judgment call 2). `hostChunks` is reused, not re-packed, for the base64-only A/B below —
+  // `encode`'s `"base64"` path never mutates or detaches its input, so both loops see byte-
+  // identical source data.
+  function wrapAsGraphStreamChunk(
+    commits: ReturnType<CommitStore["packSlice"]>,
+    seq: number,
+  ): StreamChunkOf<"graph.stream"> {
+    return {
+      repoId: "perf",
+      seq,
+      from: commits.from,
+      to: commits.to,
+      source: "git",
+      remaining: 0,
+      exhausted: false,
+      commits,
+    };
+  }
+
   let hostWireBytes = 0;
   const hostDecoded: ReturnType<CommitStore["packSlice"]>[] = [];
   const hostBoundaryStart = performance.now();
-  for (const chunk of hostChunks) {
-    const { payload } = encode(chunk, VSCODE_WEBVIEW_BUFFER_ENCODING);
+  for (let i = 0; i < hostChunks.length; i++) {
+    const envelope = wrapAsGraphStreamChunk(
+      hostChunks[i] as ReturnType<CommitStore["packSlice"]>,
+      i,
+    );
+    const wrapped = encodeStreamPayload("graph.stream", envelope);
+    const { payload } = encode(wrapped, VSCODE_WEBVIEW_BUFFER_ENCODING);
     const wireString = JSON.stringify(payload);
     hostWireBytes += Buffer.byteLength(wireString, "utf8");
     const parsed = JSON.parse(wireString);
-    hostDecoded.push(
-      decode<ReturnType<CommitStore["packSlice"]>>(parsed, VSCODE_WEBVIEW_BUFFER_ENCODING),
-    );
+    const decoded = decode(parsed, VSCODE_WEBVIEW_BUFFER_ENCODING);
+    const result = decodeStreamPayload("graph.stream", decoded) as StreamChunkOf<"graph.stream">;
+    hostDecoded.push(result.commits);
   }
   const hostBoundaryMs = performance.now() - hostBoundaryStart;
 
@@ -165,6 +218,20 @@ async function measure(): Promise<Measurement> {
   if (hostReceiver.rowCount !== PAGE_SIZE) {
     throw new Error(`host boundary: expected ${PAGE_SIZE} rows, received ${hostReceiver.rowCount}`);
   }
+
+  // Recorded-but-not-gated A/B (P16 W11): the *old* plain-base64 path, no FlatBuffers at all, over
+  // the identical ten chunks above — not re-baselined against a value captured on different
+  // hardware, this run is the experiment.
+  let hostWireBytesBase64 = 0;
+  const hostBoundaryBase64Start = performance.now();
+  for (const chunk of hostChunks) {
+    const { payload } = encode(chunk, VSCODE_WEBVIEW_BUFFER_ENCODING);
+    const wireString = JSON.stringify(payload);
+    hostWireBytesBase64 += Buffer.byteLength(wireString, "utf8");
+    const parsed = JSON.parse(wireString);
+    decode<ReturnType<CommitStore["packSlice"]>>(parsed, VSCODE_WEBVIEW_BUFFER_ENCODING);
+  }
+  const hostBoundaryBase64Ms = performance.now() - hostBoundaryBase64Start;
 
   return {
     packMs,
@@ -176,6 +243,8 @@ async function measure(): Promise<Measurement> {
     roundTripMs100k,
     hostBoundaryMs,
     hostWireBytes,
+    hostBoundaryBase64Ms,
+    hostWireBytesBase64,
   };
 }
 
@@ -194,6 +263,8 @@ const RECORDED_ONLY_METRICS = [
   "wireBytesFirstPage",
   "wireBytes100k",
   "roundTripMs100k",
+  "hostBoundaryBase64Ms",
+  "hostWireBytesBase64",
 ] as const;
 
 function report(actual: Measurement, baseline: Measurement): boolean {

@@ -10,7 +10,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "check": "bun run format:check && bun run lint && bun run check:types && bun run check:tokens && bun run check:settings && bun run check:lane-palette",
+    "check": "bun run format:check && bun run lint && bun run check:types && bun run check:tokens && bun run check:settings && bun run check:lane-palette && bun run check:schema",
     "check:types": "tsc --build && bun run --filter '@kira-version/ui' check:vue",
     "check:types:clean": "tsc --build --force && bun run --filter '@kira-version/ui' check:vue",
     "format:check": "biome format .",
@@ -21,6 +21,9 @@
     "gen:settings": "bun run scripts/gen-settings.ts",
     "check:lane-palette": "bun run scripts/gen-lane-palette.ts --check",
     "gen:lane-palette": "bun run scripts/gen-lane-palette.ts",
+    "fetch:flatc": "bun run scripts/fetch-flatc.ts",
+    "check:schema": "bun run scripts/gen-schema.ts --check",
+    "gen:schema": "bun run scripts/gen-schema.ts",
     "build": "bun run scripts/build.ts",
     "test:unit": "bun test packages tests/fixtures tests/unit",
     "test:integration": "bun test tests/integration",

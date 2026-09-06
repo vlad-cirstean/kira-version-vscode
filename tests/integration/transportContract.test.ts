@@ -13,6 +13,7 @@ import {
 } from "../../packages/core/src/ports/testFakes.ts";
 import { NodeFileWatcher } from "../../packages/git/src/nodeFileWatcher.ts";
 import { NodeProcessRunner } from "../../packages/git/src/nodeProcessRunner.ts";
+import type { GraphChunkPayload } from "../../packages/git/src/repoService.ts";
 import { RepoService } from "../../packages/git/src/repoService.ts";
 import { createRepoHandlers } from "../../packages/git/src/rpcHandlers.ts";
 import {
@@ -21,7 +22,7 @@ import {
   type MessageChannelLike,
 } from "../../packages/ipc/src/rpc.ts";
 import { CONTRACT_VERSION } from "../../packages/ipc/src/validate.ts";
-import { linear } from "../fixtures/generateRepo.ts";
+import { branchy, linear } from "../fixtures/generateRepo.ts";
 
 /**
  * W2's `createRpcClient`/`createRpcServer` endpoint, driven end-to-end against W8's
@@ -182,6 +183,92 @@ describe("transport contract: rpc.ts driven against createRepoHandlers over a re
 
       await client.request("repo.close", { repoId });
       await expect(client.request("graph.status", { repoId })).rejects.toThrow();
+    } finally {
+      client.dispose();
+      server.dispose();
+      service.dispose();
+    }
+  });
+
+  const PACKED_COLUMNS = [
+    "shas",
+    "parentOffsets",
+    "parentShas",
+    "identityIds",
+    "times",
+    "subjectBytes",
+    "subjectOffsets",
+  ] as const;
+
+  function expectPackedChunksEqual(a: PackedCommitChunk, b: PackedCommitChunk): void {
+    expect(a.from).toBe(b.from);
+    expect(a.to).toBe(b.to);
+    expect(a.shaWidthBytes).toBe(b.shaWidthBytes);
+    expect(a.dictionaryBase).toBe(b.dictionaryBase);
+    expect(a.dictionary).toEqual(b.dictionary);
+    expect(a.decorations).toEqual(b.decorations);
+    for (const column of PACKED_COLUMNS) {
+      expect(Array.from(new Uint8Array(a[column]))).toEqual(Array.from(new Uint8Array(b[column])));
+    }
+  }
+
+  test("graph.stream with a range (the review sidebar's path) is byte-identical across the wire to the same walk driven directly against RepoService (P16 W10)", async () => {
+    const { service, server, client } = await setup(4);
+    try {
+      // mergeBack: false — a merged-back main already has feature/a's commits as ancestors,
+      // which would make `main..feature/a` (this range) empty and defeat the point of the test.
+      const repo = branchy({ mainCommits: 3, featureCommits: 2, mergeBack: false });
+      const opened = await client.request("repo.open", { path: repo.dir });
+      expect(opened.kind).toBe("ok");
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const { repoId } = opened.repo;
+      const range = { base: "main", branch: "feature/a" };
+
+      // The direct RepoService call — no wire, no codec — is the reference: `#emitRange`
+      // (P7 W4, `repoService.ts`) is the one packing site both the panel walk and this ranged
+      // review walk share, and P16's FlatBuffers seam sits entirely on top of it. A ranged
+      // walk's own store is replayed rather than re-spawned on a second open of the same range
+      // (repoService.ts's own doc comment on #streamReviewGraph), so calling it once directly
+      // and once again over the wire against the same repoId/range is a same-data comparison,
+      // not two independent git walks that merely ought to agree.
+      const direct: GraphChunkPayload[] = [];
+      await service.streamGraph(repoId, {
+        range,
+        onChunk: async (chunk) => {
+          direct.push(chunk);
+        },
+      });
+      expect(direct.length).toBeGreaterThan(0);
+
+      const viaWire: Array<{
+        readonly from: number;
+        readonly to: number;
+        readonly source: "git" | "cache";
+        readonly commits: PackedCommitChunk;
+      }> = [];
+      await client.stream("graph.stream", { repoId, range }, (chunk) => {
+        viaWire.push(chunk);
+      });
+
+      expect(viaWire.length).toBe(direct.length);
+      for (let i = 0; i < direct.length; i++) {
+        expect(viaWire[i]?.from).toBe(direct[i]?.from);
+        expect(viaWire[i]?.to).toBe(direct[i]?.to);
+        expect(viaWire[i]?.source).toBe(direct[i]?.source);
+        expectPackedChunksEqual(
+          (viaWire[i] as (typeof viaWire)[number]).commits,
+          (direct[i] as GraphChunkPayload).commits,
+        );
+      }
+
+      // The FlatBuffers seam is dispatched purely on StreamKey ("graph.stream"), never on
+      // whether a `range` was present (codec.ts's encodeStreamPayload has no branch for it) —
+      // if the panel's unranged path were special-cased there instead of the seam covering
+      // every graph.stream chunk uniformly, this ranged chunk would have arrived un-decoded
+      // (still `{$fb, d}`-tagged) and the equality checks above would have failed already.
+      const store = new CommitStore();
+      for (const chunk of viaWire) store.appendPacked(chunk.commits);
+      expect(store.rowCount).toBe(direct.reduce((sum, chunk) => sum + (chunk.to - chunk.from), 0));
     } finally {
       client.dispose();
       server.dispose();

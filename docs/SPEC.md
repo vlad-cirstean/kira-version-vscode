@@ -216,7 +216,12 @@ kira-version-vscode/
 ├── scripts/
 │   ├── build.ts                    bundles hosts + ui via bun build / vite
 │   ├── package-vsix.ts             build then `vsce package --no-dependencies`
-│   └── gen-settings.ts             writes contributes.configuration from core's settings schema (D25)
+│   ├── gen-settings.ts             writes contributes.configuration from core's settings schema (D25)
+│   ├── fetch-flatc.ts              P16: fetches the pinned `flatc` into gitignored `.flatc/`,
+│   │                               verified against `scripts/flatc.lock.json`'s committed sha256
+│   └── gen-schema.ts               P16: `flatc` → `packages/ipc/src/generated/`; `--check` compares
+│                                   a digest rather than regenerating (D47), the one way `bun run
+│                                   check` stays offline and flatc-free
 │
 ├── packages/
 │   ├── core/                       pure domain. No I/O, no DOM, no git, no framework.
@@ -263,11 +268,19 @@ kira-version-vscode/
 │   │                               checkout.ts reset.ts revert.ts cherryPick.ts conflict.ts
 │   │
 │   ├── ipc/                        the contract every host and the UI share
+│   │   ├── schema/
+│   │   │   └── graphChunk.fbs      P16: `graph.stream`'s PackedCommitChunk, the one `$fb`-schema'd
+│   │   │                           payload on the contract (D44/D45); compiled by a pinned `flatc`
 │   │   └── src/
 │   │       ├── contract.ts         request/response/event/stream type map, versioned
 │   │       ├── transport.ts        Transport interface both hosts implement
 │   │       ├── codec.ts            encode/decode incl. ArrayBuffer transfer lists + per-transport
-│   │       │                       buffer encoding (native/base64) (§3.5, D34/D35)
+│   │       │                       buffer encoding (native/base64) (§3.5, D34/D35), plus the one
+│   │       │                       `$fb`-schema dispatch (`encode`/`decodeStreamPayload`, P16)
+│   │       ├── graphChunkCodec.ts  P16: hand-written toWire/fromWire between PackedCommitChunk and
+│   │       │                       the generated FlatBuffers table, with its own drift guards
+│   │       ├── generated/          P16: flatc-generated code committed, excluded from Biome,
+│   │       │                       carrying a do-not-edit header with the flatc version + digests
 │   │       ├── rpc.ts              the one generic endpoint: correlation, stream credits,
 │   │       │                       cancellation, version validation (P3 W2)
 │   │       └── validate.ts         boundary validation; a schema mismatch fails loudly
@@ -383,9 +396,12 @@ implementing P2 (a stray `.d.ts` `tsc -b` emitted into `tests/fixtures/` was the
 that need a harness or a real repository still live under `tests/` as before.
 
 **Dependency rule, enforced by `bun run check`** via Biome's `noRestrictedImports` plus a bundle check:
-`core` and `ipc` depend on nothing; `git` depends on `core` + `ipc`; `ui` depends on `core` +
-`ipc`; hosts depend on everything; **nothing depends on a host**. The string `vscode` appears
-as an import specifier in exactly one package, and `bun:`/`Bun` in none (§8.1).
+`core` and `ipc` depend on nothing **among workspace packages** (B3); `git` depends on `core` +
+`ipc`; `ui` depends on `core` + `ipc`; hosts depend on everything; **nothing depends on a host**.
+The string `vscode` appears as an import specifier in exactly one package, and `bun:`/`Bun` in
+none (§8.1). `ipc` carries exactly one external runtime dependency, `flatbuffers` (Apache-2.0,
+pinned to `25.9.23` — D47) — the rule above is about the workspace graph, not about npm
+dependencies, which every package may have.
 
 ### 3.2 Process/thread topology
 
@@ -568,17 +584,27 @@ is `packages/ipc`'s decision, not a host's: `codec.ts` walks the whole message g
 applies whichever transform the declared encoding calls for, so a host's own channel adapter
 stays a thin `postMessage` wrapper with no format logic of its own (D34).
 
-**P15 measured FlatBuffers against this boundary and declined it (D33).** On the only host v1
-ships, the zero-copy/transferable advantage FlatBuffers would trade on is unavailable by
-construction (the paragraph above), so a FlatBuffers payload must be base64'd exactly like
-today's packed columns — measured component-for-component, it is indistinguishable from
-base64-over-the-existing-format on the graph stream and loses on a 1 MiB diff, for the cost of
-a native `flatc` toolchain with no working npm distribution and the loss of
-`wireConformance.test.ts`'s compile-time drift check. The wire encoding is base64-tagged JSON
-(D35), applied uniformly to every buffer on the contract (D36), not FlatBuffers — reopen only if
-a host arrives whose transport carries binary natively and a payload is measured where encoding,
-not `packages/core`'s own `appendPacked`, is the bottleneck. Full reasoning, measurements and the
-FlatBuffers work program (should that reopening ever happen) are in `docs/plans/P15.md`.
+**P15 measured FlatBuffers against this boundary and declined it; P16 implemented it anyway, by
+explicit override (D33/D44).** The measurement stands: on the only host v1 ships, the
+zero-copy/transferable advantage FlatBuffers would trade on is unavailable by construction (the
+paragraph above), so its payload must be base64'd exactly like today's packed columns — it ties
+base64-over-the-existing-format on the graph stream and loses on a 1 MiB diff. The project owner
+directed that it be built regardless, as a business decision about the schema and toolchain, not
+a technical reversal of the measurement. What actually crosses the wire today: `graph.stream`'s
+`commits` field is a FlatBuffer built from `packages/ipc/schema/graphChunk.fbs` by a pinned
+`flatc` (D47), still carried inside the same per-transport buffer encoding this section describes
+(D34–D36, entirely unchanged) — a `$fb`-tagged `ArrayBuffer`, base64'd on VS Code exactly like any
+other buffer on the contract. Every other payload, `commit.fileDiff` included, is unchanged
+JSON-shaped structured data; the honest sentence is that FlatBuffers was adopted for the schema,
+not for the milliseconds (D44–D47). Full reasoning, measurements and scope are in
+`docs/plans/P15.md` (the original measurement) and `docs/plans/P16-flatbuffers.md` (the override
+and its implementation).
+
+A payload's own schema is a layer above the buffer encoding, not a replacement for it: `$fb`
+(which payload format a buffer holds) is carried *by* `$buf` (D34's tagged-buffer mechanism), the
+same way a file format sits above the filesystem that stores it. Only `graph.stream`'s
+`PackedCommitChunk` has a `$fb` schema today; every other buffer on the contract still crosses
+untagged, exactly as D34–D36 describe.
 
 ---
 
@@ -1815,7 +1841,10 @@ frame budget.
 Vue 3.5+ (`<script setup>`, no Options API), `slickgrid` (the 6pac fork, MIT) for the commit
 list's virtualization and column model, Vite for the UI bundle and the harness dev
 server, esbuild (or `bun build`) for the host bundles, `@vscode/vsce` + `ovsx` for
-publishing.
+publishing, `flatbuffers` (npm runtime, Apache-2.0, pinned `25.9.23`) for `graph.stream`'s wire
+schema and `flatc` (native toolchain, same version, Apache-2.0) to compile it — fetched on
+demand into gitignored `.flatc/` and digest-verified, never vendored, so `bun install`/`bun run
+check` stay offline and this binary never reaches the repo (D44/D47).
 
 ---
 
@@ -1875,7 +1904,8 @@ Phases are sequential; each ends at a checkpoint.
 | **P12** | GitHub PR links | Branch → pull request resolution (§6.7): GitHub-remote detection from `origin`, the `GitHubAuth` port over VS Code's built-in GitHub authentication provider (D31), the REST lookup, the per-branch cache invalidated by the watcher, `branch.resolvePr` (§3.5), the `#123` badge on branch-picker rows and message-column ref badges opening the PR via `ExternalOpener` (D32), `kiraVersion.github.enabled`, and PR number/title matching added to §7.8's `Refs` scope. | A branch with a pull request shows its badge in both places, distinguishes open/merged/closed, and opens the PR URL externally; search finds that branch by PR number and title within the ≤120 ms budget with no per-keystroke network call; no GitHub remote, no matching PR, the setting off, or a declined session each produce no badge, no request and no repeat prompt, with the rest of the app unaffected; the session is requested on first use only, never at activation, verified by an activation-time assertion. |
 | **P13** | Ship | `.vsix` packaging without `vscode:prepublish`, `extensionKind`/no-browser manifest declarations (2.1.1), **`engines.vscode` floor confirmed (D7)**, **SCM title button and status bar item (6.5)**, the **`kiraVersion.*` command-palette audit** wiring a command for every mutating operation introduced across P6–P10 (6.5/6.6's "every action is palette-reachable", which no earlier row owns), marketplace + OpenVSX metadata, docs, settings surface, telemetry-free release checklist. | Installable `.vsix`; every mutating operation reachable from the palette; full Playwright suite green on macOS. |
 | **P14** | Worktree support | *Not designed yet — planned in full only when this phase's turn comes up, after P13.* Placeholder so the request is not lost: git worktree create/list/switch/remove (building on D12's existing linked-worktree detection from P6), and a user-configurable "prepare script" run after creating a worktree, with visible progress feedback while it runs (it can take a while). | *To be defined at design time.* |
-| **P15** | IPC wire format fix | **Designed and implemented out of sequence, ahead of P7, by explicit instruction** (the "deliberately last" production-order intent above is unchanged for anything not yet done). The row's original brief asked for a FlatBuffers migration; measured directly against the real host boundary, FlatBuffers was declined (D33) — the transferable/zero-copy win it would trade on does not exist on `webview.postMessage` (P15's W1 finding), so it ties or loses against a simpler fix. What shipped instead: `toWireSafe`'s ad hoc, untested `number[]` transform is deleted, replaced by a per-transport `bufferEncoding` (D34) that `packages/ipc/src/codec.ts` applies uniformly — base64-tagged buffers (D35/D36) where a channel cannot carry bytes, proven by a genuine runtime round trip at the real boundary, not only a compile-time shape check (D37). See `docs/plans/P15.md` for the measurements and full reasoning. | Met: `toWireSafe` gone, every transport declares its `bufferEncoding` explicitly (the two `host-vscode` halves from one shared constant), `wireConformance.test.ts` proves a real round trip, `tests/perf/streamRoundTrip.ts` gates the boundary's own cost (~4.7 ms / ~564 KB per 5,000-row page under `"base64"`, against a ~47 ms / ~1.33 MB baseline under the deleted transform), the VS Code e2e tier asserts real row content crossed the wire intact, `CONTRACT_VERSION` is 6, and no FlatBuffers artefact exists anywhere in the tree. Full checklist and measured numbers in `docs/plans/P15.md`'s own Findings. |
+| **P15** | IPC wire format fix | **Designed and implemented out of sequence, ahead of P7, by explicit instruction** (the "deliberately last" production-order intent above is unchanged for anything not yet done). The row's original brief asked for a FlatBuffers migration; measured directly against the real host boundary, FlatBuffers was declined (D33) — the transferable/zero-copy win it would trade on does not exist on `webview.postMessage` (P15's W1 finding), so it ties or loses against a simpler fix. What shipped instead: `toWireSafe`'s ad hoc, untested `number[]` transform is deleted, replaced by a per-transport `bufferEncoding` (D34) that `packages/ipc/src/codec.ts` applies uniformly — base64-tagged buffers (D35/D36) where a channel cannot carry bytes, proven by a genuine runtime round trip at the real boundary, not only a compile-time shape check (D37). See `docs/plans/P15.md` for the measurements and full reasoning. **P16 overrode D33's outcome afterward, by explicit instruction — this row still describes exactly what P15 itself shipped and measured, unedited.** | Met: `toWireSafe` gone, every transport declares its `bufferEncoding` explicitly (the two `host-vscode` halves from one shared constant), `wireConformance.test.ts` proves a real round trip, `tests/perf/streamRoundTrip.ts` gates the boundary's own cost (~4.7 ms / ~564 KB per 5,000-row page under `"base64"`, against a ~47 ms / ~1.33 MB baseline under the deleted transform), the VS Code e2e tier asserts real row content crossed the wire intact, `CONTRACT_VERSION` is 6, and no FlatBuffers artefact exists anywhere in the tree. Full checklist and measured numbers in `docs/plans/P15.md`'s own Findings. |
+| **P16** | FlatBuffers for the graph-stream payload | **Designed and implemented out of sequence, after P7, by explicit instruction.** The project owner directed that FlatBuffers be adopted regardless of P15's measured tradeoff (D33 superseded by D44) — a business decision about the schema and toolchain, not a technical reversal of the measurement. `graph.stream`'s `PackedCommitChunk` (only) crosses the wire as a FlatBuffer built from a checked-in `.fbs` schema (`packages/ipc/schema/graphChunk.fbs`), compiled by a pinned `flatc` matching the `flatbuffers` npm runtime exactly, adapted by hand-written `toWire`/`fromWire` functions carrying compile-time and runtime drift guards in place of the compile-time check the converted type loses from `wireConformance.test.ts`. Still carried by the same per-transport buffer encoding underneath (D34–D36, unchanged); `CONTRACT_VERSION` (now 8) remains the sole compatibility authority (D46); `flatc` is fetched on demand and digest-verified, never vendored, so `bun install`/`bun run check` stay offline and flatc-free (D47). See `docs/plans/P16-flatbuffers.md` for the full reasoning, the re-measurement against P15's baseline, and this plan's own Findings. | Met, with the re-measured cost recorded rather than hidden: the four drift guards each fail exactly as designed; W9's no-defaults round trip covers all 13 `PackedCommitChunk` fields and all five `DecorationRef` variants; a ranged (review-sidebar) `graph.stream` walk round-trips byte-identically over the real transport; `check:schema` fails loudly on a schema/generated-code mismatch or an append-only violation; `bun install`/`bun run check` remain green offline with `.flatc/` deleted. The re-measured host-boundary cost (`hostBoundaryMs`) initially came back materially worse against P15's committed baseline (+384%/+421%) — recorded and escalated per this plan's own decision ladder rather than silently re-baselined or hidden. A follow-up fix (the generated per-column byte-vector builders' `addInt8()`-per-element loop replaced with the `flatbuffers` runtime's own bulk `Builder.createByteVector()`, a wire-format-neutral change) roughly halved it; a further attempt to pre-size the `Builder`'s initial capacity from the payload made no additional measurable difference and was reverted. The residual (~11 ms against a ~4.7 ms baseline) is recorded as an accepted cost of the D44 override, not chased further, and `hostBoundaryMs`'s budget was re-baselined to this post-fix number — every other gated metric's baseline is untouched. Full checklist, all three rounds of measurements and the final decision are in `docs/plans/P16-flatbuffers.md`'s own Findings. |
 
 **A note on P3's row, for anyone reconciling it against `docs/plans/P3.md`.** P3 originally also
 built and shipped a second, standalone desktop host booting the identical UI bundle, plus the
@@ -1937,7 +1967,10 @@ deliberately deferred rather than left undecided.**
 | D41 | How one bundle serves two views | **`mount({view})` selects the root, and the review view is handed a `NullViewStateStore`.** §6.8's "same bundle, different root, selected from the host's injected initial state" — so `vite.config.ts`'s one-build-one-entry rule holds and there is no second UI to keep in visual step. The null store is a named export, not an inline literal: "this view persists nothing" is a design statement (§5.4's exclusion) and must be greppable. The review view additionally runs no lane-layout worker — it draws no lanes. |
 | D42 | Whether the review commit list is virtualized | **No — it is a tree of expandable rows over a bounded range.** §5.3's virtualized grid exists for 100k rows and cannot expand a row; §6.8's range is "tens or hundreds", and VS Code's own comparable surfaces (Source Control, Search Results) are non-virtualized trees at this scale. The bound is §5.1.1's page size with Load more as the gate, exactly as §6.8 specifies. The cost — 5,000 plain rows if a user presses Load more on a degenerate range — is accepted rather than paid for by virtualizing an expandable tree. |
 | D43 | Array-valued settings | **`SETTINGS` grows a `stringArray` type; `kiraVersion.review.baseCandidates` is its first member.** D25's schema is the one place settings are defined and it could not express a list at all. Coercion follows the existing never-partly-valid rule (any non-string member falls the whole value back to the default with a logged problem), and `toVsCodeConfiguration` emits `{type:"array", items:{type:"string"}}`. Adding the type rather than encoding a list as a comma-separated string keeps the parsing in the schema instead of in every consumer — D19's protected-branch patterns are the next array setting to arrive. |
-| D44 | FlatBuffers, implemented anyway | **The override, its provenance, and the accepted tradeoff.** D33's measurements were not disproved: on the one host v1 ships, FlatBuffers ties base64-over-the-existing-format on `graph.stream`'s chunk and is materially slower to encode `commit.fileDiff`. The project owner nonetheless directed that FlatBuffers be used, as an explicit instruction overriding D33 rather than a technical reversal of it — a business decision that the schema and toolchain are worth adopting independently of the millisecond count. **P16** (`docs/plans/P16-flatbuffers.md`) carries out the override: `graph.stream`'s `PackedCommitChunk` crosses the wire as a FlatBuffer built from a checked-in `.fbs` schema, generated by a pinned `flatc`, adapted by hand-written `toWire`/`fromWire` functions with compile-time and runtime drift guards replacing the coverage `wireConformance.test.ts` loses for the converted type. Everything else on the contract — `commit.fileDiff` and the other payload types, the per-transport buffer encoding underneath (D34–D36), `CONTRACT_VERSION` as the sole compatibility authority — is unchanged. See D45–D47 and `docs/plans/P16-flatbuffers.md` for scope, versioning and toolchain provenance. |
+| D44 | FlatBuffers, implemented anyway | **The override, its provenance, and the accepted tradeoff.** D33's measurements were not disproved: on the one host v1 ships, FlatBuffers ties base64-over-the-existing-format on `graph.stream`'s chunk and is materially slower to encode `commit.fileDiff`. The project owner nonetheless directed that FlatBuffers be used, as an explicit instruction overriding D33 rather than a technical reversal of it — a business decision that the schema and toolchain are worth adopting independently of the millisecond count. **P16** (`docs/plans/P16-flatbuffers.md`) carries out the override: `graph.stream`'s `PackedCommitChunk` crosses the wire as a FlatBuffer built from a checked-in `.fbs` schema, generated by a pinned `flatc`, adapted by hand-written `toWire`/`fromWire` functions with compile-time and runtime drift guards replacing the coverage `wireConformance.test.ts` loses for the converted type. Everything else on the contract — `commit.fileDiff` and the other payload types, the per-transport buffer encoding underneath (D34–D36), `CONTRACT_VERSION` as the sole compatibility authority — is unchanged. See D45–D47 and `docs/plans/P16-flatbuffers.md` for scope, versioning and toolchain provenance. **The accepted tradeoff, made concrete:** the re-measured `hostBoundaryMs` (the host-boundary `toWire`/`fromWire` cost on `graph.stream`) landed at roughly 2.3x P15's plain-JSON baseline after one genuine implementation defect was found and fixed (a generated per-element byte-vector builder replaced with the `flatbuffers` runtime's own bulk method) and one further tuning attempt (pre-sizing the `Builder`'s initial capacity) was tried and found to make no measurable difference. That residual is knowingly accepted as the ongoing cost of this business decision — distinct from, and not to be confused with, an implementation defect — and `streamRoundTrip.budget.json`'s `hostBoundaryMs` entry is re-baselined to reflect it, so the perf gate measures future regressions against today's honest cost, not against a number the project no longer targets. |
+| D45 | FlatBuffers' scope and shape | **`graph.stream`'s `PackedCommitChunk` only — the 13 fields that carry the bytes, not the whole stream-chunk envelope.** The envelope's seven scalars (`repoId`, `seq`, `from`, `to`, `source`, `remaining`, `exhausted`) cost ~100 bytes and would put a second copy of `source`'s union and `repoId` in the schema for no measurable gain — they cross as plain JSON, unchanged. One `.fbs` (`packages/ipc/schema/graphChunk.fbs`), hand-written `toWire`/`fromWire` adapters (not a hand-built `Builder` layout with no schema at all — that would delete the toolchain problem but also the one durable thing this phase buys), generated code committed rather than regenerated on every build. `commit.fileDiff` and the other ~45 contract types are explicitly left alone, on the measurement (D33): converting them would make the app measurably slower, and no instruction asked for that. |
+| D46 | Versioning FlatBuffers alongside `CONTRACT_VERSION` | **`CONTRACT_VERSION` remains the sole compatibility authority; FlatBuffers' own append-only/never-renumber rules are source hygiene, not a second version number.** A schema field is added at the end and never renumbered or reused — enforced by `check:schema` failing loudly on a rename, reorder or deletion — but this is a lint on the `.fbs` source, not a wire-visible negotiation. The `"KVGC"` `file_identifier` is an integrity tag (this buffer really is a `PackedCommitChunk`, not a stray foreign FlatBuffer) and is **not** a version field: there is no dual-read path and no per-table version byte. A build mismatch is still caught the same way every other contract change is caught — `CONTRACT_VERSION` (8, after this phase) fails loudly at the existing boundary (§3.5). |
+| D47 | Toolchain provenance | **`flatc` is fetched on demand into gitignored `.flatc/`, digest-verified, never vendored — and pinned to the exact same version as the `flatbuffers` npm runtime, `25.9.23`.** Committing platform binaries to get an offline `bun run gen:schema` buys nothing: `gen:schema` is not on any lane's critical path, the *generated code* is, and that is committed. `bun install` and `bun run check` stay network-free and flatc-free either way (`check:schema` compares a digest against the committed generated file rather than regenerating it) — the actual requirement. Matching `flatc` to the runtime version exactly eliminates generator/runtime skew as a class of bug, at the cost of forgoing the SLSA attestation a later tag would carry; the digest pin covers integrity. No `THIRD-PARTY` notices file was produced this phase for the new `flatbuffers`/`flatc` dependency (both Apache-2.0, named in §8.6) — deferred to P13 (Ship), which already owns marketplace/licensing documentation as a phase deliverable. |
 
 ### 11.3 Behaviour and safety
 
