@@ -239,7 +239,8 @@ kira-version-vscode/
 │   │       ├── search/             query.ts   parse toggles + scope into a query object
 │   │       │                       matcher.ts client-side matching over the loaded store
 │   │       │                       gitArgs.ts translate a query into git log arguments
-│   │       ├── preflight/          checkout.ts stashPop.ts reset.ts revert.ts push.ts tag.ts
+│   │       ├── preflight/          checkout.ts stashPop.ts reset.ts revert.ts cherryPick.ts push.ts
+│   │       │                       tag.ts
 │   │       │                       types.ts   Hazard / Plan / Resolution unions
 │   │       ├── settings/           schema.ts  SETTINGS, coerceSettings, toVsCodeConfiguration (D25)
 │   │       ├── ports/              processRunner.ts fileWatcher.ts workspaceRoots.ts storage.ts
@@ -336,6 +337,7 @@ kira-version-vscode/
 │   │       │   │                   BaseSelector.vue     comparison-base display + override
 │   │       │   └── dialogs/        CheckoutDialog.vue ResetDialog.vue ForcePushDialog.vue
 │   │       │                       StashDialog.vue TagDialog.vue RevertDialog.vue
+│   │       │                       CherryPickDialog.vue
 │   │       │                       BranchDialog.vue   P6 W15: "create branch here" (no comparable
 │   │       │                                          hazard, so not named in §7 — added alongside
 │   │       │                                          the other three for the row menu's own entry)
@@ -1608,13 +1610,27 @@ All three modes, from a commit in the graph:
 |---|---|---|
 | Soft | `git reset --soft <sha>` | Branch pointer moves. Index and working tree untouched; the difference appears as staged changes. Nothing is lost. |
 | Mixed | `git reset --mixed <sha>` | Branch pointer moves, index reset. Changes appear unstaged. Working tree files untouched. Nothing is lost. |
-| Hard | `git reset --hard <sha>` | Branch pointer, index, **and working tree** reset. **Uncommitted changes are destroyed and are not recoverable.** Commits left behind remain in the reflog for `gc.reflogExpire` (default 90 days). |
+| Hard | `git reset --hard <sha>` | Branch pointer, index, **and working tree** reset. **Tracked modifications and staged-but-uncommitted new files are destroyed and are not recoverable; genuinely untracked and ignored files are left alone.** Commits left behind remain in the reflog for `gc.reflogExpire` (default 90 days). |
 
-Pre-flight before any reset: current dirty file count, and the count/list of commits that
-will leave the branch (`git rev-list --count <sha>..HEAD`). Hard reset with a dirty tree
-requires a typed confirmation and offers "stash first" as the primary alternative. After any
-reset we surface the previous HEAD sha with a one-click "undo" (`git reset --hard <prev>` for
-hard; `git reset --soft <prev>` otherwise), backed by the reflog.
+Pre-flight before any reset: current dirty file count, and — since a reset's target can
+diverge from HEAD in either direction — **both** the count/list of commits that will leave the
+branch and the count that would additionally arrive, from one spawn:
+`git rev-list --count --left-right <sha>...HEAD` (`right` is leaving, `left` is arriving; the
+one-sided `<sha>..HEAD` answers only the first half and is silent on the second, P10 probe 4).
+The typed confirmation is required exactly when a hard reset would actually destroy something
+— the pre-flight's own destruction list, not merely "the tree is dirty": a tree dirty only with
+untracked files is not at risk, and demanding a token there would be reflexive (D52). The
+token is the target's short sha, re-checked host-side. "Stash first" is offered as the primary
+alternative on that path and is stash → reset → **stop**, not stash-and-carry (§7.6): popping
+the stash back afterwards would restore exactly what the reset removed, so the changes are
+deliberately left parked in the stash instead, retrievable on the user's own terms — and
+because the tree is then clean, that route needs no typed confirmation either. After any reset
+we surface the previous HEAD sha with a one-click "undo": **the replay matches the mode of the
+reset it undoes** (`git reset --<mode> <prev>`), backed by the reflog. Undoing a `--mixed`
+reset with `--soft` — the naive "hard undoes with hard, everything else with soft" rule — moves
+HEAD back but leaves the index at the reset state, staging a deletion for every file the
+returned commits added (P10 probe 5); the mode-matched replay is what actually restores a
+mixed reset cleanly.
 
 Reset is disabled while a merge/rebase is in progress, and on a detached HEAD it is presented
 as what it is — moving nothing but HEAD.
@@ -1717,7 +1733,15 @@ opposite of reset (§7.7), and the two are deliberately adjacent in the menu wit
 distinction spelled out.
 
 Pre-flight:
-- Dirty working tree → git will refuse. Detected first, with "stash first" offered (§7.6).
+- **Correction: a dirty working tree does not, by itself, mean git will refuse** — a revert of
+  a commit touching paths the dirty tree never touches succeeds with unstaged modifications
+  present (P10 probe 7F). Git's own refusals here are path-scoped and identical in shape to
+  cherry-pick's (§7.13): any staged change, any unstaged change overlapping the reverted
+  commit's own paths, or an untracked file at a path it would restore. P10 leaves `classifyRevert`
+  itself unchanged — it still blocks on any dirty path at all, a stricter rule than git requires,
+  inherited from P6 and not this phase's to relax — but corrects this section's own claim about
+  what git does, since a future phase narrowing the blocker should not have to re-derive the
+  fact from scratch. "Stash first" (§7.6) remains offered as the blanket-safe option regardless.
 - **Merge commit** → a mainline parent is mandatory. We detect the merge and require the user
   to pick which parent's changes to keep, rather than guessing `-m 1`.
 - **Conflict prediction**: `git merge-tree` against the inverse patch tells us whether the
@@ -1746,7 +1770,21 @@ object ids).
 progress and listing the unmerged paths, plus per-file conflict markers in the detail pane.
 While this state holds, mutating operations that git would refuse anyway — checkout, reset,
 revert, another stash pop — are disabled with the banner as the explanation, rather than
-being offered and then failing.
+being offered and then failing. **Reset is not among them by accident of git's own behaviour:**
+`--soft` is refused mid-merge, but `--mixed` and `--hard` **succeed and silently delete the
+state file**, abandoning the operation with no trace (P10 probe 3). The host-side gate this
+section's disabling describes is the only thing standing between the user and that
+unrecoverable abandonment — not a convenience layered on top of something git would have
+refused anyway.
+
+**Skip, for cherry-pick and revert.** Both are sequencer operations git gives `--skip` (`git
+cherry-pick --skip` / `git revert --skip`), and the banner's model carries a `canSkip` flag
+beside `canContinue`/`canAbort` so it can offer the button only where it applies. Cherry-pick
+has a state Skip exists for that Continue cannot resolve: an **empty pick** — the picked
+change is already present, so `CHERRY_PICK_HEAD` remains set with a clean worktree and
+**zero** unmerged paths (P10 probe 6). That shape is indistinguishable, from state files
+alone, from a pick already fully resolved and ready for Continue — so the banner offers both
+Continue and Skip there and names which is which, rather than guessing on the user's behalf.
 
 **Resolution: delegated, and in VS Code that delegation is genuinely complete.** VS Code
 resolves merge conflicts natively — the built-in `merge-conflict` extension decorates
@@ -1763,6 +1801,8 @@ offers:
   We watch `.git/index` and enable it the moment the user finishes resolving, so the flow
   returns to our UI without a manual refresh.
 - **Abort** → `git <op> --abort`, always available.
+- **Skip** → `git <op> --skip`, shown only when `canSkip` is set (cherry-pick and revert) — see
+  below.
 
 **Resolve is a VS Code capability the port advertises, not a hard requirement of the port
 itself** (§3.3) — `EditorIntegration` exposes conflict resolution as an optional capability the
@@ -1785,10 +1825,11 @@ implementing it:
 
 | Operation | Recovery |
 |---|---|
-| Reset (any mode) | previous HEAD from the reflog; `reset --hard`/`--soft` back to it (7.7) |
+| Reset (any mode) | previous HEAD from the reflog; **mode-matched** replay, `reset --<mode> <prev>` (7.7) |
 | Branch delete | the sha we recorded before deleting; `git branch <name> <sha>` |
 | Tag delete | same, recreating annotated tags from the captured tag object |
 | Stash drop | `git stash store -m <%gs> <sha>` — the dropped commit's own sha **and** its reflog subject, both captured before the drop |
+| Cherry-pick | previous HEAD, replayed as `git reset --keep <prev>` — preserves unrelated local modifications and refuses rather than lose work (7.13, P10 probe 9) |
 
 Scope and honesty about its limits, both stated in the UI:
 
@@ -1796,8 +1837,15 @@ Scope and honesty about its limits, both stated in the UI:
 - **It does not restore uncommitted work.** A `reset --hard` destroyed the working tree; undo
   moves the branch pointer back and nothing more. The reset confirmation already says this
   (7.7), and the undo affordance repeats it rather than implying a rescue it cannot perform.
+  **Nor does a `--mixed` reset's undo restore what was staged before the reset** — a mixed
+  reset destroys the index staging itself, which was never written to the object database and
+  so cannot be replayed by anything, mode-matched or not (P10 probe 5). The per-mode affordance
+  states this, not just `--hard`'s.
 - Operations that are not reversible this way (push, force-push, fetch) never offer undo. We
-  never present an undo we cannot honour.
+  never present an undo we cannot honour. **A cherry-pick that used `--no-commit` or that ended
+  in conflict offers no undo either, for the same reason: neither moved a ref, so there is
+  nothing an undo could replay** — the in-progress banner's Abort is the correct escape for the
+  conflicted case (P10/D66).
 - **Remote operations (fetch, push, pull, force-push, delete-remote-branch — P8) neither set
   nor clear the undo slot, in either direction.** "Performing another operation clears the
   undo slot" (above) means a *local*, undo-slot-eligible operation; an explicit fetch/push the
@@ -1816,15 +1864,63 @@ Scope and honesty about its limits, both stated in the UI:
   `gc --prune=now`. `undo.run` re-checks the recovery sha still resolves (`cat-file -e`)
   immediately before replaying, so a pruned object is a clean refusal, never a bad replay
   against nothing.
+- **A cherry-pick's `--keep` undo can refuse too, on its own terms.** A pick is legal with
+  unrelated dirt already in the tree, so undoing it with `reset --hard` would destroy work the
+  pick itself never touched; `--keep` moves the pointer and resets only what that move changes,
+  and refuses outright (exit 128, nothing applied) when local modifications sit on a path the
+  move would need to overwrite (P10 probe 9). That refusal surfaces as an ordinary failed undo
+  result — the commit stays, and the local work stays with it.
 
 Implemented as an `UndoSlot` in `core` populated by each op's executor, so adding a new
 destructive operation without an undo entry is a visible omission rather than a silent one.
 
 ### 7.13 Other v1 operations
 
-Cherry-pick (single commit), delete branch (with "not fully merged" detection and an explicit
-force path), rename branch, and copy sha/message/branch/tag name. Each follows the
-pre-flight → confirm → execute → reconcile shape.
+Delete branch (with "not fully merged" detection and an explicit force path), rename branch,
+and copy sha/message/branch/tag name. Each follows the pre-flight → confirm → execute →
+reconcile shape.
+
+**Cherry-pick**, a **Cherry-pick commit** entry on the commit row's context menu (§6.4),
+alongside Revert:
+
+```
+git cherry-pick <sha>                            # single parent
+git cherry-pick -m <parent-number> <sha>          # merge commit
+```
+
+A single commit only (multi-commit cherry-pick, like multi-commit revert, is not a v1
+guarantee this section makes). Semantics stated before running: cherry-pick applies the
+selected commit's changes as a *new* commit on the current branch — the same "creates, does
+not move history" character as revert, applied forwards instead of backwards.
+
+Pre-flight:
+- **Merge commit** → `-m <parent-number>` is mandatory, exactly as for revert (§7.10); no
+  mainline chosen is refused pre-flight, and choosing one re-predicts.
+- **Conflict prediction**: `git merge-tree`, with the merge base pinned explicitly to
+  `<sha>^<mainline>` rather than left to git's own `merge-base(HEAD, sha)`. The two disagree
+  whenever `sha`'s own immediate parent is not that natural merge-base — concretely, whenever
+  `sha` is more than one commit into its own branch since the fork — and the natural choice can
+  read a genuinely conflicting pick as clean (P10 probe 2). This is the inverse arrangement of
+  revert's own prediction (§7.10), because a pick applies its diff forwards and a revert
+  backwards.
+- **Path-scoped dirty-tree blockers**, identical in shape to §7.10's corrected revert claim:
+  any staged change blocks outright; an unstaged change overlapping a path the commit touches
+  blocks; an untracked file at a path the commit would add blocks. An unrelated unstaged
+  modification does **not** block — git tolerates it, so we do too (P10 probe 7).
+- **Already applied**: if `sha` is already an ancestor of HEAD, we say so as an advisory note.
+  It is not a blocker — cherry-picking it again is legal (and typically a fast no-op or an
+  empty pick, below), just very likely not what was intended.
+- Detached HEAD → allowed, with the same note as revert.
+
+**The empty-pick state.** When the change is already present on the branch by other means, git
+exits non-zero but leaves `CHERRY_PICK_HEAD` set with a clean worktree and zero unmerged paths
+— indistinguishable from a fully-resolved pick by state files alone. The in-progress banner
+(§7.11) offers both Continue (commit it anyway) and Skip (git's own named remedy) and says
+which is which, rather than guessing.
+
+Cherry-pick reuses P6's sequencer state reader, conflict banner, and `OpResult` shape
+wholesale — the conflict path (§7.11) is identical to revert's, with `--skip` (present for
+both) the only addition this phase makes to the banner itself.
 
 ---
 
@@ -2054,7 +2150,7 @@ Phases are sequential; each ends at a checkpoint.
 | **P7** | Branch review | The sidebar webview view and its own activity-bar container (§2.1), **Review branch changes** on the branch-picker and ref-badge context menus, the base resolver (upstream → detected default branch → ask, never a silent guess) with the header base picker and `review.resolveBase` (§3.5), the `<base>..<branch>` range-scoped walk over P2's existing streaming machinery, and a commit list whose rows expand into **P5's file tree** and whose files open **P5's unified diff, "Open in editor" and line-mapped "Go to file" (D14a)** unchanged (§6.8). | Review opens from both context menus and the palette, first commits painted ≤300 ms on a 200-commit range; base resolves to the tracking branch when it names a different branch, to the detected default branch when it does not, and to the ask-state when neither exists; the override re-runs the comparison in place without reopening the view; a fully-merged branch reports "nothing to review" naming both refs rather than an empty list; every row expands to the same tree P5 renders (renames, merge parent selector, binary/LFS) and every file opens the same diff, with "Go to file" landing on the mapped line in the virtual blob for a branch that is not checked out; hiding the view drops the session and reopening re-resolves and re-walks (no rehydration path, §5.4); Playwright interaction + visual coverage at sidebar widths across all four theme kinds. |
 | **P8** | Remote ops | Fetch (incl. **opt-in background auto-fetch, default off**), push, decomposed pull with strategy selection, force-push with lease + `--force-if-includes`, protected branches, askpass path, progress + typed auth errors. | Met: integration tests against a local bare remote (and, for the auth/timing scenarios, a real `git http-backend` HTTP fixture) cover non-fast-forward rejection, a true lease violation, a `--force-if-includes` violation on a fetched-but-not-integrated remote move, hook rejection with the hook's own stderr preserved onto the result, two independent no-hang paths (a declined credential prompt and the broker's own timeout firing), cancelling a fetch mid-transfer with no orphaned `git` process and refs left consistent, a refused cancel mid-push, all three protected-branch outcomes (typed-confirmation match, mismatch, and plain push left ungated), the auto-fetch scheduler's focused/hidden/busy-skip/disable-after-failure guardrails, all three pull strategies incl. ff-only's diverged refusal, and `--prune-tags` off by default. No operation can hang on a prompt. Full checklist in `docs/plans/P8.md`'s own Findings. |
 | **P9** | Stash | **Done.** Stash create (incl. `-u`, message, pathspec), list, show, apply/pop/drop/branch, stashes rendered in the graph and selectable like a commit (`StashDetailPane.vue`), and the pop-prediction engine via `merge-tree --merge-base=<stash^>` (§7.6) wired into checkout resolution (`stashAndCarry`) and pull's own stash-and-carry route. | Met — `tests/integration/stashLifecycle.test.ts` (W18): clean and conflicting predictions agree with the real executed pop, the `--merge-base` regression is pinned directly, the untracked-collision and local-changes-overwritten blockers are both proven forceable with their documented (non-atomic vs. atomic) outcomes, and `stash branch`'s own non-atomicity is reproduced faithfully. `tests/integration/stashUndo.test.ts` (W19): a dropped stash is recoverable through the undo slot, landing at `stash@{0}` with its original reflog message; a pruned recovery object is refused cleanly; the slot is cleared by the very next op; the byte-identical-shas edge case is pinned as a known, documented limitation rather than silently fixed or ignored. |
-| **P10** | Reset | Soft/mixed/hard with per-mode consequence copy, pre-flight counts, typed confirmation for hard-with-dirty, reflog-backed undo completing the undo slot (7.12). **Also picks up cherry-pick (single commit, §7.13)** — named as a v1 operation with no phase since P6 shipped without it; not designed yet, but reuses P6's sequencer state reader, conflict banner and `OpResult` shape rather than inventing a second mechanism. | Integration tests assert repository state per mode; undo restores; guarded during in-progress operations. Cherry-pick: same conflict-banner/continue/abort path proven for revert, exercised for cherry-pick too. |
+| **P10** | Reset | **Done.** Reset (soft/mixed/hard) and single-commit cherry-pick, both through `op.run`, both gated mid-operation, both undoable. Reset's undo replay is mode-matched (D61) and its typed confirmation is scoped to what `--hard` actually destroys (D62). Cherry-pick reuses P6's sequencer reader, banner and `OpResult` wholesale, adding only `--skip` (D65). | Met — W18's `resetLifecycle.test.ts` asserts repository state for all three modes against probe 1's matrix; `cherryPickLifecycle.test.ts` drives a conflicting pick through the same banner/continue/abort path `revertLifecycle.test.ts` proved for revert, plus skip from the empty state; undo restores per mode and refuses cleanly where `--keep` cannot proceed; both ops return `OperationInProgress` mid-merge with `MERGE_HEAD` intact. |
 | **P11** | Search | Input with case/whole-word/regex toggles, commit/refs(branches+tags)/both scope, hybrid client-side + git-backed matching, next/prev navigation, live regex validation, abort-on-supersede. | Semantics table fully covered by tests (each toggle × scope); ≤120 ms budget met; malformed regex never throws. |
 | **P12** | GitHub PR links | Branch → pull request resolution (§6.7): GitHub-remote detection from `origin`, the `GitHubAuth` port over VS Code's built-in GitHub authentication provider (D31), the REST lookup, the per-branch cache invalidated by the watcher, `branch.resolvePr` (§3.5), the `#123` badge on branch-picker rows and message-column ref badges opening the PR via `ExternalOpener` (D32), `kiraVersion.github.enabled`, and PR number/title matching added to §7.8's `Refs` scope. | A branch with a pull request shows its badge in both places, distinguishes open/merged/closed, and opens the PR URL externally; search finds that branch by PR number and title within the ≤120 ms budget with no per-keystroke network call; no GitHub remote, no matching PR, the setting off, or a declined session each produce no badge, no request and no repeat prompt, with the rest of the app unaffected; the session is requested on first use only, never at activation, verified by an activation-time assertion. |
 | **P13** | Ship | `.vsix` packaging without `vscode:prepublish`, `extensionKind`/no-browser manifest declarations (2.1.1), **`engines.vscode` floor confirmed (D7)**, **SCM title button and status bar item (6.5)**, the **`kiraVersion.*` command-palette audit** wiring a command for every mutating operation introduced across P6–P10 (6.5/6.6's "every action is palette-reachable", which no earlier row owns), marketplace + OpenVSX metadata, docs, settings surface, telemetry-free release checklist. | Installable `.vsix`; every mutating operation reachable from the palette; full Playwright suite green on macOS. |
@@ -2139,6 +2235,12 @@ deliberately deferred rather than left undecided.**
 | D58 | Stack-mutating stash operations are addressed as `stash@{N}`, never a raw sha | **`pop`, `drop` and `branch` all take the stack index; `apply` and `show` may take the sha.** Git itself refuses a raw sha for `pop`/`drop` — and `stash branch <name> <sha>` is worse, succeeding while silently skipping the drop (P9 probe 8). Every stack-mutating request also carries the sha, verified against `rev-parse stash@{N}` immediately before any write; a mismatch is an `earlyError` with nothing spawned, rather than mutating whatever now happens to sit at that index. |
 | D59 | The stash list is its own request, not part of `refs.list` | **A dedicated `stash.list` returning `StashEntry[]`.** `refs/stash` is one ref with a reflog stack behind it; `RefRow`'s fields (upstream, track, `checkedOutIn`, annotation) are all meaningless for it, and `for-each-ref` sees only the tip. In the graph, `DecorationRef` gains `{kind: "stash", index}` rather than a second variant — a stash decorates a commit the way a branch tip does, and the missing piece was identity (which stack position), not kind — synthesised by sha membership, since `%D` decorates only `stash@{0}`. |
 | D60 | Undo of a drop captures the reflog subject, never the commit subject | **`%gs`, not `%s`.** The two are identical at push time but diverge the instant a `stash store -m` runs (P9 probe 9) — capturing `%s` would silently rewrite the stash's own message on every undo replay. The restored entry lands at `stash@{0}`, never its original stack position, and the undo announcement states that plainly rather than let the position mismatch read as a failure. |
+| D61 | A reset's undo replays the same mode, not `--soft` | **The replay is `reset --<mode> <prev>`, `<prev>` captured by `rev-parse HEAD` before the write.** §7.7's original rule (`--hard` for hard, `--soft` otherwise) leaves the index at the reset state when undoing a `--mixed`, staging a deletion for every file the returned commits added — a third state the user never asked for, one commit away from real damage. The reflog cannot supply the mode (every reset logs `reset: moving to <sha>` regardless of mode), so capture-before is the mechanism, exactly as for branch/tag delete and stash drop. |
+| D62 | The typed confirmation is gated on what would actually be destroyed, and the token is the target's short sha | **`reset --hard` destroys tracked modifications and staged-but-uncommitted new files, and leaves untracked and ignored files alone; a tree dirty only with untracked files is not at risk**, and demanding a token there is the reflexive confirmation D52 rejected. The token is re-checked host-side and its own `OpErrorKind` is `ConfirmationRequired` — D19/D52's pattern is reused, their `ProtectedBranch` kind is not, because the taxonomy must not claim a protection that does not exist. |
+| D63 | "Stash first" is stash-then-stop, not P9's stash-and-carry | **Reset's route is `stash push` → `reset` → stop: the work is preserved deliberately in the stash, retrievable on the user's terms.** `#stashAndCarry` ends by popping the stash back, which after a reset would restore precisely the changes the user asked to be rid of, against a moved HEAD. Because the tree is clean by then, the reset is no longer destructive and the typed confirmation is not required on that path. |
+| D64 | Cherry-pick's prediction always passes `--merge-base=<sha>^<mainline>`, with `HEAD` as the base and the commit as the other side | **Left to itself git picks `merge-base(HEAD, sha)`, against which a commit that undoes an earlier commit on its own branch reads as no change at all** — reporting a genuinely conflicting pick as clean (P10 probe 2). This is D56's stash rule in a second shape, and it is the exact inverse arrangement of revert's prediction (which passes `<sha>^<m>` as the *other* side): a revert applies the diff backwards, a pick forwards. |
+| D65 | Cherry-pick's pre-flight blockers are path-scoped, and `--skip` joins the banner | **Git tolerates unrelated unstaged modifications during a pick and refuses any staged change, any unstaged change overlapping the commit's own paths, and any untracked file at a path the commit adds** — three atomic refusals, all computable by set intersection (§7.5's D∩T). A blanket dirty-tree blocker would refuse what git allows. Separately, an *empty* pick leaves `CHERRY_PICK_HEAD` with zero unmerged paths, where Continue cannot succeed; the state is indistinguishable from a fully-resolved pick by state files alone, so the banner offers both Continue and Skip and names the choice rather than guessing. |
+| D66 | A cherry-pick's undo is `reset --keep <prev>`, and is withheld when no commit was created | **A pick is legal with unrelated dirt in the tree, so `reset --hard` would destroy work the operation never touched; `--keep` moves the pointer, resets only what the move changes, and refuses with exit 128 changing nothing when it cannot do that safely** — a refusal `undo.run` surfaces as an ordinary failed result. A `--no-commit` pick and a pick that ended in conflict both moved no ref, so no undo is offered for either: §7.12's "we never present an undo we cannot honour", read literally. |
 
 ### 11.3 Behaviour and safety
 
