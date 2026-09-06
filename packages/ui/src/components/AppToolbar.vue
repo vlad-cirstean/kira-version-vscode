@@ -3,7 +3,11 @@
  * §6.2's toolbar: `[repo ▾] [branch ▾] │ ⟳ │ Fetch Pull Push │ Stash ▾ │ Search […] ⚙`. P4 built
  * only the first and third groups; P6 (W13/W17) adds the second — the branch/tag picker — and the
  * undo affordance, since both need P6's ref list and op executor. `docs/plans/P8.md` W17 adds the
- * fetch/pull/push group itself; search needs P10 and stays absent, not a disabled placeholder.
+ * fetch/pull/push group itself; `docs/plans/P11.md` W14 adds the fifth, `SearchBox.vue`, after the
+ * spacer alongside the remote-progress/undo group — the ascii layout's own right-hand cluster —
+ * rather than before it with Stash: this toolbar has no settings gear of its own to sit beside
+ * (out of scope entirely, no phase implements one), so the search box is what now occupies that
+ * same right-aligned space.
  *
  * Metrics match the panel title bar's, not an invented toolbar height (§6.1): 35px
  * (`--kv-toolbar-height`), square corners (`--kv-radius: 0`), no shadow.
@@ -22,12 +26,15 @@ import type { GraphViewState } from "../state/graphView.ts";
 import type { OpsState } from "../state/ops.ts";
 import type { RefsState } from "../state/refs.ts";
 import type { RepoState } from "../state/repo.ts";
+import type { SearchState } from "../state/search.ts";
 import type { StashState } from "../state/stash.ts";
 import BranchPicker from "./BranchPicker.vue";
 import PullStrategyPicker from "./PullStrategyPicker.vue";
 import RefreshButton from "./RefreshButton.vue";
-import { remoteNamesFrom } from "./rowMenuModel.ts";
 import RepoPicker from "./RepoPicker.vue";
+import { remoteNamesFrom } from "./rowMenuModel.ts";
+import SearchBox from "./SearchBox.vue";
+import type { SearchOption } from "./searchResultsModel.ts";
 import UndoButton from "./UndoButton.vue";
 
 const props = defineProps<{
@@ -36,6 +43,7 @@ const props = defineProps<{
   refsState: RefsState;
   opsState: OpsState;
   stashState: StashState;
+  searchState: SearchState;
   actions: DetailActions | undefined;
 }>();
 const emit = defineEmits<{
@@ -46,6 +54,13 @@ const emit = defineEmits<{
   (event: "stash-changes"): void;
   /** Forwarded straight from `BranchPicker.vue`'s own emit — see `StashList.vue`'s doc comment. */
   (event: "branch-from-stash", entry: StashEntry): void;
+  /** Forwarded straight from `SearchBox.vue`'s own `select` emit — `App.vue` is where both halves
+   *  of §7.8's "selecting a hit reveals and selects it" actually live (`GraphViewState.store`,
+   *  `SelectionState`), neither of which this toolbar holds. */
+  (event: "search-select", option: SearchOption): void;
+  /** Forwarded straight from `SearchBox.vue`'s own `focusGrid` emit (§6.6's two-stage `Escape`,
+   *  second stage) — moving real DOM focus onto the grid is `App.vue`'s own `commitGridRef`. */
+  (event: "search-focus-grid"): void;
 }>();
 
 function copy(text: string, whatCopied: string): void {
@@ -251,6 +266,12 @@ const stashDisabled = computed(
     </button>
 
     <span class="kv-toolbar-spacer" aria-hidden="true"></span>
+
+    <SearchBox
+      :search="searchState"
+      @select="(option) => emit('search-select', option)"
+      @focus-grid="emit('search-focus-grid')"
+    />
 
     <div v-if="remoteBusy" class="kv-remote-progress" data-testid="remote-progress">
       <span class="codicon codicon-loading kv-remote-progress-spin" aria-hidden="true"></span>

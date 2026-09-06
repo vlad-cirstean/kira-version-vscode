@@ -155,6 +155,16 @@ export type {
   TagCreatePreflight,
 } from "./preflight/types.ts";
 export type {
+  CommitFields,
+  LoadedScanOptions,
+  LoadedScanResult,
+  MatchableRef,
+  SearchField,
+} from "./search/matcher.ts";
+export { matchCommitFields, matchRef, searchLoadedCommits } from "./search/matcher.ts";
+export type { CompiledQuery, SearchQuery, SearchScope } from "./search/query.ts";
+export { compileQuery, escapeRegExp, MIN_SHA_PREFIX } from "./search/query.ts";
+export type {
   CoerceProblem,
   CoerceResult,
   HostKind,

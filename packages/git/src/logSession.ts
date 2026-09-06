@@ -56,6 +56,11 @@ export interface ReadPageOptions {
 export interface LogSession extends Disposable {
   readonly loadedCount: number;
   readonly exhausted: boolean;
+  /** `docs/plans/P11.md` W8: the exact `WalkSpec` this session opened with — `searchCommits`'s
+   *  tail scan reads it rather than reconstructing one from settings, so the scan always walks
+   *  the SAME rev set the panel's own paging does (judgment call 3), which is what makes probe
+   *  11's ordering-identity property hold between a loaded page and a scan's own sequence. */
+  readonly walk: WalkSpec;
   readPage(sink: (record: CommitRecord) => void, opts?: ReadPageOptions): Promise<PageOutcome>;
   remaining(): Promise<number>;
   dispose(): void;
@@ -211,6 +216,10 @@ class LogSessionImpl implements LogSession {
 
   get exhausted(): boolean {
     return this.#exhausted;
+  }
+
+  get walk(): WalkSpec {
+    return this.#walk;
   }
 
   async readPage(

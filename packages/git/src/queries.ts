@@ -32,7 +32,12 @@ import {
 } from "./parse/diffTree.ts";
 import { logArgs, parseLogRecord, revSetArgs, showMetadataArgs } from "./parse/log.ts";
 import { mergeTreeArgs, parseMergeTreeOutput } from "./parse/mergeTree.ts";
-import { parseRefRecord, REFS_RECORD_DELIMITER, refsArgs } from "./parse/refs.ts";
+import {
+  parseRefRecord,
+  REFS_RECORD_DELIMITER,
+  refsArgs,
+  TAG_REFS_RECORD_DELIMITER,
+} from "./parse/refs.ts";
 import {
   parseBaseSubjects,
   parseStashList,
@@ -152,22 +157,36 @@ export interface RefsSnapshot {
   readonly tags: RefRecord[];
 }
 
+/** W4/probe 7: the tags-only spawn is NUL-framed (`TAG_REFS_RECORD_DELIMITER`), and
+ *  `for-each-ref` still appends its own `\n` line terminator after every record regardless of
+ *  format string — so every record but the stream's very first carries one stray leading `\n`
+ *  left over from the previous record's terminator, which this strips before parsing. Never
+ *  needed for the LF-framed spawns (`REFS_RECORD_DELIMITER`), whose delimiter already consumes
+ *  that same newline as the frame itself. */
+function stripLeadingNewline(record: Uint8Array): Uint8Array {
+  return record.length > 0 && record[0] === 0x0a ? record.subarray(1) : record;
+}
+
 async function collectRefRecords(
   driver: GitDriver,
   argv: string[],
   withSubject: boolean,
+  delimiter: number = REFS_RECORD_DELIMITER,
 ): Promise<RefRecord[]> {
   const read = driver.read(argv);
   const records: Uint8Array[] = [];
-  for await (const record of read.records(REFS_RECORD_DELIMITER)) records.push(record);
+  for await (const record of read.records(delimiter)) records.push(record);
   await read.done;
-  return records.filter((r) => r.length > 0).map((r) => parseRefRecord(r, withSubject));
+  return records
+    .map((r) => (delimiter === REFS_RECORD_DELIMITER ? r : stripLeadingNewline(r)))
+    .filter((r) => r.length > 0)
+    .map((r) => parseRefRecord(r, withSubject));
 }
 
 export async function refsSnapshot(driver: GitDriver): Promise<RefsSnapshot> {
   const [headsAndRemotes, tags] = await Promise.all([
     collectRefRecords(driver, refsArgs("heads"), false),
-    collectRefRecords(driver, refsArgs("tags"), true),
+    collectRefRecords(driver, refsArgs("tags"), true, TAG_REFS_RECORD_DELIMITER),
   ]);
   return {
     branches: headsAndRemotes.filter((r) => r.kind === "branch"),

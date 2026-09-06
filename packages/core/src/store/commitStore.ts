@@ -286,6 +286,55 @@ export class CommitStore {
     };
   }
 
+  // -------------------------------------------------------------------------------------
+  // Read-only column views — `docs/plans/P11.md` W2. Every one of these is a VIEW, not a copy,
+  // and valid only until the next `append`/`appendPage`/`appendPacked` call grows the backing
+  // array out from under it: `search/matcher.ts`'s `searchLoadedCommits` (the one caller) reads
+  // them once at the top of a scan and never awaits inside it, which is the invariant to hold at
+  // both ends rather than something this store enforces itself.
+  // -------------------------------------------------------------------------------------
+
+  /** The interner's own backing array, id-indexed — probe 9b's once-per-query dictionary match
+   *  turns four per-row string comparisons into four integer `Set.has` checks. */
+  internedStrings(): readonly string[] {
+    return this.#interner.values();
+  }
+
+  /** The four identity columns, `[authorName, authorEmail, committerName, committerEmail]`, each
+   *  a `Uint32Array` view of exactly `rowCount` interned-string ids. */
+  identityColumns(): readonly [Uint32Array, Uint32Array, Uint32Array, Uint32Array] {
+    return [
+      this.#authorName.view(),
+      this.#authorEmail.view(),
+      this.#committerName.view(),
+      this.#committerEmail.view(),
+    ];
+  }
+
+  /** `rowCount * shaWidthBytes` bytes of binary shas, in row order. Empty (not a throw) for an
+   *  empty store — `ShaTable.widthBytes` is undefined until the first append, which `rangeView`
+   *  would otherwise assert on for a `(0, 0)` range. */
+  shaBytes(): Uint8Array {
+    return this.#rowCount === 0 ? new Uint8Array(0) : this.#shas.rangeView(0, this.#rowCount);
+  }
+
+  get shaWidthBytes(): number {
+    return this.#rowCount > 0 ? this.#shas.widthBytes : 20;
+  }
+
+  /** The concatenated subject buffer — decode `subjectBytes().subarray(start, end)` per row
+   *  rather than calling `subjectAt` (probe 9b: a per-row `TextDecoder` allocation is most of the
+   *  naive matcher's cost). Pairs with `subjectOffsets()`. */
+  subjectBytes(): Uint8Array {
+    return this.#subjects.rangeBytes(0, this.#rowCount).bytes;
+  }
+
+  /** `offsets[i] .. offsets[i + 1]` bounds row `i`'s subject in `subjectBytes()`; one more entry
+   *  than `rowCount`. */
+  subjectOffsets(): Uint32Array {
+    return this.#subjects.rangeBytes(0, this.#rowCount).offsets;
+  }
+
   /** A view into the parent column: row indices, or -1 for a parent not (yet) loaded. */
   parentsOf(row: number): Int32Array {
     assert(row >= 0 && row < this.#rowCount, `CommitStore.parentsOf(${row}): out of range`);

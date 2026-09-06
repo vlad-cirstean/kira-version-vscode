@@ -98,6 +98,7 @@ export const tags: Scenario = {
           tagger: "Kira Fixture <fixture@kira-version.test>",
           date: 1_700_003_600,
           subject: "Release 1.0.0",
+          body: "",
         },
       },
       {

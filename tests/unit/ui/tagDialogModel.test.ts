@@ -44,7 +44,7 @@ describe("classifyTagName", () => {
   test("forcing over an existing annotated tag requires re-supplying the annotation", () => {
     const state = classifyTagName(
       "v1",
-      [tag({ annotation: { tagger: "a", date: 0, subject: "s" } })],
+      [tag({ annotation: { tagger: "a", date: 0, subject: "s", body: "" } })],
       true,
     );
     expect(state.existingIsAnnotated).toBe(true);
@@ -78,7 +78,7 @@ describe("canSubmitTagCreate", () => {
   test("forcing over an annotated tag without re-annotating: blocked, silence would lose data", () => {
     const state = classifyTagName(
       "v1",
-      [tag({ annotation: { tagger: "a", date: 0, subject: "s" } })],
+      [tag({ annotation: { tagger: "a", date: 0, subject: "s", body: "" } })],
       true,
     );
     expect(canSubmitTagCreate(state, false, "")).toBe(false);

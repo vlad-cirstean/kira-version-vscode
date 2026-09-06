@@ -17,25 +17,40 @@
  * into `TAG_REFS_FORMAT`, used only for the tags-only scope (every record returned is guaranteed
  * to be a tag), with the *parser* gating it on `objecttype === "tag"` so a lightweight tag's
  * borrowed commit-subject is discarded rather than stored.
+ *
+ * `docs/plans/P11.md` W4/probe 7: search additionally matches an annotated tag's full annotation
+ * body (§7.8), not only its subject line — but `%(contents:body)` contains raw LF, which this
+ * file's own LF framing cannot carry (the stated invariant is that no field can). The TAGS-ONLY
+ * spawn therefore moves to NUL framing instead: `TAG_REFS_FORMAT` ends in a literal `%00`
+ * (`for-each-ref` has no `-z`, but its format string accepts an embedded NUL), and
+ * `for-each-ref` still appends its own trailing `\n` after every record, which the splitter
+ * trims. `refsArgs("heads")` and `refsArgs("all")` — the latter also used by `logSession.ts`'s
+ * `captureRefSnapshot` — are untouched and stay LF-framed; a reader seeing two different
+ * delimiters used in the same file should read this paragraph before assuming either is a bug.
  */
 import type { RefKind, RefRecord, RefTrack } from "@kira-version/core";
 import { splitLimitedFields } from "@kira-version/core";
 
 const FIELD_DELIMITER = 0x1f;
 const FIELD_COUNT = 11;
-const FIELD_COUNT_WITH_SUBJECT = 12;
+const FIELD_COUNT_WITH_SUBJECT = 13;
 
 /** for-each-ref has no `-z`; records are separated by this byte instead. */
 export const REFS_RECORD_DELIMITER = 0x0a;
+
+/** The tags-only spawn's own framing (W4/probe 7) — a literal NUL appended to
+ *  `TAG_REFS_FORMAT` itself, since `for-each-ref` has no `-z` flag to ask for one. */
+export const TAG_REFS_RECORD_DELIMITER = 0x00;
 
 export const REFS_FORMAT =
   "%(refname)%1f%(objectname)%1f%(objecttype)%1f%(upstream)%1f%(upstream:track)%1f" +
   "%(committerdate:unix)%1f%(HEAD)%1f%(*objectname)%1f%(worktreepath)%1f" +
   "%(taggername)%1f%(taggerdate:unix)";
 
-/** Tags-only: `REFS_FORMAT` plus `%(contents:subject)` — see the file header for why this is
- *  safe only when every returned record is already known to be a tag. */
-export const TAG_REFS_FORMAT = `${REFS_FORMAT}%1f%(contents:subject)`;
+/** Tags-only: `REFS_FORMAT` plus `%(contents:subject)` and `%(contents:body)`, NUL-terminated —
+ *  see the file header for why this is safe only when every returned record is already known to
+ *  be a tag, and why this one spawn is framed differently from its siblings. */
+export const TAG_REFS_FORMAT = `${REFS_FORMAT}%1f%(contents:subject)%1f%(contents:body)%00`;
 
 /**
  * `"all"` keeps P1's exact behaviour (one spawn over all three ref roots, unsorted — the
@@ -103,6 +118,7 @@ export function parseRefRecord(record: Uint8Array, withSubject = false): RefReco
     taggerName,
     taggerDate,
     subject,
+    body,
   ] = splitLimitedFields(record, FIELD_DELIMITER, fieldCount).map((field) => decoder.decode(field));
 
   const { kind, shortName } = classify(refname ?? "");
@@ -123,13 +139,15 @@ export function parseRefRecord(record: Uint8Array, withSubject = false): RefReco
     checkedOutIn: worktreePath && worktreePath.length > 0 ? worktreePath : undefined,
     // Gated on `isTag`, never on "does taggerName look non-empty" alone changing behaviour by
     // format — a lightweight tag's %(contents:subject) is the pointed-at COMMIT's subject
-    // (probe P3) and must never be stored as this tag's own annotation.
+    // (probe P3, and now its body too, probe 7 — P11) and must never be stored as this tag's own
+    // annotation.
     annotation:
       isTag && taggerName && taggerName.length > 0
         ? {
             tagger: taggerName,
             date: Number(taggerDate ?? 0),
             subject: withSubject ? (subject ?? "") : "",
+            body: withSubject ? (body ?? "") : "",
           }
         : undefined,
   };

@@ -20,6 +20,7 @@ import { graphColumnWidth } from "../graph/geometry.ts";
 import type { ColumnWidths, DateFormat } from "../state/viewState.ts";
 import { formatAbsoluteDate, formatRelativeDate } from "./dateFormat.ts";
 import { buildRefBadges } from "./refBadges.ts";
+import { splitHighlights } from "./searchHighlight.ts";
 
 /** Every field a column's `field:` must name is a valid dotted path into `CommitRecord`
  *  (SlickGrid's `Column<T>.field` is typed against `T`'s own leaf paths); formatters here read
@@ -46,30 +47,56 @@ function textCell(text: string, className: string): HTMLSpanElement {
   return span;
 }
 
+/** P11 W13: the subject's own in-place search highlight. `pattern()` is re-read on every render
+ *  pass — mirroring `DateFormatterContext`/`ShaCopyContext`'s own accessor convention — so
+ *  `CommitGrid.vue` never rebuilds the column model just to reflect a new query; it only calls
+ *  `invalidateAllRows()`/`render()` on `search.searchGeneration`, exactly as it already does for
+ *  `graphView.generation`. `undefined` means "no query to highlight" (empty box, refs-only scope,
+ *  or no `search` prop at all), not "clear the previous highlight" — there is nothing to clear
+ *  since nothing here retains state across render passes. */
+export interface MessageSearchContext {
+  readonly pattern: () => RegExp | undefined;
+}
+
+const NO_SEARCH_CONTEXT: MessageSearchContext = { pattern: () => undefined };
+
 /** The message cell is a flex row (`CommitGrid.vue`'s `<style>`): `refBadges.ts`'s badge strip
  *  (only when the row has decorations — most rows do not, and get no wrapper at all) followed by
  *  the subject, which alone gets `text-overflow: ellipsis` — a CSS rule on `.kv-message-subject`,
- *  not something this formatter computes. */
-const messageFormatter: Formatter<CommitRecord> = (
-  _row,
-  _cell,
-  _value,
-  _columnDef,
-  dataContext,
-) => {
-  const cell = document.createElement("span");
-  cell.className = "kv-cell-message";
+ *  not something this formatter computes. When a search pattern is active, the subject's text is
+ *  split by `searchHighlight.ts`'s `splitHighlights` into alternating plain text nodes and
+ *  `<span class="kv-search-hit">` elements — `enableHtmlRendering: false` (§5.5) and this building
+ *  every node with `textContent` mean no escaping code is introduced and none is needed. */
+function messageFormatter(ctx: MessageSearchContext): Formatter<CommitRecord> {
+  return (_row, _cell, _value, _columnDef, dataContext) => {
+    const cell = document.createElement("span");
+    cell.className = "kv-cell-message";
 
-  const badges = buildRefBadges(dataContext.decoration);
-  if (badges !== null) cell.appendChild(badges);
+    const badges = buildRefBadges(dataContext.decoration);
+    if (badges !== null) cell.appendChild(badges);
 
-  const subject = document.createElement("span");
-  subject.className = "kv-message-subject";
-  subject.textContent = dataContext.subject;
-  cell.appendChild(subject);
+    const subject = document.createElement("span");
+    subject.className = "kv-message-subject";
+    const pattern = ctx.pattern();
+    if (pattern === undefined) {
+      subject.textContent = dataContext.subject;
+    } else {
+      for (const run of splitHighlights(dataContext.subject, pattern)) {
+        if (!run.matched) {
+          subject.appendChild(document.createTextNode(run.text));
+          continue;
+        }
+        const hit = document.createElement("span");
+        hit.className = "kv-search-hit";
+        hit.textContent = run.text;
+        subject.appendChild(hit);
+      }
+    }
+    cell.appendChild(subject);
 
-  return cell;
-};
+    return cell;
+  };
+}
 
 const authorFormatter: Formatter<CommitRecord> = (_row, _cell, _value, _columnDef, dataContext) =>
   textCell(dataContext.author.name, "kv-cell-author");
@@ -159,12 +186,15 @@ export interface ColumnWidthInputs extends ColumnWidths {
  *  `CommitGrid.vue`'s own drag handles (§6.1: `showColumnHeader: false` costs SlickGrid's built-in
  *  header resize handles, so this repo keeps its own), which write back through
  *  `grid.setColumns(...)` — this function, called again with the new widths, is the single source
- *  of the column model either way. */
+ *  of the column model either way. `searchCtx` (W13) is optional and defaults to "no highlight" so
+ *  every pre-existing call site (including `tests/unit/ui/columns.test.ts`'s four) keeps working
+ *  unchanged — only `CommitGrid.vue` passes a real one. */
 export function buildColumns(
   widths: ColumnWidthInputs,
   dateCtx: DateFormatterContext,
   graphFormatter: Formatter<CommitRecord>,
   shaCopyCtx: ShaCopyContext,
+  searchCtx: MessageSearchContext = NO_SEARCH_CONTEXT,
 ): Column<CommitRecord>[] {
   return [
     {
@@ -188,7 +218,7 @@ export function buildColumns(
       sortable: false,
       focusable: false,
       selectable: false,
-      formatter: messageFormatter,
+      formatter: messageFormatter(searchCtx),
     },
     {
       id: AUTHOR_COLUMN_ID,

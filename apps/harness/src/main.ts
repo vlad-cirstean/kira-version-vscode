@@ -278,7 +278,7 @@ if (viewParam === "review") {
       // repo, rather than crash the page before the shell itself has a chance to render.
     }
     viewState.write({
-      version: 3,
+      version: 4,
       repoId,
       loadedRows: 0,
       detailOpen: true,
@@ -288,6 +288,10 @@ if (viewParam === "review") {
       dateFormat: "relative",
       detailWidth: DEFAULT_DETAIL_WIDTH,
       fileListMode: "tree",
+      searchCaseSensitive: false,
+      searchWholeWord: false,
+      searchRegex: false,
+      searchScope: "both",
     });
   }
 

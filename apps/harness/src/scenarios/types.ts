@@ -152,4 +152,15 @@ export interface Scenario {
     readonly entry: StashEntry;
     readonly stashedPaths: readonly string[];
   }[];
+  /**
+   * `docs/plans/P11.md` W9/W15: `search.run`'s only fixture the mock cannot read off `commits`
+   * itself — `CommitRecord` (P1's own wire-shaped log format) never carried a commit body, so
+   * there is nowhere else in a scenario to state one. Keyed by sha, absent (or an absent key)
+   * meaning "no body" (matches a real root/leaf commit with no body paragraph at all). The
+   * `search` scenario seeds an entry whose body matches the query but whose subject does not,
+   * so W20's E2E suite can drive the one match shape a client-side (loaded-store) scan can never
+   * produce on its own — a real `RepoService.searchCommits` reads `%b` off `git log` directly,
+   * but the mock has no git process to ask, hence this.
+   */
+  readonly searchBodies?: Readonly<Record<string, string>>;
 }

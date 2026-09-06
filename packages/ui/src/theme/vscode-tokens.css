@@ -100,6 +100,11 @@
   --kv-description-fg: var(--vscode-descriptionForeground, #9d9d9d);
   --kv-error-fg: var(--vscode-errorForeground, #f48771);
 
+  /* P11 W13: the grid's in-place search-match highlight (§3.4) — the same token the real editor's
+     own "Find" widget paints a match with, so a subject-column hit reads as the same kind of
+     highlight VS Code already trained the user on, not an invented colour. */
+  --kv-search-match-bg: var(--vscode-editor-findMatchHighlightBackground, rgba(234, 92, 0, 0.33));
+
   /* The <600px overlay drawer's backdrop (P4 W11, §6.3) — no workbench colour id names a modal
      scrim specifically (the closest, --vscode-widget-shadow, is already used for drop shadows
      above), so this is a second invented value, same as the lane palette above. */

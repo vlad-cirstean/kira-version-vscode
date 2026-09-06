@@ -15,6 +15,7 @@ import type {
   ResetMode,
   ResetPreflight,
   RevertPreflight,
+  SearchQuery,
   Settings,
   StashBranchPreflight,
   StashEntry,
@@ -31,7 +32,12 @@ import {
   FakeWorkspaceRoots,
 } from "../../../packages/core/src/ports/testFakes.ts";
 import { GitError } from "../../../packages/git/src/errors.ts";
-import type { BlobResult, GitStatus, RefsResult } from "../../../packages/git/src/repoService.ts";
+import type {
+  BlobResult,
+  GitStatus,
+  RefsResult,
+  SearchRunResult,
+} from "../../../packages/git/src/repoService.ts";
 import type { RepoServicePort } from "../../../packages/git/src/rpcHandlers.ts";
 import { createRepoHandlers } from "../../../packages/git/src/rpcHandlers.ts";
 import type {
@@ -141,6 +147,21 @@ class FakeRepoService implements RepoServicePort {
     tags: [],
     head: { kind: "unborn", name: "main" },
   };
+  // `docs/plans/P11.md` W9
+  searchResult: SearchRunResult = {
+    kind: "ok",
+    hits: [],
+    total: 0,
+    truncated: false,
+    scanned: 0,
+    complete: true,
+  };
+  searchCommitsCalls: Array<{
+    repoId: string;
+    query: Omit<SearchQuery, "scope">;
+    limit: number;
+    signal: AbortSignal | undefined;
+  }> = [];
   statusSummaryResult: StatusSummary = {
     head: { kind: "unborn", name: "main" },
     upstream: undefined,
@@ -295,6 +316,16 @@ class FakeRepoService implements RepoServicePort {
 
   async refs(_repoId: string): Promise<RefsResult> {
     return this.refsResult;
+  }
+
+  async searchCommits(
+    repoId: string,
+    query: Omit<SearchQuery, "scope">,
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<SearchRunResult> {
+    this.searchCommitsCalls.push({ repoId, query, limit, signal });
+    return this.searchResult;
   }
 
   async statusSummary(_repoId: string): Promise<StatusSummary> {

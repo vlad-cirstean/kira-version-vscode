@@ -91,3 +91,16 @@
 .codicon-copy::before {
   content: "\ebcc";
 }
+
+/* P11 W11: SearchBox.vue's three toggles. */
+.codicon-case-sensitive::before {
+  content: "\eab1";
+}
+
+.codicon-whole-word::before {
+  content: "\eb7e";
+}
+
+.codicon-regex::before {
+  content: "\eb38";
+}

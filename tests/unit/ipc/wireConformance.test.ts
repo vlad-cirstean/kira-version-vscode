@@ -57,6 +57,7 @@ import type {
   ResetPreflight as CoreResetPreflight,
   RevertPreflight as CoreRevertPreflight,
 } from "../../../packages/core/src/preflight/types.ts";
+import type { SearchQuery as CoreSearchQuery } from "../../../packages/core/src/search/query.ts";
 import {
   type Settings as CoreSettings,
   defaultSettings,
@@ -100,6 +101,7 @@ import type {
   RemoteOpResult as WireRemoteOpResult,
   ResetPreflight as WireResetPreflight,
   RevertPreflight as WireRevertPreflight,
+  SearchQueryParams as WireSearchQueryParams,
   SettingsSnapshot as WireSettingsSnapshot,
   SignatureStatus as WireSignatureStatus,
   StatusSummary as WireStatusSummary,
@@ -283,7 +285,12 @@ describe("ipc wire conformance", () => {
       (core) => core,
       (wire) => wire,
     );
-    const annotation: CoreTagAnnotation = { tagger: "T <t@t.com>", date: 0, subject: "release" };
+    const annotation: CoreTagAnnotation = {
+      tagger: "T <t@t.com>",
+      date: 0,
+      subject: "release",
+      body: "",
+    };
     const wire: WireTagAnnotation = annotation;
     expect(wire).toEqual(annotation);
   });
@@ -1009,5 +1016,33 @@ describe("ipc wire conformance — runtime round trip over the real boundary (P1
     // The good buffer alongside it proves the corruption, not some unrelated fromWire bug, is
     // what throws.
     expect(() => graphChunkFromWire(good)).not.toThrow();
+  });
+
+  // ---- P11 W6: search --------------------------------------------------------------------
+  //
+  // `SearchQueryParams` is the wire form of core's `SearchQuery` minus `scope` (the tail scan
+  // is commits-only), so it is checked against `Omit<CoreSearchQuery, "scope">` the same way
+  // `RefRow`'s test checks against `Omit<CoreRefRecord, "objectType">` above. `CommitSearchHit`
+  // and `SearchRunResult` have no such core-side counterpart to drift against — `RepoService`
+  // builds and returns the wire shape directly (`docs/plans/P11.md`'s W8 sketch) rather than a
+  // core type this file could import — so there is nothing to `assertBothWays` them against;
+  // `TagAnnotation.body`'s addition is already covered by the existing `TagAnnotation` test
+  // above, with no new test needed here.
+
+  test("SearchQueryParams: assignable both ways against core's SearchQuery, minus the wire-irrelevant scope", () => {
+    assertBothWays<WireSearchQueryParams, Omit<CoreSearchQuery, "scope">>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const query: CoreSearchQuery = {
+      text: "widget",
+      caseSensitive: false,
+      wholeWord: false,
+      regex: false,
+      scope: "both",
+    };
+    const { scope: _scope, ...wire } = query;
+    const asWire: WireSearchQueryParams = wire;
+    expect(asWire).toEqual(wire);
   });
 });

@@ -5,6 +5,7 @@ import { markRaw, type ShallowRef, shallowRef } from "vue";
 import type { BridgeClient } from "../bridge/client.ts";
 import { createLayoutClient, type LayoutClient } from "../graph/layoutClient.ts";
 import { LayoutStore } from "../graph/layoutStore.ts";
+import { composeRevealSearchHitAnnouncement } from "./liveAnnouncements.ts";
 import { type ChunkSource, PackedStreamState } from "./packedStream.ts";
 
 export type { ChunkSource };
@@ -55,6 +56,9 @@ export class GraphViewState {
   readonly laneCount: ShallowRef<number> = shallowRef(0);
   readonly loading: ShallowRef<LoadingState> = shallowRef("idle");
   readonly generation: ShallowRef<number>;
+  /** W13's `revealSha` own live-region text — `App.vue` forwards it into the shared region
+   *  exactly as it already does for `DetailState.announcement`/`OpsState.announcement`. */
+  readonly announcement: ShallowRef<string> = shallowRef("");
 
   readonly #packed: PackedStreamState;
   readonly #bridge: BridgeClient;
@@ -160,6 +164,49 @@ export class GraphViewState {
     } finally {
       this.#loadController = undefined;
     }
+  }
+
+  /**
+   * `docs/plans/P11.md` W13: a tail search hit's `row` is `-1` (`SearchState.CommitHit`'s own doc
+   * comment) until this resolves it into a real, loaded row — §5.1.1's own sentence ("selecting
+   * such a result loads the pages up to it"), implemented as `loadAll()`'s exact loop shape (one
+   * shared `AbortController`, so a single cancel reaches whichever page is currently in flight)
+   * but exiting the moment the sha appears rather than only at exhaustion. `signal` is the
+   * caller's own (`SearchState`/`App.vue`, W14) — aborting it stops the loop between pages, the
+   * same "the page already in flight still completes and is kept" guarantee `cancelLoad()` gives
+   * `loadMore`/`loadAll`, since it aborts the very controller the in-flight request was given.
+   *
+   * Returns `"cancelled"` rather than `"notFound"` when the signal — not the history — is what
+   * stopped the loop, so a caller does not misreport a cancellation as "this commit does not
+   * exist"; also `"cancelled"` if another load-shaped operation is already running (the same
+   * idempotency `loadMore`/`loadAll` already enforce) or there is no open repo, since neither is
+   * this call's own failure to report. Announces through `liveAnnouncements.ts` — see
+   * `composeRevealSearchHitAnnouncement`'s own doc comment for why only "loading" and "notFound"
+   * get text, never "found".
+   */
+  async revealSha(sha: string, signal: AbortSignal): Promise<"found" | "notFound" | "cancelled"> {
+    if (this.store.rowOfSha(sha) >= 0) return "found";
+    const repoId = this.#repoId;
+    if (!repoId || this.loading.value !== "idle" || signal.aborted) return "cancelled";
+    const controller = new AbortController();
+    this.#loadController = controller;
+    const onExternalAbort = (): void => controller.abort();
+    signal.addEventListener("abort", onExternalAbort);
+    this.announcement.value = composeRevealSearchHitAnnouncement("loading");
+    try {
+      while (this.store.rowOfSha(sha) < 0 && !this.exhausted.value && !controller.signal.aborted) {
+        await this.#runLoad("loadingMore", () =>
+          this.#bridge.request("graph.loadMore", { repoId, pages: 1 }, controller.signal),
+        );
+      }
+    } finally {
+      signal.removeEventListener("abort", onExternalAbort);
+      if (this.#loadController === controller) this.#loadController = undefined;
+    }
+    if (controller.signal.aborted) return "cancelled";
+    const found = this.store.rowOfSha(sha) >= 0;
+    if (!found) this.announcement.value = composeRevealSearchHitAnnouncement("notFound");
+    return found ? "found" : "notFound";
   }
 
   /**

@@ -18,6 +18,7 @@ import { BridgeClient } from "./bridge/client.ts";
 import AppToolbar from "./components/AppToolbar.vue";
 import CommitGrid from "./components/CommitGrid.vue";
 import ConflictBanner from "./components/ConflictBanner.vue";
+import DetailPane from "./components/DetailPane.vue";
 import BranchDialog from "./components/dialogs/BranchDialog.vue";
 import CheckoutDialog from "./components/dialogs/CheckoutDialog.vue";
 import CherryPickDialog from "./components/dialogs/CherryPickDialog.vue";
@@ -32,9 +33,8 @@ import EmptyRepositoryPanel from "./components/EmptyRepositoryPanel.vue";
 import GitBlockedPanel from "./components/GitBlockedPanel.vue";
 import LoadMoreButton from "./components/LoadMoreButton.vue";
 import NoRepositoryPanel from "./components/NoRepositoryPanel.vue";
-import DetailPane from "./components/DetailPane.vue";
-import { remoteCheckoutTarget } from "./components/refListModel.ts";
 import RowContextMenu from "./components/RowContextMenu.vue";
+import { remoteCheckoutTarget } from "./components/refListModel.ts";
 import {
   buildRefMenu,
   buildRowMenu,
@@ -42,8 +42,9 @@ import {
   type MenuSection,
 } from "./components/rowMenuModel.ts";
 import StashDetailPane from "./components/StashDetailPane.vue";
+import type { SearchOption } from "./components/searchResultsModel.ts";
 import { DetailState } from "./state/detail.ts";
-import { type DetailActions, createDetailActions } from "./state/detailActions.ts";
+import { createDetailActions, type DetailActions } from "./state/detailActions.ts";
 import { GraphViewState } from "./state/graphView.ts";
 import {
   composeLoadMoreAnnouncement,
@@ -52,14 +53,15 @@ import {
 import { OpsState } from "./state/ops.ts";
 import { RefsState } from "./state/refs.ts";
 import { RepoState } from "./state/repo.ts";
+import { SearchState } from "./state/search.ts";
 import { SelectionState } from "./state/selection.ts";
 import { SettingsState } from "./state/settings.ts";
 import { StashState } from "./state/stash.ts";
 import {
   type ColumnWidths,
+  type DateFormat,
   DEFAULT_COLUMN_WIDTHS,
   DEFAULT_DETAIL_WIDTH,
-  type DateFormat,
   type PersistedViewState,
   type ViewStateStore,
 } from "./state/viewState.ts";
@@ -94,6 +96,11 @@ const opsState = new OpsState(bridge, refsState);
 // `docs/plans/P9.md` W13: one `StashState` for the life of this component, exactly like
 // `refsState`/`opsState` above — reset via `setRepoId` rather than replaced.
 const stashState = new StashState(bridge);
+// `docs/plans/P11.md` W10/W14: one `SearchState` for the life of this component, exactly like
+// `refsState`/`opsState`/`stashState` above — reset via `setRepoId` rather than replaced. Threads
+// `refsState`/`graphView` in directly (both already exist above), matching the plan's own "threads
+// RefsState and GraphViewState into it".
+const searchState = new SearchState(bridge, refsState, graphView);
 
 const repoState = shallowRef<RepoState | undefined>(undefined);
 const settingsState = shallowRef<SettingsState | undefined>(undefined);
@@ -217,6 +224,7 @@ watch(
     refsState.setRepoId(repoId);
     opsState.setRepoId(repoId);
     stashState.setRepoId(repoId);
+    searchState.setRepoId(repoId);
   },
   { immediate: true },
 );
@@ -226,6 +234,12 @@ watch(detailState.announcement, (text) => {
 });
 
 watch(opsState.announcement, (text) => {
+  liveAnnouncement.value = text;
+});
+
+// `docs/plans/P11.md` W13/W14: `GraphViewState.revealSha`'s own progress text, forwarded into the
+// shared live region exactly like `detailState.announcement`/`opsState.announcement` above.
+watch(graphView.announcement, (text) => {
   liveAnnouncement.value = text;
 });
 
@@ -249,6 +263,59 @@ function selectCommitFromDetail(sha: string): void {
     return;
   }
   detailState.select(sha);
+}
+
+// ---------------------------------------------------------------------------------------
+// `docs/plans/P11.md` W14: `SearchBox.vue`'s two emits, forwarded through `AppToolbar.vue`.
+// ---------------------------------------------------------------------------------------
+let revealController: AbortController | undefined;
+
+/** §7.8's "selecting a ref scrolls to and highlights the commit it points at" / "selecting a
+ *  commit selects it in the graph" — both funnel through the same `GraphViewState.revealSha`
+ *  (W13), since a tail-only commit hit and every ref hit alike may point at a sha outside the
+ *  currently loaded window. Supersedes any reveal already in flight — the same cancel-and-restart
+ *  shape this file already uses elsewhere (`handleRepoOpened`'s own `pendingSelectionSha` reset,
+ *  `GraphViewState`'s own controller swaps): revealing a second sha before the first one finished
+ *  paging should abandon that first page-through, not race it. A `"notFound"`/`"cancelled"`
+ *  outcome selects nothing — `revealSha`'s own doc comment covers why each is announced (or not)
+ *  on its own. Shared by both `handleSearchSelect` (a dropdown pick) and the `activeHit` watcher
+ *  below (`Enter`/`Shift+Enter` stepping through commit matches with no dropdown option
+ *  highlighted) — the two ways §7.8 lets a search hit become "the" selected commit. */
+async function revealAndSelectSha(sha: string): Promise<void> {
+  revealController?.abort();
+  const controller = new AbortController();
+  revealController = controller;
+  const outcome = await graphView.revealSha(sha, controller.signal);
+  if (outcome !== "found") return;
+  const row = graphView.store.rowOfSha(sha);
+  if (row === -1) return; // defensive only — revealSha's own contract: "found" means row >= 0
+  selection.select(row);
+  commitGridRef.value?.scrollToRow(row);
+}
+
+/** An annotated tag's own commit is `peeledObjectId`, never `objectId` (§7.8: "for an annotated
+ *  tag, the commit it dereferences to") — a lightweight tag or a branch carries no
+ *  `peeledObjectId` at all, so `objectId` is what every other ref kind falls back to. */
+async function handleSearchSelect(option: SearchOption): Promise<void> {
+  const sha =
+    option.kind === "ref"
+      ? (option.hit.ref.peeledObjectId ?? option.hit.ref.objectId)
+      : option.hit.sha;
+  await revealAndSelectSha(sha);
+}
+
+// `SearchState.next()`/`previous()` (`SearchBox.vue`'s `Enter`/`Shift+Enter`, judgment call 6)
+// only move `activeIndex` over `commitHits` — this watcher is the "consumer" `search.ts`'s own
+// class doc comment describes ("a consumer watches `activeHit` and drives the reveal-and-select
+// side effect"), reusing the exact same helper `handleSearchSelect` uses above. `undefined` means
+// either nothing has been stepped to yet (`activeIndex` still `-1`) or `next()`/`previous()` was
+// a no-op on an empty hit list — neither reveals anything.
+watch(searchState.activeHit, (hit) => {
+  if (hit !== undefined) void revealAndSelectSha(hit.sha);
+});
+
+function handleSearchFocusGrid(): void {
+  commitGridRef.value?.focusGrid();
 }
 
 function handleCopySha(fullSha: string): void {
@@ -522,8 +589,14 @@ onMounted(() => {
   void bootstrap();
 });
 
+// `docs/plans/P11.md` W7: the four search fields below are carried through unchanged by every
+// write this file makes (the `watch` callback spreads `...lastPersisted`, and a successful
+// `viewState.read()` at boot replaces this whole literal with the persisted one) — `App.vue`'s
+// own reactive wiring to `SearchState` is W14's, not W7's; until then these four simply hold
+// their default/persisted value across every other field's write, exactly like `fileListMode`
+// did between P5 W11 (when it was added here) and P5 W12 (when `DetailPane` started driving it).
 let lastPersisted: PersistedViewState = {
-  version: 3,
+  version: 4,
   repoId: null,
   loadedRows: 0,
   detailOpen: true,
@@ -533,6 +606,10 @@ let lastPersisted: PersistedViewState = {
   dateFormat: "relative",
   detailWidth: DEFAULT_DETAIL_WIDTH,
   fileListMode: "tree",
+  searchCaseSensitive: false,
+  searchWholeWord: false,
+  searchRegex: false,
+  searchScope: "both",
 };
 
 async function bootstrap(): Promise<void> {
@@ -660,12 +737,18 @@ function toggleDetail(): void {
   detailOpen.value = !detailOpen.value;
 }
 
-/** §6.6's Esc ordering: the diff view (P5 W9) first, then the detail pane/drawer. Kept as the
- *  one handler both `CommitGrid.vue`'s own `closeDetail` emit (when the grid has focus) and this
- *  file's own document-level listener (when focus is inside the detail pane/drawer itself, which
- *  is outside the grid's host and so outside its own keydown listener's reach) call — "the
- *  ordering lives in one handler in App.vue" (§6.6's own words), not duplicated per input
- *  source. */
+/** §6.6's Esc ordering: an open menu, then the search results dropdown, then the diff view (P5
+ *  W9), then the detail pane/drawer (P11 W12/W13's spec edit 6, restated with this file's own
+ *  share of it). The first two stages never reach here at all — `RowContextMenu.vue`'s and
+ *  `SearchBox.vue`'s own `keydown` handlers each call `stopPropagation()` on the `Escape` they
+ *  act on (see either component's own doc comment), so this file's document-level listener only
+ *  ever sees an `Escape` that both of those already declined. What *is* kept as one handler here
+ *  is only this function's own two remaining stages — diff view first, then the detail pane/
+ *  drawer — called both by `CommitGrid.vue`'s own `closeDetail` emit (when the grid has focus)
+ *  and this file's own document-level listener (when focus is inside the detail pane/drawer
+ *  itself, outside the grid's host and so outside its own keydown listener's reach) — "the
+ *  ordering lives in one handler in App.vue" (§6.6's own words) for exactly the part of the chain
+ *  this file owns. */
 const selectionIsStash = computed(() => stashState.selected.value !== undefined);
 
 function closeDetail(): void {
@@ -775,6 +858,7 @@ onBeforeUnmount(() => {
   refsState.dispose();
   opsState.dispose();
   stashState.dispose();
+  searchState.dispose();
   repoState.value?.dispose();
   settingsState.value?.dispose();
   bridge.dispose();
@@ -817,10 +901,13 @@ onBeforeUnmount(() => {
           :refs-state="refsState"
           :ops-state="opsState"
           :stash-state="stashState"
+          :search-state="searchState"
           :actions="actions"
           @repo-opened="handleRepoOpened"
           @stash-changes="stashCreateOpen = true"
           @branch-from-stash="handleBranchFromStash"
+          @search-select="handleSearchSelect"
+          @search-focus-grid="handleSearchFocusGrid"
         />
         <EmptyRepositoryPanel :branch-name="repoState.activeRepo.value.head.name" />
       </template>
@@ -833,10 +920,13 @@ onBeforeUnmount(() => {
           :refs-state="refsState"
           :ops-state="opsState"
           :stash-state="stashState"
+          :search-state="searchState"
           :actions="actions"
           @repo-opened="handleRepoOpened"
           @stash-changes="stashCreateOpen = true"
           @branch-from-stash="handleBranchFromStash"
+          @search-select="handleSearchSelect"
+          @search-focus-grid="handleSearchFocusGrid"
         />
         <ConflictBanner
           :ops="opsState"
@@ -851,6 +941,7 @@ onBeforeUnmount(() => {
               :selection="selection"
               :column-widths="columnWidths"
               :date-format="dateFormat"
+              :search="searchState"
               :clipboard-enabled="actions?.capabilities.clipboard ?? false"
               v-bind="initialScrollRowProp"
               @update:column-widths="columnWidths = $event"

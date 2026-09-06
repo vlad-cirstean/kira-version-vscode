@@ -201,6 +201,9 @@ export interface TagAnnotation {
   readonly tagger: string;
   readonly date: number; // unix seconds
   readonly subject: string;
+  /** `docs/plans/P11.md` W4/probe 7: the tag message's full body, from `%(contents:body)` —
+   *  populated only by the tags-only scope's spawn. */
+  readonly body: string;
 }
 
 export interface RefRow {
@@ -788,6 +791,55 @@ export interface BaseResolution {
 }
 
 // ---------------------------------------------------------------------------------------
+// P11 — search. Structural copy of `packages/core`'s `search/query.ts` (minus `scope`: the
+// tail scan is commits-only, and Refs/Both are resolved entirely client-side against
+// `RefsState`, no RPC), kept honest by `tests/unit/ipc/wireConformance.test.ts`.
+// ---------------------------------------------------------------------------------------
+
+export interface SearchQueryParams {
+  readonly text: string;
+  readonly caseSensitive: boolean;
+  readonly wholeWord: boolean;
+  readonly regex: boolean;
+}
+
+export type SearchMatchField =
+  | "subject"
+  | "body"
+  | "authorName"
+  | "authorEmail"
+  | "committerName"
+  | "committerEmail"
+  | "sha";
+
+/** Enough to render a dropdown row without a second round trip, and nothing more — the scan
+ *  reads gigabytes of records (probe 5) and none of it crosses the wire beyond these capped
+ *  hits. */
+export interface CommitSearchHit {
+  readonly sha: string;
+  readonly subject: string;
+  readonly authorName: string;
+  readonly authorEmail: string;
+  readonly authorTime: number;
+  readonly fields: readonly SearchMatchField[];
+}
+
+export type SearchRunResult =
+  | {
+      readonly kind: "ok";
+      /** Walk order (probe 11), capped at `limit`. */
+      readonly hits: readonly CommitSearchHit[];
+      /** EXACT, counted over every commit scanned — not `hits.length`. */
+      readonly total: number;
+      readonly truncated: boolean;
+      readonly scanned: number;
+      /** `false` ⇒ the host-side time box fired before git's own end (hard part 4). */
+      readonly complete: boolean;
+    }
+  /** Never thrown (probe 4): a pattern the UI would not send still comes back as data. */
+  | { readonly kind: "invalidPattern"; readonly message: string };
+
+// ---------------------------------------------------------------------------------------
 // The contract.
 // ---------------------------------------------------------------------------------------
 
@@ -1027,6 +1079,15 @@ export type Contract = {
        *  D50) — never an error: a cancel racing a just-finished op is an ordinary outcome, not a
        *  fault. */
       result: { readonly cancelled: boolean };
+    };
+    // ---- P11: search -----------------------------------------------------------------------
+    /** §7.8's git-backed half. One request, one cancellable read — no cancel key, no second walk
+     *  session (`docs/plans/P11.md`'s hard parts 3 and 6, and D51's contrast). Superseded by the
+     *  caller's own `AbortSignal`, which `rpc.ts` already threads to the spawn. Refs/Both are
+     *  resolved entirely client-side against `RefsState`; this request is commits-only. */
+    "search.run": {
+      params: { repoId: string; query: SearchQueryParams; limit?: number };
+      result: SearchRunResult;
     };
   };
   events: {

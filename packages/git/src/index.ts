@@ -96,14 +96,17 @@ export {
   parseNameStatusRecords,
   parseNumstatRecords,
 } from "./parse/diffTree.ts";
-export type { LogArgsOptions, WalkSpec } from "./parse/log.ts";
+export type { LogArgsOptions, ScanRecord, WalkSpec } from "./parse/log.ts";
 export {
   LOG_FORMAT,
   logArgs,
+  logScanArgs,
   logSessionArgs,
   logSessionSkipArgs,
   parseLogRecord,
+  parseScanRecord,
   revSetArgs,
+  SCAN_FORMAT,
   showMetadataArgs,
   walkArgs,
 } from "./parse/log.ts";
@@ -157,14 +160,17 @@ export {
 } from "./queries.ts";
 export type {
   BlobResult,
+  CommitSearchHit,
   GitStatus,
   GraphChunkPayload,
   RemoteOpProgress,
   RepoOpenOutcome,
   RepoServiceDeps,
+  SearchRunResult,
 } from "./repoService.ts";
 export {
   CHUNK_ROWS,
+  DEFAULT_SEARCH_LIMIT,
   DETAIL_CACHE_MAX_ENTRIES,
   DIFF_CACHE_MAX_BYTES,
   HIDDEN_EVICT_MS,

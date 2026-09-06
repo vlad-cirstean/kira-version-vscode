@@ -161,12 +161,12 @@ describe("RefsState", () => {
         shortName: "v1",
         objectId: "tagobj1",
         peeledObjectId: "sha1",
-        annotation: { tagger: "a", date: 0, subject: "v1" },
+        annotation: { tagger: "a", date: 0, subject: "v1", body: "" },
       }),
     ];
 
     const badges = refs.badgesBySha.value;
-    expect(badges.get("sha1")?.map((r) => r.shortName)).toEqual(["main", "v1"]);
+    expect(badges.get("sha1")?.map((r: RefRow) => r.shortName)).toEqual(["main", "v1"]);
   });
 
   test("worktreeBranches is exactly the branches with checkedOutIn set", () => {
