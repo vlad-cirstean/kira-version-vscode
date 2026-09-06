@@ -177,6 +177,31 @@ describe("resolveReviewBase — every §6.8 resolution rule, against a real repo
     }
   });
 
+  test("origin/HEAD dangling (target since pruned): falls through the same as unset (V1)", async () => {
+    const repo = withRemote();
+    // `git symbolic-ref --short refs/remotes/origin/HEAD` does not verify its target exists — it
+    // still prints "origin/main" even after `refs/remotes/origin/main` itself is gone (confirmed
+    // empirically), so `detectDefaultBranch` (packages/git/src/queries.ts) returns a real string
+    // here, not `undefined`. It is `resolveBase` (core) that must then notice "origin/main" names
+    // nothing in the ref snapshot and fall through to the candidate list on its own — this is the
+    // "successful-but-nonexistent answer" that function's own doc comment calls out as not
+    // `detectDefaultBranch`'s problem to catch.
+    git(repo.dir, ["update-ref", "-d", "refs/remotes/origin/main"]);
+    gitCommit(repo.dir, ["checkout", "--quiet", "-b", "topic", "main"]);
+
+    const { service, repoId } = await openService(
+      repo.dir,
+      settingsWithCandidates(["main", "master"]),
+    );
+    try {
+      const resolution = await service.resolveReviewBase(repoId, "topic");
+      expect(resolution.reason).toBe("defaultBranch");
+      expect(resolution.base).toBe("main");
+    } finally {
+      service.dispose();
+    }
+  });
+
   test("'main' absent, 'master' present: the candidate list's second entry is used", async () => {
     const repo = linear(3);
     git(repo.dir, ["branch", "-m", "main", "master"]); // rename the only branch to "master"
