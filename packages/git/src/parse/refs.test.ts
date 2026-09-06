@@ -2,11 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { splitRecords } from "@kira-version/core";
-import {
-  parseRefRecord,
-  REFS_RECORD_DELIMITER,
-  TAG_REFS_RECORD_DELIMITER,
-} from "./refs.ts";
+import { parseRefRecord, REFS_RECORD_DELIMITER, TAG_REFS_RECORD_DELIMITER } from "./refs.ts";
 
 const FIXTURES = join(import.meta.dir, "../../../../tests/fixtures/porcelain/refs");
 const HAND_AUTHORED = join(import.meta.dir, "../../../../tests/fixtures/porcelain/handAuthored");
