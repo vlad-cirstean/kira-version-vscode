@@ -982,8 +982,16 @@ function buildFastImportStream(n: number): string {
 }
 
 /** Builds `building` from a fast-import stream, repacks, optionally writes a commit-graph,
- *  then atomically installs it at `cached`. Shared by `large()` and `largeBranchy()`. */
-function buildAndInstall(cached: string, stream: string, opts: Required<LargeRepoOptions>): string {
+ *  then atomically installs it at `cached`. Shared by `large()`/`largeBranchy()`/`searchable()`.
+ *  `afterImport`, when given, runs after `reset --hard main` and before the repack — so anything
+ *  it adds (`searchable()`'s own tags/branches) is included in the repacked pack, not left loose
+ *  on top of it. */
+function buildAndInstall(
+  cached: string,
+  stream: string,
+  opts: Required<LargeRepoOptions>,
+  afterImport?: (repo: Repo) => void,
+): string {
   mkdirSync(LARGE_CACHE_DIR, { recursive: true });
   const building = `${cached}.building-${process.pid}`;
   rmSync(building, { recursive: true, force: true });
@@ -995,6 +1003,7 @@ function buildAndInstall(cached: string, stream: string, opts: Required<LargeRep
     env: baseEnv(repo.dir),
   });
   repo.git(["reset", "--quiet", "--hard", "main"]);
+  afterImport?.(repo);
   repo.git(["repack", "-a", "-d", "--quiet"]);
   if (opts.commitGraph) {
     repo.git(["commit-graph", "write", "--reachable", "--split"]);
@@ -1148,6 +1157,170 @@ export function largeBranchy(n: number, opts: LargeBranchyOptions = {}): Generat
   return { dir: cached, commits: [], refs: { main: headSha } };
 }
 
+// ---------------------------------------------------------------------------------------
+// searchable(n) — docs/plans/P11.md W15: the one fixture P11's own unit edge cases (W16),
+// integration assertions (W17), and perf run (W18) all read. large()/largeBranchy() cannot serve
+// any of the three: one author, no bodies, every subject the literal `commit <i>` — none of
+// that gives §7.8's six commit fields, or its three toggles, anything to discriminate.
+// ---------------------------------------------------------------------------------------
+
+const SEARCHABLE_AUTHORS: ReadonlyArray<{ readonly name: string; readonly email: string }> = [
+  { name: "Alice Widgeon", email: "alice@example.test" },
+  { name: "Bob Sprocket", email: "bob@example.test" },
+  { name: "Carol Ratchet", email: "carol@example.test" },
+  { name: "Dave Cogsworth", email: "dave@example.test" },
+  { name: "Eve Flywheel", email: "eve@example.test" },
+];
+
+/** Cycles through every discriminating case §7.8's three toggles need: plain lower-case ("Fix
+ *  the widget cache"), upper-case ("Add WIDGETS support" — the case-sensitive toggle's own
+ *  discriminator), a hyphenated compound ("Ship the sub-widget driver" — "widget" still sits on
+ *  a word boundary on both sides of the hyphen), a parenthesised reference with no boundary on
+ *  one side ("Closes the frobnicator (#123)" — `query.ts`'s own probe 10 example, the
+ *  lookaround-vs-`\b` case), and a substring with no boundary at either side ("Prewidgetize the
+ *  pipeline" — whole-word must NOT match this one; a bare `\b` would incorrectly land inside a
+ *  word here). Every other subject in the rotation carries no "widget" substring at all, so a
+ *  query for it has real negatives to miss, not only positives to find. */
+const SEARCHABLE_SUBJECTS: readonly string[] = [
+  "Fix the widget cache",
+  "Add WIDGETS support",
+  "Ship the sub-widget driver",
+  "Closes the frobnicator (#123)",
+  "Prewidgetize the pipeline",
+  "Refactor the sprocket allocator",
+  "Bump the ratchet dependency",
+  "Tidy up the cogsworth module",
+  "Improve flywheel diagnostics",
+  "Update the release notes",
+];
+
+/** No subject in `SEARCHABLE_SUBJECTS` above contains this — every 7th commit's body does, so a
+ *  query for it is a body-only hit by construction, exactly what W17's own "body-only match"
+ *  assertion (hard part 1) needs a real repository to demonstrate. Multi-line, per the plan's
+ *  own "multi-line bodies". */
+const SEARCHABLE_BODY_ONLY_TERM = "gizmocratic";
+
+function searchableMessage(index: number): string {
+  const subject = SEARCHABLE_SUBJECTS[index % SEARCHABLE_SUBJECTS.length] as string;
+  if (index % 7 !== 3) return subject;
+  return (
+    `${subject}\n\n` +
+    `Longer explanation for commit ${index}.\n` +
+    `This change is thoroughly ${SEARCHABLE_BODY_ONLY_TERM} in nature and\n` +
+    "took two attempts to get right.\n"
+  );
+}
+
+function buildSearchableStream(n: number): string {
+  const lines: string[] = [];
+  lines.push("reset refs/heads/main");
+  for (let i = 0; i < n; i++) {
+    const date = dateFor(i);
+    const author = SEARCHABLE_AUTHORS[i % SEARCHABLE_AUTHORS.length] as {
+      name: string;
+      email: string;
+    };
+    lines.push("commit refs/heads/main");
+    lines.push(`mark :${i + 1}`);
+    lines.push(`author ${author.name} <${author.email}> ${date}`);
+    lines.push(`committer ${author.name} <${author.email}> ${date}`);
+    const message = searchableMessage(i);
+    lines.push(`data ${message.length}`);
+    lines.push(message);
+    if (i === 0) {
+      lines.push("deleteall");
+    } else {
+      lines.push(`from :${i}`);
+    }
+    lines.push("M 100644 inline file.txt");
+    const content = `line ${i}\n`;
+    lines.push(`data ${content.length}`);
+    lines.push(content);
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+/** The sha `n` commits back from `main`'s own tip lands exactly on commit `index` — `main`'s
+ *  post-import tip is commit `n - 1`, so `main~(n - 1 - index)` walks back to it. Used only while
+ *  building (`main` already exists and is checked out — `reset --hard main` ran just before
+ *  this is ever called), never against the installed, cached repo. */
+function searchableCommitAt(repo: Repo, n: number, index: number): string {
+  return repo.git(["rev-parse", `main~${n - 1 - index}`]).trim();
+}
+
+/** A handful of annotated tags with real, multi-line annotation bodies (§7.9: "an annotated tag
+ *  is its own object with a tagger, date, and message"; §7.8: "Tags additionally match on their
+ *  annotation message" — there is nothing to search there without one), plus a lightweight tag
+ *  sharing a name prefix with a branch (§7.8's own "a tag and a branch of the same name are
+ *  never confused" — `release` the branch, `release-preview` the lightweight tag). Every tagger
+ *  date is `dateFor(n + k)`, later than every commit's own date, so nothing here is dated before
+ *  the commit it points at. */
+function tagSearchableFixture(repo: Repo, n: number): void {
+  const taggerEnv = (offset: number): NodeJS.ProcessEnv => ({
+    GIT_COMMITTER_NAME: AUTHOR_NAME,
+    GIT_COMMITTER_EMAIL: AUTHOR_EMAIL,
+    GIT_COMMITTER_DATE: dateFor(n + offset),
+  });
+
+  repo.git(
+    [
+      "tag",
+      "-a",
+      "v1.0.0",
+      "-m",
+      "Version 1.0.0\n\nFirst stable widget release, covering the sprocket allocator\nand the ratchet dependency bump.\n",
+      searchableCommitAt(repo, n, Math.floor(n / 4)),
+    ],
+    taggerEnv(1),
+  );
+  repo.git(
+    [
+      "tag",
+      "-a",
+      "v1.1.0",
+      "-m",
+      "Version 1.1.0\n\nAdds WIDGETS support and closes the frobnicator (#123).\n",
+      searchableCommitAt(repo, n, Math.floor(n / 2)),
+    ],
+    taggerEnv(2),
+  );
+  repo.git(["branch", "release", searchableCommitAt(repo, n, Math.floor((3 * n) / 4))]);
+  repo.git(["tag", "release-preview", searchableCommitAt(repo, n, n - 1)]);
+}
+
+function searchableCachePath(n: number, opts: Required<LargeRepoOptions>): string {
+  return join(LARGE_CACHE_DIR, cacheKey("searchable", n, opts));
+}
+
+/** Every ref `tagSearchableFixture` creates, resolved fresh — read on both the cache-hit and
+ *  cache-miss paths below so a cached repo's callers get the same `refs` shape a first-ever
+ *  build would. */
+function searchableRefs(repo: Repo, main: string): Record<string, string> {
+  return {
+    main,
+    "v1.0.0": repo.git(["rev-parse", "v1.0.0"]).trim(),
+    "v1.1.0": repo.git(["rev-parse", "v1.1.0"]).trim(),
+    release: repo.git(["rev-parse", "release"]).trim(),
+    "release-preview": repo.git(["rev-parse", "release-preview"]).trim(),
+  };
+}
+
+export function searchable(n: number, opts: LargeRepoOptions = {}): GeneratedRepo {
+  const resolved = { ...DEFAULT_LARGE_REPO_OPTIONS, ...opts };
+  const cached = searchableCachePath(n, resolved);
+
+  if (existsSync(join(cached, ".git"))) {
+    const repo = new Repo(cached);
+    return { dir: cached, commits: [], refs: searchableRefs(repo, repo.head()) };
+  }
+
+  const headSha = buildAndInstall(cached, buildSearchableStream(n), resolved, (repo) =>
+    tagSearchableFixture(repo, n),
+  );
+  return { dir: cached, commits: [], refs: searchableRefs(new Repo(cached), headSha) };
+}
+
 /**
  * Removes every cached large()/largeBranchy() repo (LARGE_CACHE_DIR only — the small shapes'
  * own SHAPE_CACHE_DIR, cached by cachedShape() since P6a W3, is untouched, so this doesn't
@@ -1161,9 +1334,10 @@ export function clearLargeCache(): void {
 }
 
 /**
- * Removes only the one cache entry a specific `large(n, opts)` or `largeBranchy(n, opts)` call
- * would use, leaving every other cached large repo (crucially, the 100k/PAGE_SIZE templates
- * `historyPipeline.test.ts`/`packedChunk.test.ts` depend on for speed) untouched.
+ * Removes only the one cache entry a specific `large(n, opts)`, `largeBranchy(n, opts)`, or
+ * `searchable(n, opts)` call would use, leaving every other cached large repo (crucially, the
+ * 100k/PAGE_SIZE templates `historyPipeline.test.ts`/`packedChunk.test.ts` depend on for speed)
+ * untouched.
  *
  * P6a W3 finding: `largeBranchy.test.ts`'s determinism check needs a guaranteed-cold rebuild of
  * its own small (n=300) repo, twice, and both self-test files want to clean up the small entries
@@ -1174,7 +1348,7 @@ export function clearLargeCache(): void {
  * instead.
  */
 export function clearLargeCacheEntry(
-  kind: "large" | "largeBranchy",
+  kind: "large" | "largeBranchy" | "searchable",
   n: number,
   opts: LargeBranchyOptions = {},
 ): void {
@@ -1182,7 +1356,9 @@ export function clearLargeCacheEntry(
   const cached =
     kind === "large"
       ? largeCachePath(n, resolved)
-      : largeBranchyCachePath(n, opts.branchCount ?? 12, opts.commitsPerRound ?? 200, resolved);
+      : kind === "largeBranchy"
+        ? largeBranchyCachePath(n, opts.branchCount ?? 12, opts.commitsPerRound ?? 200, resolved)
+        : searchableCachePath(n, resolved);
   rmSync(cached, { recursive: true, force: true });
 }
 

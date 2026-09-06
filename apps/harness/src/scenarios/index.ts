@@ -21,6 +21,7 @@ import { reviewMergeFromBase } from "./reviewMergeFromBase.ts";
 import { reviewPaged } from "./reviewPaged.ts";
 import { reviewPerf } from "./reviewPerf.ts";
 import { reviewUpstream } from "./reviewUpstream.ts";
+import { search } from "./search.ts";
 import { stash } from "./stash.ts";
 import { tags } from "./tags.ts";
 import { tooOld } from "./tooOld.ts";
@@ -51,6 +52,7 @@ const SCENARIOS: Readonly<Record<string, Scenario>> = {
   remoteOpsPull,
   remoteOpsDiverged,
   stash,
+  search,
 };
 
 /** Loadable by exact name via `?scenario=<name>` but deliberately left out of `SCENARIOS` above
