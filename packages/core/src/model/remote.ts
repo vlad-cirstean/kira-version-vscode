@@ -64,6 +64,13 @@ export interface RemoteOpRequest {
    *  user — still looking at the dialog's now-stale `remoteTip` — ever finding out). `undefined`
    *  for every other kind. */
   readonly expectedRemoteTip: string | null | undefined;
+  /** `forcePush` only: `true` selects plain `--force`; `false`/`undefined` selects the default
+   *  lease-based `--force-with-lease --force-if-includes` (D48). §7.4 puts plain `--force` behind
+   *  a second, harder-worded confirmation client-side — there is nothing further for this field's
+   *  consumer to verify server-side beyond which argv it builds (unlike `confirmToken` below,
+   *  that second confirmation has no typed value a server could re-check). `undefined` for every
+   *  other kind. */
+  readonly plainForce: boolean | undefined;
   /** `forcePush`/`deleteRemoteBranch` against a protected branch only: the typed branch name,
    *  checked server-side against `kiraVersion.protectedBranches` (D52) — never trusted from the
    *  UI alone. `undefined` for every other kind, and for an unprotected branch. */
@@ -72,7 +79,17 @@ export interface RemoteOpRequest {
 
 export interface RemoteOpResult {
   readonly ok: boolean;
-  readonly error: { readonly kind: OpErrorKind; readonly message: string } | undefined;
+  readonly error:
+    | {
+        readonly kind: OpErrorKind;
+        readonly message: string;
+        /** `HookRejected` only: the hook's own `remote: `-prefixed output, stripped of that
+         *  prefix (`GitError.remoteMessage`, W11) — the only actionable content in an otherwise
+         *  buried wall of git output (probe 4). `undefined` for every other kind, and for a
+         *  `HookRejected` whose stderr happened to carry no `remote: ` lines at all. */
+        readonly remoteMessage: string | undefined;
+      }
+    | undefined;
   /** Never `undo` (§7.12: fetch/push/force-push never offer one) — this is the field
    *  `RemoteOpResult` has instead of `OpResult.undo`, not an oversight of a missing one. */
   readonly updates: readonly RefUpdate[];

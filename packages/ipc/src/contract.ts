@@ -398,12 +398,23 @@ export interface RemoteOpParams {
    *  without the user — still looking at the dialog's now-stale remoteTip — ever finding out).
    *  undefined for every other kind. */
   readonly expectedRemoteTip: string | null | undefined;
+  /** forcePush only: true selects plain --force; false/undefined selects the default
+   *  lease-based --force-with-lease --force-if-includes (D48). undefined for every other kind. */
+  readonly plainForce: boolean | undefined;
   readonly confirmToken: string | undefined;
 }
 
 export interface RemoteOpResult {
   readonly ok: boolean;
-  readonly error: { readonly kind: OpErrorKind; readonly message: string } | undefined;
+  readonly error:
+    | {
+        readonly kind: OpErrorKind;
+        readonly message: string;
+        /** HookRejected only: the hook's own remote:-prefixed output, prefix stripped. undefined
+         *  for every other kind, and for a HookRejected with no such lines. */
+        readonly remoteMessage: string | undefined;
+      }
+    | undefined;
   readonly updates: readonly RefUpdate[];
   readonly head: HeadState;
   readonly inProgress: InProgressOperation | null;

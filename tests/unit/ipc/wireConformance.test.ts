@@ -460,6 +460,7 @@ describe("ipc wire conformance", () => {
       pruneTags: false,
       strategy: undefined,
       expectedRemoteTip: null,
+      plainForce: undefined,
       confirmToken: undefined,
     };
     const wire: Omit<WireRemoteOpParams, "repoId"> = request;
@@ -480,6 +481,18 @@ describe("ipc wire conformance", () => {
     };
     const wire: WireRemoteOpResult = result;
     expect(wire).toEqual(result);
+
+    // The error's own remoteMessage field (HookRejected only) — a second literal so the
+    // assignability check above is not only ever exercised against `error: undefined`.
+    const rejected: CoreRemoteOpResult = {
+      ok: false,
+      error: { kind: "HookRejected", message: "hook declined", remoteMessage: "no force-pushes" },
+      updates: [],
+      head: { kind: "branch", name: "main" },
+      inProgress: null,
+    };
+    const rejectedWire: WireRemoteOpResult = rejected;
+    expect(rejectedWire).toEqual(rejected);
   });
 
   test("OpRequest: core and ipc's wire copy are assignable both ways", () => {
