@@ -160,14 +160,17 @@ export {
 } from "./queries.ts";
 export type {
   BlobResult,
+  CommitSearchHit,
   GitStatus,
   GraphChunkPayload,
   RemoteOpProgress,
   RepoOpenOutcome,
   RepoServiceDeps,
+  SearchRunResult,
 } from "./repoService.ts";
 export {
   CHUNK_ROWS,
+  DEFAULT_SEARCH_LIMIT,
   DETAIL_CACHE_MAX_ENTRIES,
   DIFF_CACHE_MAX_BYTES,
   HIDDEN_EVICT_MS,

@@ -18,6 +18,7 @@ import type {
   CheckoutPreflight,
   CherryPickPreflight,
   CommitDetail,
+  CommitFields,
   CommitRecord,
   CommitStore,
   CredentialPrompt,
@@ -49,6 +50,8 @@ import type {
   ResetPreflight,
   RevertPrediction,
   RevertPreflight,
+  SearchField,
+  SearchQuery,
   Settings,
   StashBranchPreflight,
   StashEntry,
@@ -74,8 +77,10 @@ import {
   classifyRevert,
   classifyStashBranch,
   classifyStashPop,
+  compileQuery,
   describeInProgress,
   dirtyPathsFrom,
+  matchCommitFields,
   matchProtectedBranch,
   resolveBase,
   resolvePullStrategy,
@@ -149,6 +154,8 @@ import {
   parseFileDiffBody,
   worktreeDiffArgs,
 } from "./parse/diff.ts";
+import type { ScanRecord } from "./parse/log.ts";
+import { logScanArgs, parseScanRecord } from "./parse/log.ts";
 import { parseRefRecord, REFS_FORMAT, REFS_RECORD_DELIMITER } from "./parse/refs.ts";
 import { stashShowNameOnlyArgs, stashUntrackedPathsArgs } from "./parse/stash.ts";
 import type { ParsedProgress } from "./progress.ts";
@@ -428,6 +435,33 @@ export interface RefsResult {
   readonly head: HeadState;
 }
 
+/** `docs/plans/P11.md` W8's own wire-shaped hit, local for the same reason `RefsResult` above
+ *  is — except `fields` is core's full `SearchField` (nine members: `matchRef`'s `refName`/
+ *  `tagAnnotation` included) rather than the wire's narrower seven-member `SearchMatchField`,
+ *  since `searchCommits` only ever calls `matchCommitFields` and has no reason to know about the
+ *  wire's own subsetting. `rpcHandlers.ts` (W9) does that narrowing at the true boundary — see
+ *  its own comment for why the cast is safe. */
+export interface CommitSearchHit {
+  readonly sha: string;
+  readonly subject: string;
+  readonly authorName: string;
+  readonly authorEmail: string;
+  readonly authorTime: number;
+  readonly fields: readonly SearchField[];
+}
+
+/** Local twin of `@kira-version/ipc`'s `SearchRunResult` — see `CommitSearchHit`'s own comment. */
+export type SearchRunResult =
+  | {
+      readonly kind: "ok";
+      readonly hits: readonly CommitSearchHit[];
+      readonly total: number;
+      readonly truncated: boolean;
+      readonly scanned: number;
+      readonly complete: boolean;
+    }
+  | { readonly kind: "invalidPattern"; readonly message: string };
+
 /** §7.5's D \ T display cap (200): the *verdict* is always computed over the full, uncapped set
  *  (`dirtyPathsFrom`/`summarizeStatus` never truncate) — only the list a dialog would ever try to
  *  render gets capped, and only here, at the one layer that knows what "too many to show" means. */
@@ -437,12 +471,53 @@ const DIRTY_PATHS_DISPLAY_CAP = 200;
  *  reads one more than this so the dialog can say "and N more" without a second spawn. */
 const RESET_LEAVING_COMMITS_CAP = 10;
 
+/** `docs/plans/P11.md` W8: the host-side twin of hard part 4's client-side box — a ceiling on
+ *  how long one `searchCommits` scan may hold a read-pool slot and the host's event loop. 5,000
+ *  ms, ~4.5x probe 6's measured 1.1s at 100k commits, so it fires only on a genuinely
+ *  pathological pattern or a repository far past this project's stated ceiling; `complete: false`
+ *  is what the UI renders as "searched N of M". Checked every 1024 scanned rows (`scanned & 1023
+ *  === 0`), the same cadence `searchLoadedCommits` uses client-side, for the same reason:
+ *  `Date.now()` on every row would itself be the bottleneck at 100k+ rows/sec. */
+const SEARCH_SCAN_BUDGET_MS = 5_000;
+
+/** `docs/plans/P11.md` OQ3: 200 tail hits — well past what a dropdown can usefully show, and
+ *  small enough that the wire payload stays a few tens of KB. `total` is always exact regardless
+ *  (`searchCommits` never stops counting once `hits` is full), which is what makes a cap this
+ *  small an honest "12 of 4,318" rather than a silent truncation. */
+export const DEFAULT_SEARCH_LIMIT = 200;
+
 function capPaths(paths: readonly string[]): {
   readonly paths: string[];
   readonly truncated: boolean;
 } {
   if (paths.length <= DIRTY_PATHS_DISPLAY_CAP) return { paths: [...paths], truncated: false };
   return { paths: paths.slice(0, DIRTY_PATHS_DISPLAY_CAP), truncated: true };
+}
+
+/** `docs/plans/P11.md` W8: `matchCommitFields`'s own `CommitFields` shape, read off a
+ *  `ScanRecord` — the same six text fields `parseLogRecord` already carries, plus `body`, which
+ *  only the scan format (`SCAN_FORMAT`, W3) ever populates. */
+function toCommitFields(parsed: ScanRecord): CommitFields {
+  return {
+    sha: parsed.sha,
+    subject: parsed.subject,
+    body: parsed.body,
+    authorName: parsed.author.name,
+    authorEmail: parsed.author.email,
+    committerName: parsed.committer.name,
+    committerEmail: parsed.committer.email,
+  };
+}
+
+function toSearchHit(parsed: ScanRecord, fields: readonly SearchField[]): CommitSearchHit {
+  return {
+    sha: parsed.sha,
+    subject: parsed.subject,
+    authorName: parsed.author.name,
+    authorEmail: parsed.author.email,
+    authorTime: parsed.author.timestamp,
+    fields,
+  };
 }
 
 /** D12: `%(worktreepath)` is populated for a ref checked out in ANY worktree, including this
@@ -810,6 +885,12 @@ export class RepoService {
   readonly #detailCacheMaxEntries: number;
   readonly #logger: Logger;
   readonly #sessions = new Map<string, RepoSession>();
+  /** `docs/plans/P11.md` W8: one in-flight `searchCommits` scan per session — a new scan aborts
+   *  whatever the same repo already has running (belt-and-braces behind the client's own
+   *  supersede, hard part 6) and `close(repoId)` aborts it too, so a disposed webview can never
+   *  strand a read-pool slot. Absent between scans; never holds a stale, already-settled
+   *  controller. */
+  readonly #searchAbort = new Map<string, AbortController>();
   readonly #changeListeners = new Set<
     (e: { repoId: string; kind: "refsChanged" | "worktreeChanged" }) => void
   >();
@@ -915,6 +996,8 @@ export class RepoService {
     session.logSession.dispose();
     session.reviewWalk?.logSession.dispose();
     session.driver.dispose();
+    this.#searchAbort.get(repoId)?.abort();
+    this.#searchAbort.delete(repoId);
   }
 
   /** §6.8's own `range`-less `status()` and its ranged sibling, in one method: `range` present
@@ -1349,6 +1432,78 @@ export class RepoService {
     };
     session.refsCache = result;
     return result;
+  }
+
+  /** `docs/plans/P11.md` W8: the tail scan behind `search.run` — a one-shot bounded-pool read
+   *  (D68: not a third walk session, not the paused `LogSession`'s own pipe) over `logScanArgs`'
+   *  args for the *same* `WalkSpec` the panel's own paging session was opened with
+   *  (`session.logSession.walk`, judgment call 3), so every hit is a row the graph can actually
+   *  reveal and probe 11's ordering-identity property holds between a loaded page and a scan.
+   *
+   *  Runs to git's own end even once `hits` is full — `total` must be exact (§7.8's match count);
+   *  `limit` caps the wire payload, not the walk. Time-boxed at `SEARCH_SCAN_BUDGET_MS`, checked
+   *  every 1024 scanned rows; `complete: false` on a genuinely pathological pattern or repository
+   *  is what the UI renders as "searched N of M". Stash-helper rows (P9 W12) are excluded the same
+   *  way the panel's own page read excludes them: `applyStashRowFilter(...) === null`, not a
+   *  `StashRowFilter.excludes()` method — that method does not exist, `applyStashRowFilter` is the
+   *  real mechanism (see the module's own P11 Findings for this deviation from the plan's sketch).
+   *
+   *  One in-flight scan per session (`#searchAbort`): a new call here aborts whatever the same
+   *  repo already has running before spawning its own, and `close()` aborts on repo close — see
+   *  that field's own doc comment. `signal` (the caller's own, e.g. `rpc.ts`'s per-request one) is
+   *  wired to abort this call's internal controller too, so either source cancels the read. */
+  async searchCommits(
+    repoId: string,
+    query: Omit<SearchQuery, "scope">,
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<SearchRunResult> {
+    const session = this.#requireSession(repoId);
+    const compiled = compileQuery({ ...query, scope: "commits" });
+    if (compiled.kind === "invalid") return { kind: "invalidPattern", message: compiled.message };
+    if (compiled.kind === "empty") {
+      return { kind: "ok", hits: [], total: 0, truncated: false, scanned: 0, complete: true };
+    }
+
+    this.#searchAbort.get(repoId)?.abort();
+    const controller = new AbortController();
+    this.#searchAbort.set(repoId, controller);
+    if (signal?.aborted) controller.abort();
+    else signal?.addEventListener("abort", () => controller.abort(), { once: true });
+
+    try {
+      const read = session.driver.read(logScanArgs(session.logSession.walk), {
+        signal: controller.signal,
+      });
+      const hits: CommitSearchHit[] = [];
+      let total = 0;
+      let scanned = 0;
+      let complete = true;
+      const deadline = Date.now() + SEARCH_SCAN_BUDGET_MS;
+      for await (const record of read.records(0x00)) {
+        if (record.length === 0) continue;
+        scanned++;
+        if ((scanned & 1023) === 0 && Date.now() > deadline) {
+          complete = false;
+          read.cancel();
+          break;
+        }
+        const parsed = parseScanRecord(record);
+        if (applyStashRowFilter(parsed, session.stashRowFilter) === null) continue;
+        const fields = matchCommitFields(toCommitFields(parsed), compiled);
+        if (fields.length === 0) continue;
+        total++;
+        if (hits.length < limit) hits.push(toSearchHit(parsed, fields));
+      }
+      // A caller/supersede abort (`controller.signal`, not our own budget cancel above) surfaces
+      // here as a `GitCancelled` out of the iteration itself — left to propagate uncaught, exactly
+      // like every other read in this file (`detail`/`fileDiff`'s own `signal` parameter): the
+      // rpc layer turns a `GitCancelled` into a cancelled response, never a thrown-to-the-UI error.
+      if (complete) await read.done;
+      return { kind: "ok", hits, total, truncated: total > hits.length, scanned, complete };
+    } finally {
+      if (this.#searchAbort.get(repoId) === controller) this.#searchAbort.delete(repoId);
+    }
   }
 
   /** §4.4/§7.11: `status()` (P1) plus `ops/conflict.ts`'s state files, folded through
