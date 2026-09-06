@@ -136,7 +136,10 @@ describe("Pre-flight vs real checkout — agreement on all six of probe P1's cas
       expect(preflight.blockers).toEqual([
         { kind: "blockedByTracked", paths: ["tracked-diff.txt"] },
       ]);
-      expect(preflight.routes).toEqual(["discard"]);
+      // P9/W9 deliberately changed this from `["discard"]`: `RepoService.preflightCheckout` now
+      // passes `stashAvailable: true`, so a `blockedByTracked` verdict with no untracked block
+      // also offers `"stashAndCarry"`.
+      expect(preflight.routes).toEqual(["discard", "stashAndCarry"]);
 
       const result = await service.runOp(repoId, {
         kind: "checkout",

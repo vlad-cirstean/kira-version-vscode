@@ -1352,7 +1352,9 @@ describe("RepoService — preflightCheckout() (P6 W8)", () => {
       const preflight = await service.preflightCheckout(opened.repoId, "branch-theirs", "switch");
       expect(preflight.verdict).toBe("blocked");
       expect(preflight.blockers).toEqual([{ kind: "blockedByTracked", paths: ["conflict.txt"] }]);
-      expect(preflight.routes).toEqual(["discard"]);
+      // P9/W9 deliberately changed this from `["discard"]`: `preflightCheckout` now passes
+      // `stashAvailable: true`, so `"stashAndCarry"` joins the route list too.
+      expect(preflight.routes).toEqual(["discard", "stashAndCarry"]);
     } finally {
       service.dispose();
     }

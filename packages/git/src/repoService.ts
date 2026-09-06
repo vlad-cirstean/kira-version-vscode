@@ -1316,10 +1316,16 @@ export class RepoService {
       mode,
       dirty: dirtyPathsFrom(statusResult),
       rewritten,
+      // See classifyCheckout's own doc comment on this field: `T` (rewritten, above) already
+      // coincides with the target tree for a plain checkout, so there is nothing this call site
+      // would compute that the classifier does not already derive from `rewritten` alone.
       targetTreePaths: null,
       inProgress,
       checkedOutIn,
-      stashAvailable: false,
+      // P9/W9: the one-line flip — `classifyCheckout`'s own `routes` logic has gated
+      // `"stashAndCarry"` on this since it was written (W1-W4); this was the only site left
+      // still passing `false`.
+      stashAvailable: true,
     });
   }
 

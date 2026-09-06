@@ -86,8 +86,10 @@ export interface RevertPreflight {
 // P8 — pull and push pre-flight (§7.3/§7.4). Also the two the wire carries.
 // ---------------------------------------------------------------------------------------
 
-/** P9's autostash seam, empty at P8 (`docs/plans/P8.md`'s "Pull: decomposition and the strategy
- *  resolution order" — mirrors `CheckoutPreflight.routes`'s own precedent exactly). */
+/** P9's autostash seam — empty at P8 (`docs/plans/P8.md`'s "Pull: decomposition and the strategy
+ *  resolution order" — mirrors `CheckoutPreflight.routes`'s own precedent exactly); P9's
+ *  `buildPullPreflight` offers it whenever `blockers` is non-empty, since `dirtyNonFastForward`
+ *  is the only `PullBlocker` there is. */
 export type PullRoute = "stashAndCarry";
 
 export type PullBlocker = "dirtyNonFastForward";
@@ -99,7 +101,8 @@ export interface PullPreflight {
   readonly ahead: number;
   readonly behind: number;
   readonly dirty: boolean;
-  /** Empty at P8 — see `PullRoute`'s own doc comment. */
+  /** Empty through P8. P9's `buildPullPreflight` populates `["stashAndCarry"]` exactly when
+   *  `blockers` is non-empty — see `PullRoute`'s own doc comment. */
   readonly routes: readonly PullRoute[];
   readonly blockers: readonly PullBlocker[];
 }

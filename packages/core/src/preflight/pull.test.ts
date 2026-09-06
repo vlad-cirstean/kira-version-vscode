@@ -162,7 +162,7 @@ describe("buildPullPreflight", () => {
     expect(p.blockers).toEqual([]);
   });
 
-  test("routes are always empty at P8", () => {
+  test("routes are empty when there is no blocker (P8's own case, unchanged by P9)", () => {
     const p = buildPullPreflight({
       strategy: "rebase",
       source: "default",
@@ -171,6 +171,20 @@ describe("buildPullPreflight", () => {
       behind: 0,
       dirty: true,
     });
+    expect(p.blockers).toEqual([]);
     expect(p.routes).toEqual([]);
+  });
+
+  test("P9/W10: routes offers stashAndCarry exactly when dirtyNonFastForward blocks", () => {
+    const p = buildPullPreflight({
+      strategy: "rebase",
+      source: "default",
+      upstream: "origin/main",
+      ahead: 0,
+      behind: 2,
+      dirty: true,
+    });
+    expect(p.blockers).toEqual(["dirtyNonFastForward"]);
+    expect(p.routes).toEqual(["stashAndCarry"]);
   });
 });
