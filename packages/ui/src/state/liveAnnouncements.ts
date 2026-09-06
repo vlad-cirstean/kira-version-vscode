@@ -49,6 +49,21 @@ export function composeRefreshAnnouncement(totalLoaded: number): string {
   return `Refreshed — ${formatCount(totalLoaded)} ${noun} loaded`;
 }
 
+/** `docs/plans/P11.md` W13: `GraphViewState.revealSha`'s own live-region text — §5.1.1's
+ *  "selecting such a result loads the pages up to it" can be several seconds of paging on a large
+ *  repository, which must not read as a hang to a user who cannot see the toolbar's own loading
+ *  indicator. There is no `"found"` text: the row selection that follows a successful reveal
+ *  already moves real focus onto it, and that row's own composed accessible name
+ *  (`rowAccessibility.ts`) is the completion signal — a second announcement here would only repeat
+ *  it. A hit that is *not* found (the history paged to exhaustion without it — most likely a stale
+ *  hit from before a force-push) gets nothing else at all otherwise, which is the silent-no-op
+ *  failure mode §6.4 already names for the clipboard. */
+export function composeRevealSearchHitAnnouncement(outcome: "loading" | "notFound"): string {
+  return outcome === "loading"
+    ? "Loading history to find the selected result…"
+    : "Result not found — it may no longer exist in this repository";
+}
+
 /** A short name for `target`, the way every P6 confirmation reads it: a raw sha is shortened,
  *  anything else (a branch, tag, or remote-branch name) is shown exactly as given. */
 function shortTarget(target: string): string {

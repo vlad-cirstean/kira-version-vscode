@@ -22,6 +22,7 @@ import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { graphColumnWidth } from "../graph/geometry.ts";
 import { createGraphFormatter } from "../graph/graphColumn.ts";
 import type { GraphViewState, LayoutRange } from "../state/graphView.ts";
+import type { SearchState } from "../state/search.ts";
 import type { SelectionState } from "../state/selection.ts";
 import type { ColumnWidths, DateFormat } from "../state/viewState.ts";
 import { rowHeightPx, TokenReader } from "../theme/readTokens.ts";
@@ -42,6 +43,11 @@ const props = defineProps<{
    *  is not yet known at this component's own first paint (`bootstrap()`'s `await` resolves
    *  after). */
   clipboardEnabled: boolean;
+  /** P11 W13: the message column's own in-place highlight source — optional so a caller with
+   *  nothing to search yet (none, currently; W14 is the first to instantiate a real one from
+   *  `App.vue`) gets plain, unhighlighted subjects, mirroring `columns.ts`'s own
+   *  `MessageSearchContext` default. */
+  search?: SearchState;
 }>();
 
 const emit = defineEmits<{
@@ -169,6 +175,19 @@ function computeMessageWidth(hostWidth: number, laneCount: number): number {
   return Math.max(MIN_MESSAGE_WIDTH, hostWidth - fixed);
 }
 
+/** `undefined` whenever there is nothing to highlight: no `search` prop at all, an empty/invalid
+ *  query, or `scope: "refs"` (the message column has nothing to do with a ref-only search — §7.8's
+ *  own field list for that scope never includes `subject`). Re-read on every render pass by
+ *  `columns.ts`'s `messageFormatter`, never captured once, so this component only ever needs to
+ *  trigger a re-render (the `search.searchGeneration` watcher below), not a column rebuild, when
+ *  the pattern changes. */
+function searchPattern(): RegExp | undefined {
+  const search = props.search;
+  if (search === undefined || search.scope.value === "refs") return undefined;
+  const compiled = search.compiled.value;
+  return compiled.kind === "ok" ? compiled.pattern : undefined;
+}
+
 function currentColumns(): Column<CommitRecord>[] {
   const hostWidth = host.value?.clientWidth ?? 0;
   const laneCount = props.graphView.laneCount.value;
@@ -177,6 +196,7 @@ function currentColumns(): Column<CommitRecord>[] {
     { dateFormat: () => dateFormatRef.value, now: () => Date.now() },
     graphFormatter,
     { enabled: () => props.clipboardEnabled, onCopy: (fullSha) => emit("copySha", fullSha) },
+    { pattern: searchPattern },
   );
 }
 
@@ -657,6 +677,17 @@ watch(
     grid?.render();
   },
 );
+// P11 W13: mirrors the `generation` watcher directly above — a new `searchGeneration` means the
+// message column's own highlight source (`searchPattern` above) may have changed, so every row's
+// formatter must re-run; `updateRowCount()` has no reason to run alongside it, since a search
+// never changes how many rows are loaded.
+watch(
+  () => props.search?.searchGeneration.value,
+  () => {
+    grid?.invalidateAllRows();
+    grid?.render();
+  },
+);
 // Unlike `columnWidths`/`dateFormat` above (captured once — this component is the only writer
 // of either), `clipboardEnabled` genuinely changes *after* this component's own first paint:
 // `App.vue`'s `bootstrap()` only learns the real capability once `bridge.init()`'s `await`
@@ -909,6 +940,14 @@ defineExpose({ scrollToRow });
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* P11 W13: `columns.ts`'s `messageFormatter`, active only while a search query is compiled. The
+   same token the real editor's own Find widget highlights a match with (§3.4) — not an invented
+   colour. */
+.kv-search-hit {
+  background-color: var(--kv-search-match-bg);
+  border-radius: 2px;
 }
 
 .kv-cell-author {
