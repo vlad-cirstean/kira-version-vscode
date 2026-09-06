@@ -84,6 +84,10 @@ import type {
   TagAnnotation as WireTagAnnotation,
   UndoSlotSnapshot as WireUndoSlotSnapshot,
 } from "../../../packages/ipc/src/contract.ts";
+import {
+  fromWire as graphChunkFromWire,
+  toWire as graphChunkToWire,
+} from "../../../packages/ipc/src/graphChunkCodec.ts";
 import { topology } from "../../fixtures/topology.ts";
 
 /** Never called — its only job is to make the assignments inside it part of the compiled
@@ -704,5 +708,64 @@ describe("ipc wire conformance — runtime round trip over the real boundary (P1
     const stashRow = variants.findIndex((v) => v.kind === "stash");
     const stashRef = byRow.get(stashRow)?.[0];
     expect(Object.keys(stashRef as object)).toEqual(["kind"]);
+  });
+
+  // ---- P16 W12: corruption is loud, not silent -------------------------------------------
+  //
+  // W12's "done when" is stated in terms of the VS Code e2e tier ("forcing `toWire` to emit a
+  // buffer with the wrong `file_identifier` fails these specs loudly rather than rendering an
+  // empty list"), but that tier needs a real downloaded VS Code build this sandbox cannot reach
+  // (`bun run test:e2e:vscode`'s own attempt here aborts mid-download). These three tests are
+  // the unit-level substitute: they exercise the exact three ways a `graph.stream` chunk can
+  // arrive corrupted or foreign — a `commits` payload with no `$fb` tag at all, one tagged with
+  // a version this build does not recognise, and a buffer that is tagged as FlatBuffers but was
+  // never actually built by `toWire` (wrong `file_identifier`) — and confirm every one of them
+  // throws instead of silently decoding into nonsense or an empty chunk.
+
+  test("decodeStreamPayload throws when 'graph.stream' arrives with no '$fb' tag on commits", () => {
+    const envelope = {
+      repoId: "r1",
+      seq: 0,
+      from: 0,
+      to: 0,
+      source: "git",
+      remaining: 0,
+      exhausted: true,
+      commits: { notFlatBuffers: true },
+    };
+    expect(() => decodeStreamPayload("graph.stream", envelope)).toThrow(/\$fb/);
+  });
+
+  test("decodeStreamPayload throws on an unrecognised '$fb' tag", () => {
+    const envelope = {
+      repoId: "r1",
+      seq: 0,
+      from: 0,
+      to: 0,
+      source: "git",
+      remaining: 0,
+      exhausted: true,
+      commits: { $fb: "graphChunk/99", d: new ArrayBuffer(0) },
+    };
+    expect(() => decodeStreamPayload("graph.stream", envelope)).toThrow(/graphChunk\/99/);
+  });
+
+  test("graphChunkCodec.fromWire throws on a buffer with the wrong file_identifier", () => {
+    const source = new CommitStore();
+    source.appendPage(topology(["root"]));
+    const chunk = source.packSlice(0, source.rowCount, 0);
+    const good = graphChunkToWire(chunk);
+
+    // FlatBuffers' file identifier is a fixed 4-byte ASCII tag at a fixed offset (bytes 4-7 of
+    // the buffer, right after the root table's own 4-byte offset) — corrupting just those bytes
+    // simulates "tagged as FlatBuffers but not this schema" without needing a second, unrelated
+    // schema compiled just to produce one.
+    const corrupted = good.slice(0);
+    new Uint8Array(corrupted, 4, 4).set([0x58, 0x58, 0x58, 0x58]); // "XXXX", not "KVGC"
+
+    expect(() => graphChunkFromWire(corrupted)).toThrow(/file identifier/);
+    // The good buffer alongside it proves the corruption, not some unrelated fromWire bug, is
+    // what throws.
+    expect(() => graphChunkFromWire(good)).not.toThrow();
   });
 });
