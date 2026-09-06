@@ -180,6 +180,7 @@ describe("OpsState", () => {
           canAbort: true,
           isSequence: false,
           unmergedCount: 1,
+          canSkip: true,
         },
       }),
     );

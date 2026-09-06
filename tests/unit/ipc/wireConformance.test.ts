@@ -51,8 +51,10 @@ import type {
 import type { StatusSummary as CoreStatusSummary } from "../../../packages/core/src/model/status.ts";
 import type {
   CheckoutPreflight as CoreCheckoutPreflight,
+  CherryPickPreflight as CoreCherryPickPreflight,
   PullPreflight as CorePullPreflight,
   PushPreflight as CorePushPreflight,
+  ResetPreflight as CoreResetPreflight,
   RevertPreflight as CoreRevertPreflight,
 } from "../../../packages/core/src/preflight/types.ts";
 import {
@@ -74,6 +76,7 @@ import type {
   BaseCandidate as WireBaseCandidate,
   BaseResolutionReason as WireBaseResolutionReason,
   CheckoutPreflight as WireCheckoutPreflight,
+  CherryPickPreflight as WireCherryPickPreflight,
   CommitIdentity as WireCommitIdentity,
   CommitTrailer as WireCommitTrailer,
   DecorationRef as WireDecorationRef,
@@ -95,6 +98,7 @@ import type {
   RemoteOpKind as WireRemoteOpKind,
   RemoteOpParams as WireRemoteOpParams,
   RemoteOpResult as WireRemoteOpResult,
+  ResetPreflight as WireResetPreflight,
   RevertPreflight as WireRevertPreflight,
   SettingsSnapshot as WireSettingsSnapshot,
   SignatureStatus as WireSignatureStatus,
@@ -316,6 +320,7 @@ describe("ipc wire conformance", () => {
       canAbort: true,
       isSequence: false,
       unmergedCount: 1,
+      canSkip: true,
     };
     const wire: WireInProgressOperation = op;
     expect(wire).toEqual(op);
@@ -356,6 +361,55 @@ describe("ipc wire conformance", () => {
       blockers: [],
     };
     const wire: WireRevertPreflight = preflight;
+    expect(wire).toEqual(preflight);
+  });
+
+  // ---- P10 W5: reset and cherry-pick pre-flight ------------------------------------------
+
+  test("ResetPreflight: core and ipc's wire copy are assignable both ways", () => {
+    assertBothWays<WireResetPreflight, CoreResetPreflight>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const preflight: CoreResetPreflight = {
+      target: "abc1234",
+      targetSubject: "an earlier commit",
+      mode: "hard",
+      currentHead: "def5678",
+      branch: "main",
+      leaving: 1,
+      gaining: 0,
+      leavingCommits: [{ sha: "def5678", subject: "the commit reset would drop" }],
+      leavingTruncated: false,
+      dirty: { staged: ["a.txt"], unstaged: [], untracked: [] },
+      destroys: ["a.txt"],
+      inProgress: null,
+      requiresTypedConfirmation: true,
+      routes: ["stashFirst"],
+      verdict: "destructive",
+      blockers: [],
+    };
+    const wire: WireResetPreflight = preflight;
+    expect(wire).toEqual(preflight);
+  });
+
+  test("CherryPickPreflight: core and ipc's wire copy are assignable both ways", () => {
+    assertBothWays<WireCherryPickPreflight, CoreCherryPickPreflight>(
+      (core) => core,
+      (wire) => wire,
+    );
+    const preflight: CoreCherryPickPreflight = {
+      sha: "abc1234",
+      subject: "a fix worth picking",
+      mainlineRequired: [],
+      prediction: { kind: "clean" },
+      alreadyApplied: false,
+      inProgress: null,
+      detachedHead: false,
+      verdict: "clean",
+      blockers: [],
+    };
+    const wire: WireCherryPickPreflight = preflight;
     expect(wire).toEqual(preflight);
   });
 
@@ -503,6 +557,30 @@ describe("ipc wire conformance", () => {
     const op: CoreOpRequest = { kind: "opContinue" };
     const wire: WireOpRequest = op;
     expect(wire).toEqual(op);
+
+    // P10: the three new arms, each a second literal so the assignability check above is not
+    // only ever exercised against the pre-existing kinds.
+    const reset: CoreOpRequest = {
+      kind: "reset",
+      mode: "hard",
+      target: "abc1234",
+      confirmToken: "abc1234",
+    };
+    const resetWire: WireOpRequest = reset;
+    expect(resetWire).toEqual(reset);
+
+    const cherryPick: CoreOpRequest = {
+      kind: "cherryPick",
+      sha: "abc1234",
+      mainline: undefined,
+      noCommit: false,
+    };
+    const cherryPickWire: WireOpRequest = cherryPick;
+    expect(cherryPickWire).toEqual(cherryPick);
+
+    const skip: CoreOpRequest = { kind: "opSkip" };
+    const skipWire: WireOpRequest = skip;
+    expect(skipWire).toEqual(skip);
   });
 
   test("OpResult: core and ipc's wire copy are assignable both ways", () => {

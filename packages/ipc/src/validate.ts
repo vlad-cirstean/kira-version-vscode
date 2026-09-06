@@ -4,7 +4,7 @@ import type { EventKey, RequestKey, StreamKey } from "./contract.ts";
  * Boundary validation. Per §3.5, a contract mismatch must fail loudly rather than
  * half-work — so this throws, it does not degrade.
  */
-export const CONTRACT_VERSION = 10;
+export const CONTRACT_VERSION = 11;
 
 export class ContractVersionMismatchError extends Error {
   readonly received: number;
@@ -88,6 +88,8 @@ const REQUEST_KEY_MAP: Record<RequestKey, true> = {
   "stash.show": true,
   "preflight.stashPop": true,
   "preflight.stashBranch": true,
+  "preflight.reset": true,
+  "preflight.cherryPick": true,
 };
 const EVENT_KEY_MAP: Record<EventKey, true> = {
   "repo.changed": true,

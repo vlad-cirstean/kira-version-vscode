@@ -17,6 +17,7 @@ function inProgress(overrides: Partial<InProgressOperation> = {}): InProgressOpe
     canAbort: true,
     isSequence: false,
     unmergedCount: 0,
+    canSkip: false,
     ...overrides,
   };
 }

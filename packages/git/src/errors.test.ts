@@ -493,6 +493,65 @@ describe("classifyGitError", () => {
   });
 });
 
+  // P10/W7 — the four gaps `docs/plans/P10.md` probe 8 found, each a real captured message.
+
+  test("NotFound — Could not parse object (probe 3: a reset target that does not resolve)", () => {
+    const stderr = "fatal: Could not parse object 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef'.\n";
+    expect(classifyGitError(["reset", "--hard", "deadbeef"], 128, stderr).kind).toBe("NotFound");
+  });
+
+  test("OperationInProgress — reset refused mid-merge, all three modes (probe 3)", () => {
+    for (const mode of ["soft", "mixed", "hard"]) {
+      const stderr = `fatal: Cannot do a ${mode} reset in the middle of a merge.\n`;
+      expect(classifyGitError(["reset", `--${mode}`, "HEAD"], 128, stderr).kind).toBe(
+        "OperationInProgress",
+      );
+    }
+  });
+
+  test("DirtyWorktree — cherry-pick's own shorter wording, a STAGED change (probe 7, row B)", () => {
+    const stderr = [
+      "error: your local changes would be overwritten by cherry-pick.",
+      "hint: commit your changes or stash them to proceed.",
+      "fatal: cherry-pick failed",
+    ].join("\n");
+    expect(classifyGitError(["cherry-pick", "abc1234"], 128, stderr).kind).toBe("DirtyWorktree");
+  });
+
+  test("DirtyWorktree — still matches the original, longer 'to the following files' wording (probe 7, row C)", () => {
+    const stderr = [
+      "error: Your local changes to the following files would be overwritten by merge:",
+      "a.txt",
+      "Please commit your changes or stash them before you merge.",
+      "Aborting",
+    ].join("\n");
+    expect(classifyGitError(["cherry-pick", "abc1234"], 128, stderr).kind).toBe("DirtyWorktree");
+  });
+
+  test("UntrackedWouldBeOverwritten — already matches cherry-pick's 'merge' wording, no change needed (probe 7, row E)", () => {
+    const stderr = [
+      "error: The following untracked working tree files would be overwritten by merge:",
+      "n.txt",
+      "Please move or remove them before you merge.",
+    ].join("\n");
+    expect(classifyGitError(["cherry-pick", "abc1234"], 128, stderr).kind).toBe(
+      "UntrackedWouldBeOverwritten",
+    );
+  });
+
+  test("MainlineRequired — a merge commit picked/reverted with no -m (probe 8)", () => {
+    const stderr = "error: commit dbc4b7b... is a merge but no -m option was given.\n";
+    expect(classifyGitError(["cherry-pick", "dbc4b7b"], 128, stderr).kind).toBe(
+      "MainlineRequired",
+    );
+  });
+
+  test("Conflict — a real cherry-pick conflict still classifies as Conflict, not MainlineRequired", () => {
+    const stderr = "error: could not apply 264650c... other\n";
+    expect(classifyGitError(["cherry-pick", "264650c"], 1, stderr).kind).toBe("Conflict");
+  });
+});
+
 describe("GitCancelled / GitSpawnFailed", () => {
   test("GitCancelled is not a GitError and carries no kind", () => {
     const error = new GitCancelled(["log", "--all"]);
