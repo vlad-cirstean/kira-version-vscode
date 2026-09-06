@@ -1,8 +1,8 @@
 import type { CommitRecord, DocumentRef, FileChange, RefRecord } from "@kira-version/core";
 import {
   buildPullPreflight,
-  classifyPush,
   CommitStore,
+  classifyPush,
   resolveBase as coreResolveBase,
   defaultSettings,
   mapLineAcrossDiff,
@@ -1346,10 +1346,23 @@ function createHandlers(
     readonly error:
       | { readonly kind: OpErrorKind; readonly message: string; readonly remoteMessage: undefined }
       | undefined;
-    readonly updates: readonly { from: string | null; to: string | null; ref: string; forced: boolean }[];
+    readonly updates: readonly {
+      from: string | null;
+      to: string | null;
+      ref: string;
+      forced: boolean;
+    }[];
   }
 
-  const remotePullPreflight: RequestHandler<"remote.pullPreflight"> = async ({ repoId, branch }) => {
+  // `branch` mirrors the real `RepoService.preflightPull`'s own signature (it reads
+  // `branch.<name>.rebase` for that one branch) but is otherwise unused here: the mock has no
+  // git config to read, and `session.status.upstream` already reports ahead/behind for
+  // whichever branch is checked out, the same "current branch only" assumption the real
+  // implementation's own doc comment states for `preflightPush`.
+  const remotePullPreflight: RequestHandler<"remote.pullPreflight"> = async ({
+    repoId,
+    branch: _branch,
+  }) => {
     const session = requireSession(sessions, repoId);
     const { strategy, source } = resolvePullStrategy({
       settingStrategy: defaultSettings()["kiraVersion.pull.strategy"],
@@ -1384,13 +1397,16 @@ function createHandlers(
     });
   };
 
-  function applyRemoteOp(session: RepoSession, request: {
-    readonly kind: "fetch" | "push" | "pull" | "forcePush" | "deleteRemoteBranch";
-    readonly remote: string;
-    readonly branch: string | undefined;
-    readonly expectedRemoteTip: string | null | undefined;
-    readonly confirmToken: string | undefined;
-  }): RemoteOpResultLike {
+  function applyRemoteOp(
+    session: RepoSession,
+    request: {
+      readonly kind: "fetch" | "push" | "pull" | "forcePush" | "deleteRemoteBranch";
+      readonly remote: string;
+      readonly branch: string | undefined;
+      readonly expectedRemoteTip: string | null | undefined;
+      readonly confirmToken: string | undefined;
+    },
+  ): RemoteOpResultLike {
     if (request.kind === "fetch") return { ok: true, error: undefined, updates: [] };
 
     const branch = request.branch ?? currentBranchName(session);
@@ -1400,7 +1416,10 @@ function createHandlers(
     const refName = remoteRefName(request.remote, branch);
 
     if (request.kind === "forcePush" || request.kind === "deleteRemoteBranch") {
-      const match = matchProtectedBranch(branch, defaultSettings()["kiraVersion.protectedBranches"]);
+      const match = matchProtectedBranch(
+        branch,
+        defaultSettings()["kiraVersion.protectedBranches"],
+      );
       if (match && request.confirmToken !== branch) {
         return remoteOpError("ProtectedBranch", `${branch} is a protected branch.`);
       }
