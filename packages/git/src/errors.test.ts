@@ -286,6 +286,149 @@ describe("classifyGitError", () => {
     expect(error.stderr).toBe("fatal: not a git repository\n");
     expect(error.name).toBe("GitError");
   });
+
+  // P8/W11 — the six shapes from docs/plans/P8.md's probes 1, 3, 4 and 8.
+
+  test("LeaseViolation — probe 1, row 1: bare --force-with-lease against a stale sha", () => {
+    const stderr = [
+      "To /tmp/errprobe-remote.git",
+      " ! [rejected]        main -> main (stale info)",
+      "error: failed to push some refs to '/tmp/errprobe-remote.git'",
+    ].join("\n");
+    expect(
+      classifyGitError(["push", "--force-with-lease=main:abc123", "origin", "main"], 1, stderr)
+        .kind,
+    ).toBe("LeaseViolation");
+  });
+
+  test("LeaseViolation — probe 1, row 2: --force-with-lease --force-if-includes, never fetched", () => {
+    const stderr = [
+      "To /tmp/errprobe-remote.git",
+      " ! [rejected]        main -> main (stale info)",
+      "error: failed to push some refs to '/tmp/errprobe-remote.git'",
+    ].join("\n");
+    expect(
+      classifyGitError(
+        ["push", "--force-with-lease", "--force-if-includes", "origin", "main"],
+        1,
+        stderr,
+      ).kind,
+    ).toBe("LeaseViolation");
+  });
+
+  test("RemoteRefUpdated — probe 1, row 3: fetched but not integrated", () => {
+    const stderr = [
+      "To /tmp/errprobe-remote.git",
+      " ! [rejected]        main -> main (remote ref updated since checkout)",
+      "error: failed to push some refs to '/tmp/errprobe-remote.git'",
+      "hint: Updates were rejected because a pushed branch tip is behind its remote",
+    ].join("\n");
+    expect(
+      classifyGitError(
+        ["push", "--force-with-lease", "--force-if-includes", "origin", "main"],
+        1,
+        stderr,
+      ).kind,
+    ).toBe("RemoteRefUpdated");
+  });
+
+  test("LeaseViolation beats NonFastForward — (stale info) is not a plain non-ff", () => {
+    const stderr = " ! [rejected]        main -> main (stale info)\n";
+    const error = classifyGitError(["push", "--force-with-lease", "origin", "main"], 1, stderr);
+    expect(error.kind).toBe("LeaseViolation");
+    expect(error.kind).not.toBe("NonFastForward");
+  });
+
+  test("RemoteRefUpdated beats NonFastForward too", () => {
+    const stderr = " ! [rejected]        main -> main (remote ref updated since checkout)\n";
+    const error = classifyGitError(["push", "--force-with-lease", "origin", "main"], 1, stderr);
+    expect(error.kind).toBe("RemoteRefUpdated");
+    expect(error.kind).not.toBe("NonFastForward");
+  });
+
+  test("NetworkFailed — probe 3 shape: an unresolvable host", () => {
+    const stderr = [
+      "ssh: Could not resolve hostname nosuchhost.invalid: Name or service not known",
+      "fatal: Could not read from remote repository.",
+    ].join("\n");
+    expect(classifyGitError(["fetch", "origin"], 128, stderr).kind).toBe("NetworkFailed");
+  });
+
+  test("NetworkFailed — connection refused", () => {
+    const stderr = "ssh: connect to host example.com port 22: Connection refused\n";
+    expect(classifyGitError(["fetch", "origin"], 128, stderr).kind).toBe("NetworkFailed");
+  });
+
+  test("NetworkFailed — connection timed out", () => {
+    const stderr = "ssh: connect to host example.com port 22: Connection timed out\n";
+    expect(classifyGitError(["fetch", "origin"], 128, stderr).kind).toBe("NetworkFailed");
+  });
+
+  test("NetworkFailed — libcurl's own 'unable to access' wrapper over HTTPS", () => {
+    const stderr =
+      "fatal: unable to access 'https://example.com/x.git/': Could not connect to server\n";
+    expect(classifyGitError(["fetch", "origin"], 128, stderr).kind).toBe("NetworkFailed");
+  });
+
+  test("RemoteNotFound — SSH transport's own wording", () => {
+    const stderr = [
+      "fatal: 'no-such-repo.git' does not appear to be a git repository",
+      "fatal: Could not read from remote repository.",
+    ].join("\n");
+    expect(classifyGitError(["fetch", "origin"], 128, stderr).kind).toBe("RemoteNotFound");
+  });
+
+  test("RemoteNotFound — smart-HTTP transport's own wording", () => {
+    const stderr =
+      "remote: Repository not found.\nfatal: repository 'https://example.com/x.git/' not found\n";
+    expect(classifyGitError(["fetch", "origin"], 128, stderr).kind).toBe("RemoteNotFound");
+  });
+
+  test("HookRejected — probe 4: remoteMessage carries the hook's own text, prefix stripped", () => {
+    const stderr = [
+      "Enumerating objects: 3, done.",
+      "remote: *** Commit messages must reference a ticket",
+      "remote: *** rejected by pre-receive hook",
+      "To /tmp/errprobe-remote.git",
+      " ! [remote rejected] main -> main (pre-receive hook declined)",
+      "error: failed to push some refs to '/tmp/errprobe-remote.git'",
+    ].join("\n");
+    const error = classifyGitError(["push", "origin", "main"], 1, stderr);
+    expect(error.kind).toBe("HookRejected");
+    expect(error.remoteMessage).toBe(
+      "*** Commit messages must reference a ticket\n*** rejected by pre-receive hook",
+    );
+  });
+
+  test("HookRejected — remoteMessage is undefined when stderr carries no remote: lines", () => {
+    const stderr = [
+      "To /tmp/errprobe-remote.git",
+      " ! [remote rejected] main -> main (pre-receive hook declined)",
+      "error: failed to push some refs to '/tmp/errprobe-remote.git'",
+    ].join("\n");
+    const error = classifyGitError(["push", "origin", "main"], 1, stderr);
+    expect(error.kind).toBe("HookRejected");
+    expect(error.remoteMessage).toBeUndefined();
+  });
+
+  test("remoteMessage is undefined for every other kind, even one with a remote: line", () => {
+    const stderr =
+      "remote: Invalid username or password.\nfatal: Authentication failed for 'https://example.com/x.git'\n";
+    const error = classifyGitError(["fetch", "origin"], 128, stderr);
+    expect(error.kind).toBe("AuthFailed");
+    expect(error.remoteMessage).toBeUndefined();
+  });
+
+  test("AuthFailed — probe 8's three shapes still all match (no new pattern needed)", () => {
+    const shapes = [
+      "fatal: could not read Username for 'https://github.com': terminal prompts disabled\n",
+      "fatal: could not read Password for 'https://alice@github.com': terminal prompts disabled\n",
+      "remote: Invalid username or password.\nfatal: Authentication failed for 'https://example.com/x.git'\n",
+    ];
+    for (const stderr of shapes) {
+      expect(classifyGitError(["fetch", "origin"], 128, stderr).kind).toBe("AuthFailed");
+    }
+  });
 });
 
 describe("GitCancelled / GitSpawnFailed", () => {

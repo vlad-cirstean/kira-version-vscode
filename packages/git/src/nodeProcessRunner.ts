@@ -65,10 +65,14 @@ class NodeSpawnedProcess implements SpawnedProcess {
   readonly exit: Promise<ProcessExit>;
   #killTimer: ReturnType<typeof setTimeout> | undefined;
 
-  constructor(child: ChildProcessWithoutNullStreams, signal: AbortSignal | undefined) {
+  constructor(
+    child: ChildProcessWithoutNullStreams,
+    signal: AbortSignal | undefined,
+    onStderr: ((chunk: Uint8Array) => void) | undefined,
+  ) {
     this.#child = child;
     this.stdout = iterateStream(child.stdout);
-    this.stderr = collectStderr(child.stderr);
+    this.stderr = collectStderr(child.stderr, onStderr);
     this.exit = waitForExit(child);
 
     // Once settled (however it settles), there is nothing left to escalate.
@@ -122,11 +126,24 @@ function killGroup(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals
   }
 }
 
-function collectStderr(stream: Readable): Promise<Uint8Array> {
+function collectStderr(
+  stream: Readable,
+  onStderr: ((chunk: Uint8Array) => void) | undefined,
+): Promise<Uint8Array> {
   const chunks: Buffer[] = [];
   let total = 0;
   let truncated = false;
   stream.on("data", (chunk: Buffer) => {
+    // The tee sees every chunk, ahead of truncation — a progress parser cares about the byte
+    // stream as it actually arrived, not the bounded buffer `stderr` resolves with.
+    if (onStderr) {
+      try {
+        onStderr(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+      } catch {
+        // A caller's parser throwing must never take down the spawn — `stderr`/`exit` are the
+        // only channels this port promises, and both must still resolve normally.
+      }
+    }
     if (truncated) return;
     if (total + chunk.length > MAX_STDERR_BYTES) {
       chunks.push(chunk.subarray(0, MAX_STDERR_BYTES - total));
@@ -186,7 +203,7 @@ export class NodeProcessRunner implements ProcessRunner {
       detached: true,
     });
 
-    const process_ = new NodeSpawnedProcess(child, request.signal);
+    const process_ = new NodeSpawnedProcess(child, request.signal, request.onStderr);
 
     if (request.stdin !== undefined) {
       pumpStdin(child.stdin, request.stdin).catch(() => {

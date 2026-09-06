@@ -40,8 +40,15 @@ const CONFIG_OVERRIDES = [
 
 /**
  * Replaces the child's environment; never merges an ad hoc override into `process.env` at a
- * call site. `GIT_ASKPASS`/`SSH_ASKPASS` are deliberately left as inherited — §7.4's askpass
- * path is P7's; P1 relies on `GIT_TERMINAL_PROMPT=0` to fail fast instead.
+ * call site. `GIT_ASKPASS`/`SSH_ASKPASS` are deliberately left as inherited by default — P8's
+ * askpass broker (`askpass.ts`) overrides them itself, per remote op, via `writeStreaming`'s
+ * `env` option, and leaves them alone entirely when the user has their own `core.askPass` or
+ * `GIT_ASKPASS` configured (§4.1's config-fidelity rule). Two of the four no-hang guarantees
+ * live here regardless: `GIT_TERMINAL_PROMPT=0` below, so git fails fast rather than prompting,
+ * and `detached: true` at the spawn site (`nodeProcessRunner.ts`), which makes the child its own
+ * session leader (`setsid()`) with no controlling terminal to prompt on even if the first
+ * guarantee were somehow bypassed. The other two (the broker's own bounded timeout, and
+ * op-level cancel) are askpass.ts's and the driver's own `writeStreaming`, respectively.
  */
 export function buildGitEnv(): Record<string, string> {
   const env: Record<string, string> = {};
@@ -89,6 +96,30 @@ export interface WriteOptions {
    *  killed (§4.3) — an aborted `git commit` mid-flight is how a user ends up explaining a
    *  stale `index.lock` to themselves). */
   readonly signal?: AbortSignal;
+}
+
+/**
+ * P8/W2: a write that reports progress and, when `killable`, may be cancelled after it has
+ * started. §4.3's "a write that has already started is never killed" is right for every local
+ * write — killing one can strand `index.lock`, a half-written ref, or a partial sequencer state.
+ * A network fetch has none of those hazards: it writes loose objects or a packfile a later `gc`
+ * collects, and moves no ref the user can see until it completes — so it, and only it, is ever
+ * passed `killable: true` (D50; see the cancellability table in "The hard parts" §3). `push`,
+ * `forcePush`, `deleteRemoteBranch`, and pull's merge/rebase phase all use `killable: false`
+ * here — same queue, same progress reporting, no kill.
+ */
+export interface StreamingWriteOptions {
+  /** Teed to every chunk of stderr as it arrives — see `ProcessRunner.SpawnRequest.onStderr`. */
+  readonly onStderr?: (chunk: Uint8Array) => void;
+  readonly killable: boolean;
+  /** While queued: removes the entry and rejects with `GitCancelled`, exactly like `write()`.
+   *  After the process has started: a no-op unless `killable`, in which case it kills the child
+   *  (SIGTERM, then SIGKILL after `nodeProcessRunner.ts`'s ~2s grace) and the promise still
+   *  rejects with `GitCancelled` — never resolves as if nothing happened. */
+  readonly signal?: AbortSignal;
+  /** The askpass broker's per-op additions (`GIT_ASKPASS`, the socket path, the op token) —
+   *  merged over `buildGitEnv()`'s own, never replacing it. */
+  readonly env?: Readonly<Record<string, string>>;
 }
 
 export interface GitWriteResult {
@@ -150,9 +181,19 @@ export interface CatFileSession extends Disposable {
 export interface GitDriver {
   read(argv: readonly string[], opts?: ReadOptions): GitRead;
   write(argv: readonly string[], opts?: WriteOptions): Promise<GitWriteResult>;
+  /** P8/W2: same write queue as `write()` — a remote op serializes against local writes exactly
+   *  as before, which is what makes §7.1's auto-fetch guardrail ("never while another op holds
+   *  the write queue") expressible at all. See `StreamingWriteOptions`'s own doc comment for the
+   *  kill semantics. `onInvalidated` fires on success as always, and — deliberately — also for a
+   *  killed *killable* write: a partial fetch may have moved remote-tracking refs the graph must
+   *  not go on showing as stale. */
+  writeStreaming(argv: readonly string[], opts: StreamingWriteOptions): Promise<GitWriteResult>;
   readonly catFile: CatFileSession;
   /** Bumped once per completed write; see `onInvalidated`. */
   readonly generation: number;
+  /** True while the write queue is non-empty or a write is in flight. P8/W15's auto-fetch
+   *  scheduler reads this — §7.1's "never while another operation is running" guardrail. */
+  readonly busy: boolean;
   /** Fires once a completed write bumps `generation` (§4.3: "a mutating op invalidates the
    *  graph cache on completion"). In-flight reads started at an older generation are not
    *  cancelled by this — see `GitRead.done`'s callers, who decide whether to discard a
@@ -237,18 +278,36 @@ class Pool {
 }
 
 interface QueuedWrite {
+  readonly kind: "plain";
   readonly argv: readonly string[];
   readonly signal: AbortSignal | undefined;
   readonly resolve: (result: GitWriteResult) => void;
   readonly reject: (err: unknown) => void;
 }
 
+interface QueuedStreamingWrite {
+  readonly kind: "streaming";
+  readonly argv: readonly string[];
+  readonly signal: AbortSignal | undefined;
+  readonly killable: boolean;
+  readonly onStderr: ((chunk: Uint8Array) => void) | undefined;
+  readonly env: Readonly<Record<string, string>> | undefined;
+  readonly resolve: (result: GitWriteResult) => void;
+  readonly reject: (err: unknown) => void;
+  /** Flips once `#runStreamingWrite` actually spawns — after that, `signal`'s own abort
+   *  listener switches from "remove from queue" to "kill `proc`, if killable" (or a no-op). */
+  started: boolean;
+  proc: SpawnedProcess | undefined;
+}
+
+type WriteQueueEntry = QueuedWrite | QueuedStreamingWrite;
+
 class GitDriverImpl implements GitDriver {
   readonly catFile: CatFileSession;
   #generation = 0;
   readonly #invalidationListeners = new Set<() => void>();
   readonly #readPool: Pool;
-  readonly #writeQueue: QueuedWrite[] = [];
+  readonly #writeQueue: WriteQueueEntry[] = [];
   #writeInFlight = false;
   #disposed = false;
 
@@ -265,6 +324,10 @@ class GitDriverImpl implements GitDriver {
 
   get generation(): number {
     return this.#generation;
+  }
+
+  get busy(): boolean {
+    return this.#writeInFlight || this.#writeQueue.length > 0;
   }
 
   onInvalidated(fn: () => void): Disposable {
@@ -371,7 +434,7 @@ class GitDriverImpl implements GitDriver {
   async write(argv: readonly string[], opts: WriteOptions = {}): Promise<GitWriteResult> {
     if (opts.signal?.aborted) throw new GitCancelled(argv);
     return new Promise<GitWriteResult>((resolve, reject) => {
-      const entry: QueuedWrite = { argv, signal: opts.signal, resolve, reject };
+      const entry: QueuedWrite = { kind: "plain", argv, signal: opts.signal, resolve, reject };
       if (opts.signal) {
         opts.signal.addEventListener(
           "abort",
@@ -391,15 +454,101 @@ class GitDriverImpl implements GitDriver {
     });
   }
 
+  async writeStreaming(
+    argv: readonly string[],
+    opts: StreamingWriteOptions,
+  ): Promise<GitWriteResult> {
+    if (opts.signal?.aborted) throw new GitCancelled(argv);
+    return new Promise<GitWriteResult>((resolve, reject) => {
+      const entry: QueuedStreamingWrite = {
+        kind: "streaming",
+        argv,
+        signal: opts.signal,
+        killable: opts.killable,
+        onStderr: opts.onStderr,
+        env: opts.env,
+        resolve,
+        reject,
+        started: false,
+        proc: undefined,
+      };
+      if (opts.signal) {
+        opts.signal.addEventListener(
+          "abort",
+          () => {
+            if (!entry.started) {
+              const index = this.#writeQueue.indexOf(entry);
+              if (index !== -1) {
+                this.#writeQueue.splice(index, 1);
+                reject(new GitCancelled(argv));
+              }
+              return;
+            }
+            // Already started: killable is the one case D50 relaxes §4.3's "never killed" rule
+            // for — everything else is a no-op from here on, same as write()'s own contract.
+            if (entry.killable) entry.proc?.kill();
+          },
+          { once: true },
+        );
+      }
+      this.#writeQueue.push(entry);
+      this.#pumpWriteQueue();
+    });
+  }
+
   #pumpWriteQueue(): void {
     if (this.#writeInFlight) return;
     const entry = this.#writeQueue.shift();
     if (!entry) return;
     this.#writeInFlight = true;
-    this.#runWrite(entry).finally(() => {
+    const run = entry.kind === "plain" ? this.#runWrite(entry) : this.#runStreamingWrite(entry);
+    run.finally(() => {
       this.#writeInFlight = false;
       this.#pumpWriteQueue();
     });
+  }
+
+  async #runStreamingWrite(entry: QueuedStreamingWrite): Promise<void> {
+    const fullArgv = buildGitArgv(entry.argv, false);
+    entry.started = true;
+    try {
+      const proc = this.runner.spawn(this.git.path, {
+        argv: fullArgv,
+        cwd: this.repoRoot,
+        env: { ...buildGitEnv(), ...entry.env },
+        // `exactOptionalPropertyTypes`: the key must be entirely absent when there is no
+        // callback, not present with value `undefined`.
+        ...(entry.onStderr ? { onStderr: entry.onStderr } : {}),
+      });
+      entry.proc = proc;
+      const [stdout, stderr] = await Promise.all([collectAll(proc.stdout), proc.stderr]);
+      const exit = await proc.exit;
+      if (exit.signal !== null) {
+        // Killed (only ever reachable when entry.killable — writeStreaming's own abort
+        // listener is the only thing that ever calls proc.kill()). A partial fetch may have
+        // already written loose objects or moved remote-tracking refs, so this still counts as
+        // an invalidating write even though it settles GitCancelled rather than a result.
+        this.#generation++;
+        for (const listener of this.#invalidationListeners) listener();
+        entry.reject(new GitCancelled(fullArgv));
+        return;
+      }
+      if (exit.code !== 0) {
+        entry.reject(
+          classifyGitError(
+            fullArgv,
+            exit.code,
+            new TextDecoder("utf-8", { fatal: false }).decode(stderr),
+          ),
+        );
+        return;
+      }
+      this.#generation++;
+      for (const listener of this.#invalidationListeners) listener();
+      entry.resolve({ stdout, stderr });
+    } catch (err) {
+      entry.reject(err instanceof ProcessSpawnError ? new GitSpawnFailed(this.git.path, err) : err);
+    }
   }
 
   async #runWrite(entry: QueuedWrite): Promise<void> {
