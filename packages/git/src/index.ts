@@ -96,14 +96,17 @@ export {
   parseNameStatusRecords,
   parseNumstatRecords,
 } from "./parse/diffTree.ts";
-export type { LogArgsOptions, WalkSpec } from "./parse/log.ts";
+export type { LogArgsOptions, ScanRecord, WalkSpec } from "./parse/log.ts";
 export {
   LOG_FORMAT,
   logArgs,
+  logScanArgs,
   logSessionArgs,
   logSessionSkipArgs,
   parseLogRecord,
+  parseScanRecord,
   revSetArgs,
+  SCAN_FORMAT,
   showMetadataArgs,
   walkArgs,
 } from "./parse/log.ts";

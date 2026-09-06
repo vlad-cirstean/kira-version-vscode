@@ -111,6 +111,30 @@ export function showMetadataArgs(sha: string): string[] {
   return ["show", "-s", "--decorate=full", "-z", `--format=${LOG_FORMAT}`, sha];
 }
 
+/**
+ * `docs/plans/P11.md` §7.8's tail scan. `LOG_FORMAT` plus the body, last, so
+ * `splitLimitedFields`'s "the final field absorbs extra delimiters" rule keeps a body
+ * containing a stray `0x1f` harmless — exactly why `%s` is last in `LOG_FORMAT` itself.
+ */
+export const SCAN_FORMAT = `${LOG_FORMAT}%x1f%b`;
+const SCAN_FIELD_COUNT = 11;
+
+/**
+ * The search tail scan's own argv: `logSessionArgs(walk)` with `SCAN_FORMAT` in place of
+ * `LOG_FORMAT`. Deliberately built from `walkArgs(walk)` directly, the same call
+ * `logSessionArgs` itself makes, rather than string-substituting that function's own output —
+ * two builders sharing one rev-set call is coupling that survives a refactor; patching one
+ * builder's argv string is coupling that does not. This is what makes probe 11's ordering
+ * property hold: the paging walk and the search scan produce byte-identical order because they
+ * are the same `--topo-order` walk over the same rev set, so the loaded rows are a *prefix* of
+ * the scan's own sequence and a search's tail hits can be appended without sorting anything.
+ */
+export function logScanArgs(walk: WalkSpec): string[] {
+  const args = ["log", "--decorate=full", "--topo-order", "-z", `--format=${SCAN_FORMAT}`];
+  args.push(...walkArgs(walk));
+  return args;
+}
+
 const decoder = new TextDecoder("utf-8", { fatal: false });
 
 function stripPrefix(value: string, prefix: string): string | undefined {
@@ -155,13 +179,11 @@ function parseIdentity(
   return { name: name ?? "", email: email ?? "", timestamp: Number(ts ?? 0) };
 }
 
-export function parseLogRecord(record: Uint8Array): CommitRecord {
-  const [sha, parentsRaw, an, ae, at, cn, ce, ct, decorationRaw, subject] = splitLimitedFields(
-    record,
-    FIELD_DELIMITER,
-    FIELD_COUNT,
-  ).map((field) => decoder.decode(field));
-
+/** The ten `LOG_FORMAT` fields, shared by `parseLogRecord` and `parseScanRecord` (W3) so a field
+ *  added to one is a type error in the other rather than a silent shift of every field after it
+ *  in only one of the two parsers. */
+function parseFields(fields: readonly (string | undefined)[]): CommitRecord {
+  const [sha, parentsRaw, an, ae, at, cn, ce, ct, decorationRaw, subject] = fields;
   return {
     sha: sha ?? "",
     parents: parentsRaw ? parentsRaw.split(" ").filter((p) => p.length > 0) : [],
@@ -170,4 +192,26 @@ export function parseLogRecord(record: Uint8Array): CommitRecord {
     subject: subject ?? "",
     decoration: parseDecoration(decorationRaw ?? ""),
   };
+}
+
+export function parseLogRecord(record: Uint8Array): CommitRecord {
+  const fields = splitLimitedFields(record, FIELD_DELIMITER, FIELD_COUNT).map((field) =>
+    decoder.decode(field),
+  );
+  return parseFields(fields);
+}
+
+/** §7.8's tail scan record — `parseLogRecord`'s ten fields plus the body. */
+export interface ScanRecord extends CommitRecord {
+  /** git emits a trailing `\n` before the record's NUL; trimmed here, once (probe 11). */
+  readonly body: string;
+}
+
+export function parseScanRecord(record: Uint8Array): ScanRecord {
+  const fields = splitLimitedFields(record, FIELD_DELIMITER, SCAN_FIELD_COUNT).map((field) =>
+    decoder.decode(field),
+  );
+  const commit = parseFields(fields);
+  const rawBody = fields[10] ?? "";
+  return { ...commit, body: rawBody.endsWith("\n") ? rawBody.slice(0, -1) : rawBody };
 }
