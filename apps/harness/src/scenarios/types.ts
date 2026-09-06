@@ -8,11 +8,13 @@ import type {
 } from "@kira-version/core";
 import type {
   CheckoutPreflight,
+  CherryPickPreflight,
   GitStatus,
   InProgressOperation,
   RefRow,
   RepoCandidate,
   RepoOpenResult,
+  ResetPreflight,
   RevertPreflight,
   StashEntry,
   StatusSummary,
@@ -123,6 +125,11 @@ export interface Scenario {
   readonly preflight?: {
     readonly checkout?: Readonly<Record<string, CheckoutPreflight>>;
     readonly revert?: Readonly<Record<string, RevertPreflight>>;
+    /** `docs/plans/P10.md` W9 — same convention, keyed by `target` (reset's own resolved commit
+     *  or ref name, exactly as `op.run`'s `reset` request names it). */
+    readonly reset?: Readonly<Record<string, ResetPreflight>>;
+    /** `docs/plans/P10.md` W9 — same convention, keyed by `sha`. */
+    readonly cherryPick?: Readonly<Record<string, CherryPickPreflight>>;
   };
   /**
    * P6 W19's `refOps.spec.ts`: branch names `op.run`'s `branchDelete` refuses with `NotFullyMerged`

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type {
   CheckoutPreflight,
+  CherryPickPreflight,
   CommitDetail,
   DiffHunk,
   FileChange,
@@ -11,6 +12,8 @@ import type {
   PushPreflight,
   RemoteOpRequest,
   RemoteOpResult,
+  ResetMode,
+  ResetPreflight,
   RevertPreflight,
   Settings,
   StashBranchPreflight,
@@ -174,6 +177,16 @@ class FakeRepoService implements RepoServicePort {
   stashBranchPreflightResult: StashBranchPreflight | undefined;
   readonly preflightStashBranchCalls: Array<{ repoId: string; sha: string; branch: string }> = [];
 
+  // P10 W9
+  resetPreflightResult: ResetPreflight | undefined;
+  readonly preflightResetCalls: Array<{ repoId: string; target: string; mode: ResetMode }> = [];
+  cherryPickPreflightResult: CherryPickPreflight | undefined;
+  readonly preflightCherryPickCalls: Array<{
+    repoId: string;
+    sha: string;
+    mainline: number | undefined;
+  }> = [];
+
   opResult: OpResult | undefined;
   readonly runOpCalls: Array<{ repoId: string; op: OpRequest }> = [];
   undoPeekResult: UndoSlotSnapshot | null = null;
@@ -310,6 +323,26 @@ class FakeRepoService implements RepoServicePort {
       throw new Error("FakeRepoService.revertPreflightResult not set");
     }
     return this.revertPreflightResult;
+  }
+
+  async preflightReset(repoId: string, target: string, mode: ResetMode): Promise<ResetPreflight> {
+    this.preflightResetCalls.push({ repoId, target, mode });
+    if (!this.resetPreflightResult) {
+      throw new Error("FakeRepoService.resetPreflightResult not set");
+    }
+    return this.resetPreflightResult;
+  }
+
+  async preflightCherryPick(
+    repoId: string,
+    sha: string,
+    mainline?: number,
+  ): Promise<CherryPickPreflight> {
+    this.preflightCherryPickCalls.push({ repoId, sha, mainline });
+    if (!this.cherryPickPreflightResult) {
+      throw new Error("FakeRepoService.cherryPickPreflightResult not set");
+    }
+    return this.cherryPickPreflightResult;
   }
 
   // P9 W11

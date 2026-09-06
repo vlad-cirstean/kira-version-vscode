@@ -87,6 +87,7 @@ export const rebasing: Scenario = {
       canAbort: true,
       isSequence: true,
       unmergedCount: 0,
+      canSkip: false,
     },
   },
 };

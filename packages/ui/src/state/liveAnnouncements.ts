@@ -92,6 +92,9 @@ const OP_ERROR_TEXT: Record<OpErrorKind, string> = {
   StashConflict: "it merged with conflicts — the stash was kept",
   StashIndexConflict: "the index already has conflicts — try again without restoring it",
   StashUntrackedCollision: "untracked files were in the way — the stash was kept",
+  ConfirmationRequired: "the typed confirmation was missing or did not match",
+  EmptyCherryPick: "this change is already present on this branch",
+  MainlineRequired: "a merge commit needs a parent chosen first",
   Unknown: "an unexpected error occurred",
 };
 
