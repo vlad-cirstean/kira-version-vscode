@@ -14,6 +14,7 @@ import type {
   RepoCandidate,
   RepoOpenResult,
   RevertPreflight,
+  StashEntry,
   StatusSummary,
 } from "@kira-version/ipc";
 
@@ -131,4 +132,17 @@ export interface Scenario {
    * `preflight`'s hazard-shaped fixtures state an outcome rather than deriving one.
    */
   readonly notFullyMergedBranches?: readonly string[];
+  /**
+   * P9 W21: `session.stash`'s initial stack, newest first — `undefined` means the empty stack
+   * every scenario that predates P9 still gets (`createSession`'s own default; `RepoSession.stash`'s
+   * own doc comment used to say "no scenario fixtures this yet", which this field now supersedes).
+   * Each entry names its own `stashedPaths` — the worktree paths `stashApply`/`stashPop` would
+   * restore for it — alongside the `StashEntry` itself, mirroring `stashPush`'s own
+   * `session.stashedPaths.set` call; a seeded entry with none would make every apply/pop against
+   * it a silent, confusing no-op.
+   */
+  readonly stash?: readonly {
+    readonly entry: StashEntry;
+    readonly stashedPaths: readonly string[];
+  }[];
 }

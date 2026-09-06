@@ -15,12 +15,14 @@
  * `defaultRemote` below. Fetch/Pull/Push are simply absent (not disabled) when no remote is
  * known at all: there is nothing to name in the tooltip and no useful default to pick.
  */
+import type { StashEntry } from "@kira-version/ipc";
 import { computed, ref } from "vue";
 import type { DetailActions } from "../state/detailActions.ts";
 import type { GraphViewState } from "../state/graphView.ts";
 import type { OpsState } from "../state/ops.ts";
 import type { RefsState } from "../state/refs.ts";
 import type { RepoState } from "../state/repo.ts";
+import type { StashState } from "../state/stash.ts";
 import BranchPicker from "./BranchPicker.vue";
 import PullStrategyPicker from "./PullStrategyPicker.vue";
 import RefreshButton from "./RefreshButton.vue";
@@ -33,9 +35,18 @@ const props = defineProps<{
   repoState: RepoState;
   refsState: RefsState;
   opsState: OpsState;
+  stashState: StashState;
   actions: DetailActions | undefined;
 }>();
-const emit = defineEmits<(event: "repo-opened", repoId: string) => void>();
+const emit = defineEmits<{
+  (event: "repo-opened", repoId: string): void;
+  /** `docs/plans/P9.md` W14: opens `StashDialog.vue`'s create mode — owned by `App.vue`, exactly
+   *  like `createBranchHere`/`createTagHere`'s own dialog state, since this button has no
+   *  pre-flight endpoint of its own to preview first (the dialog IS the confirm step). */
+  (event: "stash-changes"): void;
+  /** Forwarded straight from `BranchPicker.vue`'s own emit — see `StashList.vue`'s doc comment. */
+  (event: "branch-from-stash", entry: StashEntry): void;
+}>();
 
 function copy(text: string, whatCopied: string): void {
   props.actions?.copy(text, whatCopied);
@@ -143,6 +154,12 @@ const cancellable = computed(() => cancelDisabledReason.value === undefined);
 async function doCancel(): Promise<void> {
   await props.opsState.cancelRemote();
 }
+
+/** §7.6/W14: "enabled from `StatusSummary`'s dirty flag" — `isClean` rather than a `dirtyPaths`
+ *  length check, since the summary is the same object every other toolbar gate already reads. */
+const stashDisabled = computed(
+  () => (props.opsState.statusSummary.value?.isClean ?? true) || props.opsState.busy.value,
+);
 </script>
 
 <template>
@@ -152,7 +169,12 @@ async function doCancel(): Promise<void> {
        ever wanted (§6.2's own layout, not a page banner). -->
   <div class="kv-toolbar" role="toolbar" aria-label="Kira Version toolbar">
     <RepoPicker :repo-state="repoState" @repo-opened="(repoId) => emit('repo-opened', repoId)" />
-    <BranchPicker :refs="refsState" :ops="opsState" />
+    <BranchPicker
+      :refs="refsState"
+      :ops="opsState"
+      :stash="stashState"
+      @branch-from-stash="(entry) => emit('branch-from-stash', entry)"
+    />
     <span class="kv-toolbar-separator" aria-hidden="true"></span>
     <RefreshButton ref="refreshButtonRef" :graph-view="graphView" :repo-state="repoState" />
 
@@ -214,6 +236,19 @@ async function doCancel(): Promise<void> {
         </div>
       </div>
     </template>
+
+    <span class="kv-toolbar-separator" aria-hidden="true"></span>
+    <button
+      type="button"
+      class="kv-toolbar-button"
+      :disabled="stashDisabled"
+      title="Stash changes"
+      data-testid="stash-changes-button"
+      @click="emit('stash-changes')"
+    >
+      <span class="codicon codicon-inbox" aria-hidden="true"></span>
+      <span>Stash changes…</span>
+    </button>
 
     <span class="kv-toolbar-spacer" aria-hidden="true"></span>
 

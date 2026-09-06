@@ -25,9 +25,28 @@ export const LOG_FORMAT = "%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%cn%x1f%ce%x1f%ct%x1
  * is given, so "head" scope needs no extra argv at all). One builder shared by `logArgs`,
  * `git/logSession.ts`'s spawn (P2 W11), and `countCommits` — a remaining-count computed over a
  * *different* rev set than the walk itself would make "127,400 remaining" a lie.
+ *
+ * P9 W12: only `refs/stash` — i.e. `stash@{0}` — is reachable by glob (probe 7); every other
+ * stash entry is invisible to `--all` no matter what, so each one's own sha is passed as an
+ * explicit positional rev in `stashShas`. They arrive with an empty `%D` (`--decorate` cannot
+ * name a commit no ref points at), which is why `graph/stashRows.ts`'s post-pass synthesises
+ * their decoration by sha membership instead of parsing it.
+ *
+ * `includeStash` is `kiraVersion.stash.showInGraph`, threaded as its own flag rather than folded
+ * into an empty `stashShas` array: a repo with zero stashes and the setting ON must still carry
+ * `--glob=refs/stash` (harmless — git ignores a glob matching nothing — and exactly this
+ * function's pre-P9 behaviour), while the setting OFF must drop the glob too, not merely the
+ * extra positional revs — showing only `stash@{0}` because a glob happens to reach it would be
+ * the worst of both (this plan's own words, W12).
  */
-export function revSetArgs(scope: "all" | "head"): string[] {
-  return scope === "all" ? ["--all", "--glob=refs/stash"] : [];
+export function revSetArgs(
+  scope: "all" | "head",
+  stashShas: readonly string[] = [],
+  includeStash = true,
+): string[] {
+  if (scope === "head") return [];
+  if (!includeStash) return ["--all"];
+  return ["--all", "--glob=refs/stash", ...stashShas];
 }
 
 /**
@@ -37,13 +56,26 @@ export function revSetArgs(scope: "all" | "head"): string[] {
  * two (`packSlice`/`appendPacked` know nothing about either variant).
  */
 export type WalkSpec =
-  | { readonly kind: "scope"; readonly scope: "all" | "head" }
+  | {
+      readonly kind: "scope";
+      readonly scope: "all" | "head";
+      /** P9 W12: every currently-open stash's own sha, resolved once when the session (re)opens
+       *  — see `revSetArgs`'s own doc comment. Omitted (or empty) ⇒ only `stash@{0}` is ever
+       *  reachable, exactly pre-P9 behaviour. */
+      readonly stashShas?: readonly string[];
+      /** P9 W12: `kiraVersion.stash.showInGraph`. Defaults to `true` when omitted, so every
+       *  caller that predates this setting (and Branch review's own range walk, which has no
+       *  stash-in-graph behaviour to opt into at all) keeps exactly the behaviour it always had. */
+      readonly includeStash?: boolean;
+    }
   | { readonly kind: "range"; readonly base: string; readonly branch: string };
 
 /** Two-dot, never three-dot (D30) — built here, once, so no call site can accidentally write
  *  `${base}...${branch}`. */
 export function walkArgs(walk: WalkSpec): string[] {
-  return walk.kind === "scope" ? revSetArgs(walk.scope) : [`${walk.base}..${walk.branch}`];
+  return walk.kind === "scope"
+    ? revSetArgs(walk.scope, walk.stashShas, walk.includeStash ?? true)
+    : [`${walk.base}..${walk.branch}`];
 }
 
 export interface LogArgsOptions {
@@ -98,7 +130,11 @@ function parseDecorationToken(token: string): DecorationRef {
   // `revSetArgs("all")` walks `refs/stash` explicitly (this file's own doc comment on why), and
   // `--decorate=full` names it exactly this way — distinct from a `refs/heads/stash` branch,
   // which would arrive as `refs/heads/stash` and fall through to the branch case below instead.
-  if (token === "refs/stash") return { kind: "stash" };
+  // `refs/stash` the REF only ever points at the top of the stack, so `%D` can only ever mean
+  // `stash@{0}` here (probe 7) — every other stack member's decoration is synthesised
+  // separately, by sha membership against the fetched stash list (P9 W12), never parsed from a
+  // log record's own `%D` field.
+  if (token === "refs/stash") return { kind: "stash", index: 0 };
   const branch = stripPrefix(token, "refs/heads/");
   if (branch !== undefined) return { kind: "branch", name: branch, isHead: false };
   const remote = stripPrefix(token, "refs/remotes/");

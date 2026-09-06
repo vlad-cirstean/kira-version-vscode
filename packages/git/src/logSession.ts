@@ -319,7 +319,13 @@ class LogSessionImpl implements LogSession {
     const argv =
       this.#walk.kind === "range"
         ? ["rev-list", "--count", `${this.#walk.base}..${this.#walk.branch}`]
-        : ["rev-list", "--count", ...(this.#walk.scope === "all" ? revSetArgs("all") : ["HEAD"])];
+        : [
+            "rev-list",
+            "--count",
+            ...(this.#walk.scope === "all"
+              ? revSetArgs("all", this.#walk.stashShas, this.#walk.includeStash ?? true)
+              : ["HEAD"]),
+          ];
     const proc = this.#runner.spawn(this.#git.path, {
       argv: buildGitArgv(argv, true),
       cwd: this.#repoRoot,

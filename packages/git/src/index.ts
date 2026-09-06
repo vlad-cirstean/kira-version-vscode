@@ -113,7 +113,23 @@ export {
   refsArgs,
   TAG_REFS_FORMAT,
 } from "./parse/refs.ts";
-export { parseStashRecord, STASH_FORMAT, stashListArgs } from "./parse/stash.ts";
+export {
+  parseStashList,
+  STASH_FORMAT,
+  stashListArgs,
+  stashShowNameStatusArgs,
+  stashShowNumstatArgs,
+  stashUntrackedPathsArgs,
+} from "./parse/stash.ts";
+export {
+  stashApplyArgs,
+  stashBranchArgs,
+  stashDropArgs,
+  stashPopArgs,
+  stashPushArgs,
+  stashRevParseArgs,
+  stashStoreArgs,
+} from "./ops/stash.ts";
 export { parseStatus, statusArgs } from "./parse/status.ts";
 export type { ParsedProgress } from "./progress.ts";
 export { createProgressParser } from "./progress.ts";
@@ -130,6 +146,7 @@ export {
   refsSnapshot,
   revertMergeParents,
   stashList,
+  stashShow,
   status,
 } from "./queries.ts";
 export type {

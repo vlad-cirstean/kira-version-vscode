@@ -38,6 +38,22 @@ export type GitErrorKind =
   | "NetworkFailed"
   /** P8: the remote itself does not exist. */
   | "RemoteNotFound"
+  /** P9: a pop/apply merged with conflicts. Deliberately NOT a stderr pattern below — a
+   *  conflicting pop writes to stdout and leaves stderr EMPTY (probe 5) — `RepoService`
+   *  classifies this one from `exitCode !== 0` plus a post-op status read-back finding unmerged
+   *  paths, never from this file's pattern list. Kept in this union anyway, since it is still a
+   *  `GitError` the executor constructs and callers still switch on `GitErrorKind` the same way. */
+  | "StashConflict"
+  /** P9: `error: ... conflicts in index. Try without --index.` — `stash pop --index`/`apply
+   *  --index` refuses to restore the index because doing so would itself conflict. Distinct from
+   *  `StashConflict`: the worktree merge never even ran, and the remedy is "retry without
+   *  restoring the index", not "resolve conflicts". */
+  | "StashIndexConflict"
+  /** P9: `error: Untracked files in the working tree... x already exists, no checkout` / `error:
+   *  could not restore untracked files from stash` — an untracked file at the same path as one
+   *  the stash carries. Non-atomic: the worktree merge (and, per probe 3, the index restore) has
+   *  already happened by the time this is reported — the stash is kept regardless. */
+  | "StashUntrackedCollision"
   | "Unknown";
 
 export class GitError extends Error {
@@ -144,6 +160,19 @@ const PATTERNS: readonly Pattern[] = [
   },
   // "! [rejected]  main -> main (fetch first)" / "(non-fast-forward)" — needs a fetch/rebase.
   { kind: "NonFastForward", pattern: /! \[rejected\]|non-fast-forward/ },
+  // P9/W7: "error: ... x already exists, no checkout" (`stash pop`'s worktree-checkout half) and
+  // "error: could not restore untracked files from stash." (`stash apply`'s own wording for the
+  // same collision) — an untracked file at the same path as one the stash carries. Checked before
+  // `Conflict` below, whose broader `could not apply` alternative would otherwise be a plausible
+  // (wrong) match for the second message's "could not restore" phrasing.
+  {
+    kind: "StashUntrackedCollision",
+    pattern: /already exists, no checkout|could not restore untracked files from stash/,
+  },
+  // P9/W7: "error: ... conflicts in index. Try without --index." — `stash pop --index`/`apply
+  // --index` refuses because restoring the index would itself conflict; the worktree merge never
+  // ran. Checked before `Conflict` below for the same reason as `StashUntrackedCollision` above.
+  { kind: "StashIndexConflict", pattern: /conflicts in index\. Try without --index/ },
   // P6/W6: "error: the branch 'x' is not fully merged." (`git branch -d`, no `-D`).
   { kind: "NotFullyMerged", pattern: /the branch '.*' is not fully merged/ },
   // P6/W6: "fatal: 'x' is already used by worktree at '…'" (switch) and "error: cannot delete
@@ -191,11 +220,15 @@ const PATTERNS: readonly Pattern[] = [
   // doesn't exist), "error: tag 'x' not found." (`tag -d` on one that doesn't exist), "fatal:
   // bad object x" (`revert` on a bad sha). "error: branch 'x' not found" (P6/W8: `branch -d`/`-D`
   // on a name that doesn't exist — distinct wording from rename's "no branch named", probed while
-  // writing `RepoService.runOp`'s own integration tests) joins the same set.
+  // writing `RepoService.runOp`'s own integration tests) joins the same set. P9/W7 adds two more:
+  // "fatal: x is not a stash reference" (`stash apply`/`pop`/`drop`/`branch` given a bad
+  // `stash@{N}`) and "fatal: 'x' is not a stash-like commit" (`stash show`/`branch` given a sha
+  // that resolves but isn't shaped like a stash commit) — both are the same "no such thing here"
+  // outcome as every other member of this pattern, not a new kind.
   {
     kind: "NotFound",
     pattern:
-      /invalid reference:|unknown revision or path|did not match any file\(s\) known to git|bad revision|reference is not a tree:|no branch named|branch '.*' not found|tag '.*' not found|bad object/,
+      /invalid reference:|unknown revision or path|did not match any file\(s\) known to git|bad revision|reference is not a tree:|no branch named|branch '.*' not found|tag '.*' not found|bad object|is not a stash reference|is not a stash-like commit/,
   },
   // "error: could not apply <sha>... <subject>" (cherry-pick hitting a real conflict) — and, as
   // of P6/W6, "error: could not revert <sha>... <subject>" (a conflicting revert; probe P8:

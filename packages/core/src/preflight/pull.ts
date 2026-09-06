@@ -69,6 +69,11 @@ export function buildPullPreflight(input: {
   // ff-only that is really a no-op) is the one case P9's stash seam exists for — flagged here so
   // the UI can name it before the op runs, not discovered as a mid-op `DirtyWorktree` failure.
   if (input.dirty && wouldRewriteHistory) blockers.push("dirtyNonFastForward");
+  // P9/W10: `dirtyNonFastForward` is the only `PullBlocker` there is, so "the only blocker is
+  // dirtyNonFastForward" reduces to "there is a blocker at all" — offer the route whenever one
+  // exists, exactly `CheckoutPreflight.routes`'s own "blockedByTracked with no untracked block"
+  // shape, one blocker kind simpler.
+  const routes: PullPreflight["routes"] = blockers.length > 0 ? ["stashAndCarry"] : [];
   return {
     strategy: input.strategy,
     source: input.source,
@@ -76,7 +81,7 @@ export function buildPullPreflight(input: {
     ahead: input.ahead,
     behind: input.behind,
     dirty: input.dirty,
-    routes: [],
+    routes,
     blockers,
   };
 }

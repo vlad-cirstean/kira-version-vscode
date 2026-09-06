@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import {
   branchy,
   clearLargeCacheEntry,
@@ -12,6 +13,7 @@ import {
   octopus,
   withRemote,
   withStash,
+  withStashes,
 } from "./generateRepo.ts";
 
 const generatedDirs: string[] = [];
@@ -83,6 +85,71 @@ describe("generateRepo shapes", () => {
       encoding: "utf8",
     }).trim();
     expect(status).toBe(""); // stash pop-able clean tree
+  });
+
+  test("withStashes(count: 2) produces exactly two plain stash entries", () => {
+    const repo = track(withStashes({ count: 2 }));
+    const list = execFileSync("git", ["stash", "list"], { cwd: repo.dir, encoding: "utf8" }).trim();
+    expect(list.split("\n")).toHaveLength(2);
+  });
+
+  test("withStashes({includeUntracked: true})'s stash pop hits probe 3's untracked collision", () => {
+    const repo = track(withStashes({ count: 0, includeUntracked: true }));
+    expect(() =>
+      execFileSync("git", ["stash", "pop"], { cwd: repo.dir, encoding: "utf8", stdio: "pipe" }),
+    ).toThrow(/already exists, no checkout/);
+    // The worst-outcome half: the TRACKED half of the pop landed in the working tree (uncommitted
+    // — a pop never commits), the untracked half did not, and the stash is still in the list.
+    const trackedInWorktree = readFileSync(join(repo.dir, "base.txt"), "utf8");
+    expect(trackedInWorktree).toBe("tracked edit alongside the untracked one\n");
+    const untrackedInWorktree = readFileSync(join(repo.dir, "new.txt"), "utf8");
+    expect(untrackedInWorktree).toBe("collision content\n"); // the worktree's own file, untouched
+    const list = execFileSync("git", ["stash", "list"], { cwd: repo.dir, encoding: "utf8" }).trim();
+    expect(list.split("\n")).toHaveLength(1);
+  });
+
+  test("withStashes({conflicting: true}) is the W16 'done when': clean without --merge-base, conflict with it", () => {
+    const repo = track(withStashes({ count: 0, conflicting: true }));
+    expect(repo.refs.side).toBeDefined();
+
+    const status = execFileSync("git", ["status", "--porcelain"], {
+      cwd: repo.dir,
+      encoding: "utf8",
+    }).trim();
+    expect(status).toBe(""); // checked out on `side`, clean — ready for a pop attempt
+
+    const withoutMergeBase = execFileSync(
+      "git",
+      ["merge-tree", "--write-tree", "--messages", "--name-only", "HEAD", "stash@{0}"],
+      { cwd: repo.dir, encoding: "utf8" },
+    );
+    expect(withoutMergeBase.trim().split("\n")).toHaveLength(1); // just the resulting tree sha
+
+    let threw = false;
+    try {
+      execFileSync(
+        "git",
+        [
+          "merge-tree",
+          "--write-tree",
+          "--messages",
+          "--name-only",
+          "--merge-base=stash@{0}^",
+          "HEAD",
+          "stash@{0}",
+        ],
+        { cwd: repo.dir, encoding: "utf8" },
+      );
+    } catch {
+      threw = true; // rc=1: a real conflict, unlike the false-clean call above
+    }
+    expect(threw).toBe(true);
+
+    expect(() =>
+      execFileSync("git", ["stash", "pop"], { cwd: repo.dir, encoding: "utf8", stdio: "pipe" }),
+    ).toThrow();
+    const list = execFileSync("git", ["stash", "list"], { cwd: repo.dir, encoding: "utf8" }).trim();
+    expect(list.split("\n")).toHaveLength(1); // the pop conflicted; the stash is kept
   });
 
   test("conflicting guarantees a real conflict on merge", () => {

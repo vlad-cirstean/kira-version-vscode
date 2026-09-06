@@ -44,6 +44,17 @@ export const UNDO_POLICY: { readonly [K in OpRequest["kind"]]: UndoPolicy } = {
   revert: { kind: "notUndoable", reason: "Revert the revert, or use Reset once it ships." },
   opContinue: { kind: "notUndoable", reason: "Continuing an operation has no undo." },
   opAbort: { kind: "notUndoable", reason: "Aborting an operation has no undo." },
+  stashPush: { kind: "notUndoable", reason: "Pop the stash to undo this." },
+  stashApply: {
+    kind: "notUndoable",
+    reason: "The stash is still in the list; discard the applied changes to undo this.",
+  },
+  stashPop: {
+    kind: "notUndoable",
+    reason: "The stash was removed once applied; stash again to undo this.",
+  },
+  stashDrop: { kind: "undoable" },
+  stashBranch: { kind: "notUndoable", reason: "Delete the branch and stash again to undo this." },
 };
 
 /**

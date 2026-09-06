@@ -161,6 +161,28 @@ export function buildRefMenu(ctx: RefMenuContext): MenuSection[] {
   return [{ items }];
 }
 
+/**
+ * `docs/plans/P9.md` W14: §7.6's per-stash menu — Apply, Pop, Drop, Branch (all gated on
+ * `canRunOp`, exactly as every other stack-mutating action is; `stashDrop` reads as un-gated in
+ * practice only because `core`'s own `GATED_OP_KINDS` never lists it — see `model/operation.ts`'s
+ * own comment) and Show (a read, never gated, mirroring `buildRowMenu`'s copy actions). One
+ * section — there is no clipboard-conditional second section here, unlike `buildRowMenu`, since a
+ * stash row's sha is already visible via `StashList.vue`/the badge's own title, not a menu item.
+ */
+export function buildStashMenu(inProgress: InProgressOperation | null): MenuSection[] {
+  return [
+    {
+      items: [
+        gatedItem("stashApply", "Apply", "stashApply", inProgress),
+        gatedItem("stashPop", "Pop", "stashPop", inProgress),
+        gatedItem("stashDrop", "Drop", "stashDrop", inProgress),
+        gatedItem("stashBranch", "Create branch from stash…", "stashBranch", inProgress),
+        plainItem("stashShow", "Show changes"),
+      ],
+    },
+  ];
+}
+
 /** Distinct remote names implied by an already-loaded `remoteBranches` list (`origin/main` →
  *  `origin`) — see `buildRefMenu`'s own doc comment on why this stands in for a `remotes.list`
  *  endpoint P6 does not have. */

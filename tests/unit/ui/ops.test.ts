@@ -6,6 +6,8 @@ import type {
   HeadState,
   OpResult,
   ParamsOf,
+  PullPreflight,
+  RemoteOpResult,
   RequestKey,
   ResultOf,
   RevertPreflight,
@@ -115,6 +117,31 @@ function opResult(overrides: Partial<OpResult> = {}): OpResult {
     undo: null,
     head: BRANCH_HEAD,
     inProgress: null,
+    ...overrides,
+  };
+}
+
+function remoteOpResult(overrides: Partial<RemoteOpResult> = {}): RemoteOpResult {
+  return {
+    ok: true,
+    error: undefined,
+    updates: [],
+    head: BRANCH_HEAD,
+    inProgress: null,
+    ...overrides,
+  };
+}
+
+function pullPreflight(overrides: Partial<PullPreflight> = {}): PullPreflight {
+  return {
+    strategy: "ff-only",
+    source: "default",
+    upstream: "origin/main",
+    ahead: 0,
+    behind: 2,
+    dirty: false,
+    routes: [],
+    blockers: [],
     ...overrides,
   };
 }
@@ -249,7 +276,7 @@ describe("OpsState", () => {
     const promise = ops.runCheckout("side", "switch");
     await Promise.resolve();
     await Promise.resolve();
-    ops.resolveCheckoutDialog({ discardLocalChanges: true });
+    ops.resolveCheckoutDialog({ kind: "discard" });
     await promise;
 
     const opRunCall = transport.calls.find((c) => c.method === "op.run");
@@ -257,6 +284,64 @@ describe("OpsState", () => {
       repoId: "r1",
       op: { kind: "checkout", target: "side", mode: "switch", discardLocalChanges: true },
     });
+  });
+
+  test("runCheckout: blocked verdict, stashAndCarry route pushes, switches, and pops clean", async () => {
+    const { transport, ops } = setup();
+    transport.queue("status.get", status());
+    transport.queue("undo.peek", { slot: null });
+    ops.setRepoId("r1");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const blocked = checkoutPreflight({
+      verdict: "blocked",
+      blockers: [{ kind: "blockedByTracked", paths: ["a.txt"] }],
+      routes: ["discard", "stashAndCarry"],
+    });
+    transport.queue("preflight.checkout", blocked);
+    const promise = ops.runCheckout("side", "switch");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(ops.pendingCheckout.value).toEqual(blocked);
+    transport.queue("op.run", opResult()); // stashPush
+    transport.queue("op.run", opResult({ head: { kind: "branch", name: "side" } })); // checkout
+    transport.queue("stash.list", {
+      entries: [
+        {
+          index: 0,
+          sha: "s".repeat(40),
+          baseSha: "b".repeat(40),
+          baseSubject: "base commit",
+          indexSha: "i".repeat(40),
+          untrackedSha: undefined,
+          includedUntracked: false,
+          message: "WIP on main: base commit",
+          branch: "main",
+          timestamp: 1,
+          fileCount: 1,
+        },
+      ],
+    });
+    transport.queue("preflight.stashPop", {
+      stashSha: "s".repeat(40),
+      stashIndex: 0,
+      targetSha: "side".padEnd(40, "0"),
+      prediction: { kind: "clean" },
+      blockers: [],
+      verdict: "clean",
+    });
+    transport.queue("op.run", opResult({ head: { kind: "branch", name: "side" } })); // stashPop
+    ops.resolveCheckoutDialog({ kind: "stashAndCarry" });
+    await promise;
+
+    expect(ops.pendingCheckout.value).toBeUndefined();
+    expect(ops.announcement.value).toBe("Checked out side");
+    const opKinds = transport.calls
+      .filter((c) => c.method === "op.run")
+      .map((c) => (c.params as { op: { kind: string } }).op.kind);
+    expect(opKinds).toEqual(["stashPush", "checkout", "stashPop"]);
   });
 
   test("runCheckout: op.run failure announces the error, never silently", async () => {
@@ -477,5 +562,112 @@ describe("OpsState", () => {
     await Promise.resolve();
 
     expect(ops.statusSummary.value?.isClean).toBe(false);
+  });
+
+  test("runPull: no blockers previews the strategy then runs remote.run directly", async () => {
+    const { transport, ops } = setup();
+    transport.queue("status.get", status());
+    transport.queue("undo.peek", { slot: null });
+    ops.setRepoId("r1");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    transport.queue("remote.pullPreflight", pullPreflight());
+    transport.queue("remote.run", remoteOpResult());
+    await ops.runPull("origin", "main");
+
+    expect(ops.pendingPull.value).toBeUndefined();
+    expect(ops.pullStrategy.value).toEqual({ strategy: "ff-only", source: "default" });
+    expect(ops.announcement.value).toBe("Pulled origin/main (ff-only)");
+    const runCall = transport.calls.find((c) => c.method === "remote.run");
+    expect(runCall).toBeDefined();
+  });
+
+  test("runPull: dirtyNonFastForward blocker opens the dialog; Cancel runs nothing", async () => {
+    const { transport, ops } = setup();
+    transport.queue("status.get", status());
+    transport.queue("undo.peek", { slot: null });
+    ops.setRepoId("r1");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const blocked = pullPreflight({
+      strategy: "rebase",
+      source: "branchConfig",
+      dirty: true,
+      routes: ["stashAndCarry"],
+      blockers: ["dirtyNonFastForward"],
+    });
+    transport.queue("remote.pullPreflight", blocked);
+    const promise = ops.runPull("origin", "main");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(ops.pendingPull.value).toEqual(blocked);
+    ops.resolvePullDialog(false);
+    await promise;
+
+    expect(ops.pendingPull.value).toBeUndefined();
+    expect(ops.announcement.value).toBe("Pull cancelled.");
+    expect(transport.calls.some((c) => c.method === "remote.run")).toBe(false);
+  });
+
+  test("runPull: dirtyNonFastForward blocker, confirmed stashAndCarry pushes, pulls, and pops clean", async () => {
+    const { transport, ops } = setup();
+    transport.queue("status.get", status());
+    transport.queue("undo.peek", { slot: null });
+    ops.setRepoId("r1");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const blocked = pullPreflight({
+      dirty: true,
+      routes: ["stashAndCarry"],
+      blockers: ["dirtyNonFastForward"],
+    });
+    transport.queue("remote.pullPreflight", blocked);
+    const promise = ops.runPull("origin", "main");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(ops.pendingPull.value).toEqual(blocked);
+    transport.queue("op.run", opResult()); // stashPush
+    transport.queue("remote.run", remoteOpResult()); // pull
+    transport.queue("stash.list", {
+      entries: [
+        {
+          index: 0,
+          sha: "s".repeat(40),
+          baseSha: "b".repeat(40),
+          baseSubject: "base commit",
+          indexSha: "i".repeat(40),
+          untrackedSha: undefined,
+          includedUntracked: false,
+          message: "WIP on main: base commit",
+          branch: "main",
+          timestamp: 1,
+          fileCount: 1,
+        },
+      ],
+    });
+    transport.queue("preflight.stashPop", {
+      stashSha: "s".repeat(40),
+      stashIndex: 0,
+      targetSha: "a".repeat(40),
+      prediction: { kind: "clean" },
+      blockers: [],
+      verdict: "clean",
+    });
+    transport.queue("op.run", opResult()); // stashPop
+    ops.resolvePullDialog(true);
+    await promise;
+
+    expect(ops.pendingPull.value).toBeUndefined();
+    expect(ops.announcement.value).toBe("Pulled origin/main (ff-only)");
+    const opKinds = transport.calls
+      .filter((c) => c.method === "op.run")
+      .map((c) => (c.params as { op: { kind: string } }).op.kind);
+    expect(opKinds).toEqual(["stashPush", "stashPop"]);
+    expect(transport.calls.some((c) => c.method === "remote.run")).toBe(true);
   });
 });

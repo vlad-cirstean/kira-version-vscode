@@ -136,6 +136,40 @@ test.describe("visual baseline: dialogs in their hazardous state", () => {
   }
 });
 
+test.describe("visual baseline: stash (P9 W21)", () => {
+  for (const kind of THEME_KINDS) {
+    test(`StashList.vue: ${kind}`, async ({ page }) => {
+      // `stash`: two seeded entries ("Backend refactor (WIP)", 2 files; "Docs pass", 1 file) —
+      // the richest stash-list rendering a single scenario gives (message, relative date, base
+      // sha + subject, file count, no `-u` marker on either since neither included untracked).
+      await page.goto(`/?scenario=stash&theme=${kind}`);
+      await ready(page);
+      await openPicker(page);
+      await expect(page.locator(".kv-branch-section", { hasText: "Stashes" })).toBeVisible();
+      await expect(page).toHaveScreenshot(`stash-list-${kind}.png`);
+    });
+
+    test(`StashDialog.vue — blocked pop (local changes would be overwritten): ${kind}`, async ({
+      page,
+    }) => {
+      // "Backend refactor (WIP)" deliberately stashed `src/app.ts` alongside `src/backend.ts` —
+      // the scenario's own dirty file — so popping it trips the mock's real, computed
+      // `localChangesWouldBeOverwritten` blocker (`stash.ts`'s own doc comment on `SEED_STASH`).
+      await page.goto(`/?scenario=stash&theme=${kind}`);
+      await ready(page);
+      await openPicker(page);
+      const row = page.locator(".kv-branch-row", { hasText: "Backend refactor (WIP)" });
+      await row.locator('[aria-label="More actions"]').click();
+      await page.getByRole("menuitem", { name: "Pop" }).click();
+      const modal = page.locator('[aria-labelledby="kv-stash-dialog-title"]');
+      await expect(modal).toContainText(
+        "Your uncommitted changes to these files would be overwritten",
+      );
+      await expect(page).toHaveScreenshot(`stash-dialog-blocked-pop-${kind}.png`);
+    });
+  }
+});
+
 test.describe("visual baseline: < 600px breakpoint", () => {
   test("branch picker at 380px", async ({ page }) => {
     await page.setViewportSize({ width: 380, height: 600 });

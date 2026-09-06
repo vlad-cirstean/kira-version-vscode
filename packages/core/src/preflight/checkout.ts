@@ -23,16 +23,21 @@ export function classifyCheckout(input: {
   readonly dirty: readonly DirtyPath[];
   /** T: paths the checkout would rewrite (`git diff --name-only -z HEAD <target>`). */
   readonly rewritten: readonly string[];
-  /** Reserved for a future caller with a real target-tree path set (a stash pop, a reset). Always
-   *  `null` at P6 — the untracked test uses `rewritten` alone (see the file-level comment in
-   *  `docs/plans/P6.md`'s W2 section: every path in `T` is, by construction, one the target tree
-   *  either changes or adds, so "in `T`" and "in the target tree" coincide for this caller). */
+  /** Still reserved for a future caller with a real target-tree path set, never read by this
+   *  function's own body — `docs/plans/P6.md`'s W2 section already explains why: every path in
+   *  `T` is, by construction, one the target tree either changes or adds, so "in `T`" and "in the
+   *  target tree" coincide for a plain checkout, and no P9 call site changes that. `RepoService`'s
+   *  own `preflightCheckout` (the only caller as of P9) still passes `null` here for exactly that
+   *  reason — see `docs/plans/P9.md`'s Findings for why W9 did not populate it despite the plan's
+   *  own text suggesting otherwise. */
   readonly targetTreePaths: ReadonlySet<string> | null;
   readonly inProgress: InProgressOperation | null;
   /** D12: set when the target ref is checked out in a linked worktree that is NOT this session's
    *  own — the absolute path of that worktree. */
   readonly checkedOutIn: string | undefined;
-  /** false at P6; P9 flips it once stash-and-carry exists. */
+  /** False through P6-P8. P9's `preflightCheckout` passes `true` unconditionally: `routes` below
+   *  already gates `"stashAndCarry"` on a `blockedByTracked`-with-no-untracked-block verdict, so
+   *  this flag alone (not a second targeted read) is what turns the route on. */
   readonly stashAvailable: boolean;
 }): CheckoutPreflight {
   const rewrittenSet = new Set(input.rewritten);

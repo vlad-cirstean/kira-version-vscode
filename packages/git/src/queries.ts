@@ -33,7 +33,14 @@ import {
 import { logArgs, parseLogRecord, revSetArgs, showMetadataArgs } from "./parse/log.ts";
 import { mergeTreeArgs, parseMergeTreeOutput } from "./parse/mergeTree.ts";
 import { parseRefRecord, REFS_RECORD_DELIMITER, refsArgs } from "./parse/refs.ts";
-import { parseStashRecord, stashListArgs } from "./parse/stash.ts";
+import {
+  parseBaseSubjects,
+  parseStashList,
+  stashBaseSubjectsArgs,
+  stashListArgs,
+  stashShowNameStatusArgs,
+  stashShowNumstatArgs,
+} from "./parse/stash.ts";
 import { parseStatus, statusArgs } from "./parse/status.ts";
 
 const decoder = new TextDecoder("utf-8", { fatal: false });
@@ -169,12 +176,48 @@ export async function refsSnapshot(driver: GitDriver): Promise<RefsSnapshot> {
   };
 }
 
+/** §7.6/§4.4: one spawn for the whole stack, per-entry tracked file counts included (P9 probe
+ *  12) — `parseStashList` un-interleaves the header/numstat framing itself, so nothing is
+ *  filtered here beyond a genuinely empty trailing record. */
 export async function stashList(driver: GitDriver): Promise<StashEntry[]> {
   const read = driver.read(stashListArgs());
   const records: Uint8Array[] = [];
   for await (const record of read.records(0x00)) records.push(record);
   await read.done;
-  return records.filter((r) => r.length > 0).map(parseStashRecord);
+
+  // `StashEntry.baseSubject` (P9 W14): a second, tiny batch spawn over every entry's DISTINCT
+  // `baseSha` — `stash list`'s own format string can only name the stash commit's own subject,
+  // never a parent's. Parsed once with an empty map first purely to learn which base shas exist
+  // (a cheap, in-memory re-parse of the same small records array — never a second git spawn);
+  // skipped entirely when there are none, since `git log` with no revision at all defaults to
+  // walking from `HEAD`, exactly the wrong answer for zero stashes.
+  const distinctBaseShas = [...new Set(parseStashList(records, new Map()).map((e) => e.baseSha))];
+  const baseSubjects =
+    distinctBaseShas.length > 0
+      ? parseBaseSubjects(
+          splitZ(await collectOneShot(driver.read(stashBaseSubjectsArgs(distinctBaseShas)))),
+        )
+      : new Map<string, string>();
+  return parseStashList(records, baseSubjects);
+}
+
+/** The stash's own file list for the detail pane (§4.4/§7.6): two `stash show` invocations
+ *  (tracked + `-u` untracked, one for numstat, one for name-status), joined by the same
+ *  `combineFileChanges` `commitDetail` uses below — probe 12 confirmed `stash show` emits
+ *  `diff-tree`'s own `-z` framing byte-for-byte, so no stash-specific diff parser exists. */
+export async function stashShow(
+  driver: GitDriver,
+  sha: string,
+): Promise<{ readonly sha: string; readonly changes: readonly FileChange[] }> {
+  const [numstatBytes, nameStatusBytes] = await Promise.all([
+    collectOneShot(driver.read(stashShowNumstatArgs(sha))),
+    collectOneShot(driver.read(stashShowNameStatusArgs(sha))),
+  ]);
+  const changes = combineFileChanges(
+    parseNumstatRecords(splitZ(numstatBytes)),
+    parseNameStatusRecords(splitZ(nameStatusBytes)),
+  );
+  return { sha, changes };
 }
 
 /** Shared by `countCommits` and `countRange` (P7 W2) — `rev-list --count`'s only possible

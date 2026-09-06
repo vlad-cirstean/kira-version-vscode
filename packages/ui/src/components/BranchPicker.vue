@@ -10,11 +10,12 @@
  * context menu W14 builds, which is where the destructive actions live") — a kebab button (mouse
  * *and* keyboard reachable) plus a plain right-click, both opening the same menu.
  */
-import type { RefRow } from "@kira-version/ipc";
+import type { RefRow, StashEntry } from "@kira-version/ipc";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { STATE_ICONS } from "../icons/index.ts";
 import type { OpsState } from "../state/ops.ts";
 import type { RefsState } from "../state/refs.ts";
+import type { StashState } from "../state/stash.ts";
 import {
   buildRefListSections,
   formatTrack,
@@ -23,9 +24,14 @@ import {
 } from "./refListModel.ts";
 import { buildRefMenu, remoteNamesFrom } from "./rowMenuModel.ts";
 import RowContextMenu from "./RowContextMenu.vue";
+import StashList from "./StashList.vue";
 import TagList from "./TagList.vue";
 
-const props = defineProps<{ refs: RefsState; ops: OpsState }>();
+const props = defineProps<{ refs: RefsState; ops: OpsState; stash: StashState }>();
+
+/** OQ3: bubbled straight through from `StashList.vue`'s own emit — see that component's own doc
+ *  comment on why the branch-mode dialog itself is owned by `App.vue`, not here. */
+const emit = defineEmits<(e: "branchFromStash", entry: StashEntry) => void>();
 
 const isOpen = ref(false);
 const rootEl = ref<HTMLElement | null>(null);
@@ -239,8 +245,9 @@ onBeforeUnmount(() => {
               <button type="button" class="kv-branch-row-main" @click="checkoutBranch(row)">
                 <span
                   class="kv-branch-current-dot"
-                  role="img"
+                  :role="row.isHead ? 'img' : undefined"
                   :aria-label="row.isHead ? 'current branch' : undefined"
+                  :aria-hidden="!row.isHead"
                   >{{ row.isHead ? "●" : "" }}</span
                 >
                 <span class="kv-branch-row-name">{{ row.shortName }}</span>
@@ -305,6 +312,13 @@ onBeforeUnmount(() => {
           :known-remotes="knownRemotes"
           :in-progress="ops.statusSummary.value?.inProgress ?? null"
           @checked-out="close"
+        />
+
+        <StashList
+          :stash="stash"
+          :ops="ops"
+          :in-progress="ops.statusSummary.value?.inProgress ?? null"
+          @branch-from-stash="(entry) => emit('branchFromStash', entry)"
         />
       </div>
     </div>

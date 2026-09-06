@@ -146,6 +146,10 @@ function stubHandlers(
       "remote.cancel": notImplemented,
       "remote.pullPreflight": notImplemented,
       "remote.pushPreflight": notImplemented,
+      "stash.list": notImplemented,
+      "stash.show": notImplemented,
+      "preflight.stashPop": notImplemented,
+      "preflight.stashBranch": notImplemented,
       ...requestOverrides,
     },
     streams: {

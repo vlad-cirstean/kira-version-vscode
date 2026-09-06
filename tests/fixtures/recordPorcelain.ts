@@ -27,6 +27,7 @@ import {
   refsArgs,
   showMetadataArgs,
   stashListArgs,
+  stashPushArgs,
   statusArgs,
 } from "../../packages/git/src/index.ts";
 import {
@@ -422,9 +423,46 @@ function recordDiffBody(): void {
 // stash list
 // ---------------------------------------------------------------------------------------
 
+// P9 W2 "done when": the parser round-trips a `-u` stash, a pathspec stash, a stash whose
+// message contains a colon and punctuation adjacent to where the format's own `\x1f` delimiter
+// sits, and an empty stack (zero records, not an error).
 function recordStash(): void {
-  const { dir } = withStash();
+  const dir = tempRepo("stash-list");
+  writeFileSync(join(dir, "a.txt"), "line1\n");
+  writeFileSync(join(dir, "b.txt"), "b file\n");
+  git(dir, ["add", "-A"]);
+  git(dir, ["commit", "--quiet", "--no-gpg-sign", "-m", "c1"]);
+
+  // stash@{3} (oldest): default message, no `-m` — exercises the "WIP on <branch>: …" prefix
+  // rather than `-m`'s "On <branch>: …" one.
+  writeFileSync(join(dir, "a.txt"), "line1\nwip change\n");
+  git(dir, stashPushArgs({}));
+
+  // stash@{2}: `-u` with a real untracked file present (probe 1's OTHER case — the sibling
+  // fixture where `-u` finds nothing untracked lives in `tests/fixtures/generateRepo.ts`'s
+  // `withStashes`, W16).
+  writeFileSync(join(dir, "a.txt"), "line1\ntracked change\n");
+  writeFileSync(join(dir, "untracked.txt"), "untracked content\n");
+  git(dir, stashPushArgs({ includeUntracked: true, message: "with untracked" }));
+
+  // stash@{1}: an explicit pathspec (`stashPushArgs`'s `paths` option puts `--` before it).
+  writeFileSync(join(dir, "a.txt"), "line1\npathspec change\n");
+  git(dir, stashPushArgs({ message: "pathspec stash", paths: ["a.txt"] }));
+
+  // stash@{0} (newest): two files, and a message with a colon and punctuation immediately
+  // around where a stray `\x1f` would land, proving `splitLimitedFields`'s last-field-absorbs-
+  // everything guarantee holds for `%gs` exactly as it does for `%s` (`log.ts`'s own subject
+  // field).
+  writeFileSync(join(dir, "a.txt"), "line1\nfinal change\n");
+  writeFileSync(join(dir, "c.txt"), "c file\n");
+  git(dir, ["add", "c.txt"]);
+  git(dir, stashPushArgs({ message: "fix: handle edge, case! (parens): done" }));
+
   save("stash/list.bin", git(dir, stashListArgs()));
+
+  // A genuinely empty stack — zero records is a valid result, not an error.
+  const emptyDir = tempRepo("stash-empty");
+  save("stash/empty.bin", git(emptyDir, stashListArgs()));
 }
 
 // ---------------------------------------------------------------------------------------

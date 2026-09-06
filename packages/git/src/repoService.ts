@@ -17,10 +17,12 @@ import type {
   BaseResolutionReason,
   CheckoutPreflight,
   CommitDetail,
+  CommitRecord,
   CommitStore,
   CredentialPrompt,
   DiffHunk,
   Disposable,
+  FileChange,
   FileDiff,
   FileDiffBody,
   FileWatcher,
@@ -44,19 +46,27 @@ import type {
   RevertPrediction,
   RevertPreflight,
   Settings,
+  StashBranchPreflight,
+  StashEntry,
+  StashPopPreflight,
+  StashRowFilter,
   StatusResult,
   StatusSummary,
   UndoRecord,
   UndoSlotSnapshot,
 } from "@kira-version/core";
 import {
+  applyStashRowFilter,
   assertDefined,
   buildPullPreflight,
+  buildStashRowFilter,
   CommitStore as CommitStoreImpl,
   classifyCheckout,
   classifyInProgress,
   classifyPush,
   classifyRevert,
+  classifyStashBranch,
+  classifyStashPop,
   describeInProgress,
   dirtyPathsFrom,
   matchProtectedBranch,
@@ -107,6 +117,15 @@ import {
 } from "./ops/push.ts";
 import { revertArgs } from "./ops/revert.ts";
 import {
+  stashApplyArgs,
+  stashBranchArgs,
+  stashDropArgs,
+  stashPopArgs,
+  stashPushArgs,
+  stashRevParseArgs,
+  stashStoreArgs,
+} from "./ops/stash.ts";
+import {
   tagCreateArgs,
   tagDeleteArgs,
   tagDeleteRemoteArgs,
@@ -122,6 +141,7 @@ import {
   worktreeDiffArgs,
 } from "./parse/diff.ts";
 import { parseRefRecord, REFS_FORMAT, REFS_RECORD_DELIMITER } from "./parse/refs.ts";
+import { stashShowNameOnlyArgs, stashUntrackedPathsArgs } from "./parse/stash.ts";
 import type { ParsedProgress } from "./progress.ts";
 import { createProgressParser } from "./progress.ts";
 import type { RefsSnapshot } from "./queries.ts";
@@ -133,6 +153,8 @@ import {
   mergeBase,
   predictMerge,
   revertMergeParents,
+  stashList as stashListQuery,
+  stashShow as stashShowQuery,
   status,
 } from "./queries.ts";
 import type { RepoWatcher, WatchSignal } from "./watcher.ts";
@@ -670,6 +692,23 @@ interface RepoSession {
    *  second. Cleared implicitly whenever a *different* range is resolved (nothing reads a stale
    *  entry: `#ensureReviewWalk` only consults it when the ranges still match). */
   lastReviewResolution: { readonly range: CommitRange; readonly commitCount: number } | undefined;
+  /** P9/W8, refreshed by W12: the sha -> entry map from the most recent `stash list` read — used
+   *  by `#captureStashDropUndo` (the drop-undo replay needs the dropped entry's own message) and
+   *  by `#refreshStashGraphInputs` to build `stashRowFilter` below. Populated as a side effect of
+   *  `stashList()`/`preflightStashPop()`/`preflightStashBranch()` (each spawns its own fresh
+   *  `stash list`) AND, since W12, of every `#openSession`/`#resetSession` — the graph's own walk
+   *  cannot show anything past `stash@{0}` without first knowing the full list itself (see
+   *  `revSetArgs`'s own doc comment), so opening or refreshing the panel now keeps this at least
+   *  as fresh as the graph currently on screen, not merely "as fresh as the most recent explicit
+   *  stash RPC" as it was through W8 alone. Still best-effort: a failed `stash list` (should not
+   *  happen — it is a plain read) degrades to "no stashes known yet" rather than failing the
+   *  whole repo open. */
+  stashShapes: ReadonlyMap<string, StashEntry>;
+  /** P9 W12: derived from `stashShapes` (via `buildStashRowFilter`) every time it refreshes above
+   *  — the graph's own page-read post-pass reads this, never `stashShapes` directly, so the
+   *  "empty ⇒ pass-through" and "`kiraVersion.stash.showInGraph` gates the walk, never the undo
+   *  path" rules live in exactly one place (`#refreshStashGraphInputs`). */
+  stashRowFilter: StashRowFilter;
 }
 
 /**
@@ -796,7 +835,7 @@ export class RepoService {
     const existing = this.#sessions.get(repoId);
     if (existing) return { kind: "ok", repoId, identity: existing.identity };
 
-    const session = this.#openSession(identity);
+    const session = await this.#openSession(identity);
     this.#sessions.set(repoId, session);
     this.#logger.log("debug", "opened repo", { repoId, root: identity.root });
     return { kind: "ok", repoId, identity };
@@ -1290,10 +1329,16 @@ export class RepoService {
       mode,
       dirty: dirtyPathsFrom(statusResult),
       rewritten,
+      // See classifyCheckout's own doc comment on this field: `T` (rewritten, above) already
+      // coincides with the target tree for a plain checkout, so there is nothing this call site
+      // would compute that the classifier does not already derive from `rewritten` alone.
       targetTreePaths: null,
       inProgress,
       checkedOutIn,
-      stashAvailable: false,
+      // P9/W9: the one-line flip — `classifyCheckout`'s own `routes` logic has gated
+      // `"stashAndCarry"` on this since it was written (W1-W4); this was the only site left
+      // still passing `false`.
+      stashAvailable: true,
     });
   }
 
@@ -1358,14 +1403,166 @@ export class RepoService {
    *  classify a target git itself cannot resolve, and the caller offered it from a ref list or a
    *  sha the UI already validated some other way. */
   async #rewrittenPaths(session: RepoSession, target: string): Promise<string[]> {
-    const read = session.driver.read(rewrittenPathsArgs(target));
+    return this.#zPathList(session, rewrittenPathsArgs(target));
+  }
+
+  /** A `-z`-terminated path list from any argv, decoded and with the trailing empty fragment
+   *  `read.records(0x00)` always yields after the last real record dropped. Shared by
+   *  `#rewrittenPaths` (checkout's T) and P9's `classifyStashPop` gathering (`stashPaths` from
+   *  `stashShowNameOnlyArgs`, `stashUntrackedPaths` from `stashUntrackedPathsArgs`) — all three
+   *  are "run this diff-shaped command, get a flat path list back", nothing more. */
+  async #zPathList(session: RepoSession, argv: readonly string[]): Promise<string[]> {
+    const read = session.driver.read(argv);
     const paths: string[] = [];
-    const decoder2 = new TextDecoder("utf-8", { fatal: false });
     for await (const record of read.records(0x00)) {
-      if (record.length > 0) paths.push(decoder2.decode(record));
+      if (record.length > 0) paths.push(decoder.decode(record));
     }
     await read.done;
     return paths;
+  }
+
+  /** §7.6's `existingPaths` — a bounded `existsSync` per candidate path, never a worktree scan
+   *  (mirrors `pathExistsInCheckout`'s own mechanism above; not delegated to it directly since
+   *  these paths come from git itself — `ls-tree` on the stash's own untracked tree — not from
+   *  the webview, so no path-escape guarding is needed here). */
+  #existingStashPaths(session: RepoSession, paths: readonly string[]): string[] {
+    const root = session.identity.root;
+    return paths.filter((p) => {
+      try {
+        return existsSync(join(root, p));
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  /** `git rev-parse HEAD` — the default `targetSha` for `preflightStashPop` when the wire request
+   *  omits one (only the `stashAndCarry` route, W10/W13, ever supplies its own). */
+  async #resolveHead(session: RepoSession): Promise<string> {
+    const bytes = await collectOneShotBytes(session.driver.read(["rev-parse", "HEAD"]));
+    return decoder.decode(bytes).trim();
+  }
+
+  /** `stash.list` (probe 12): one spawn for the whole stack, tracked file counts included. Also
+   *  refreshes `session.stashShapes` — see that field's own doc comment for who reads it and why
+   *  this is the one place (of three) that happens to double as its refresh. */
+  async stashList(repoId: string): Promise<{ readonly entries: readonly StashEntry[] }> {
+    const session = this.#requireSession(repoId);
+    const entries = await stashListQuery(session.driver);
+    session.stashShapes = new Map(entries.map((e) => [e.sha, e]));
+    return { entries };
+  }
+
+  /** `stash.show` — the stash's own file list for the detail pane. A thin delegation to
+   *  `queries.ts`'s own `stashShow` (two spawns, joined by the existing `combineFileChanges`) —
+   *  no stash-specific diff parser exists, per probe 12. */
+  async stashShow(
+    repoId: string,
+    sha: string,
+  ): Promise<{ readonly sha: string; readonly changes: readonly FileChange[] }> {
+    const session = this.#requireSession(repoId);
+    return stashShowQuery(session.driver, sha);
+  }
+
+  /** Looks a stash entry up by BOTH its sha and its stack index — the same pair
+   *  `preflight.stashPop`'s own wire request carries (mirroring every stack-mutating op's own
+   *  `sha`/`index` addressing), so a stale request (the stack changed since the caller's last
+   *  `stash.list`) is refused here with the same honesty `#verifyStashPosition` insists on
+   *  immediately before a write, rather than silently classifying against the wrong entry. */
+  #findStash(entries: readonly StashEntry[], sha: string, index: number): StashEntry {
+    return assertDefined(
+      entries.find((e) => e.sha === sha && e.index === index),
+      `stash@{${index}} (${sha.slice(0, 7)}) is no longer at that position — refresh and try again`,
+    );
+  }
+
+  /** `preflight.stashBranch`'s own wire request carries only `sha`, never an index (§7.6's
+   *  contract table — there is nothing to guard against a stack reshuffle here: this is a read,
+   *  and the write path re-verifies position on its own regardless). */
+  #findStashBySha(entries: readonly StashEntry[], sha: string): StashEntry {
+    return assertDefined(
+      entries.find((e) => e.sha === sha),
+      `stash ${sha.slice(0, 7)} is no longer in the stack — refresh and try again`,
+    );
+  }
+
+  /** §7.6's pre-flight orchestration for `stashPop`/`stashApply`: gather, then delegate to the
+   *  pure classifier. `targetSha` is supplied by the `stashAndCarry` route (W10/W13), which
+   *  predicts against the commit it is about to switch to rather than HEAD. */
+  async preflightStashPop(
+    repoId: string,
+    sha: string,
+    index: number,
+    targetSha?: string,
+  ): Promise<StashPopPreflight> {
+    const session = this.#requireSession(repoId);
+    const [entries, { statusResult, inProgress }] = await Promise.all([
+      stashListQuery(session.driver),
+      this.#statusAndInProgress(session),
+    ]);
+    session.stashShapes = new Map(entries.map((e) => [e.sha, e]));
+    const stash = this.#findStash(entries, sha, index);
+
+    const target = targetSha ?? (await this.#resolveHead(session));
+    const [prediction, stashPaths, stashUntrackedPaths] = await Promise.all([
+      // NEVER without mergeBase (probe 2) — `predictMerge` already reinterprets merge-tree's
+      // exit 1 as a conflicts result rather than a thrown `GitError`; no second read path exists.
+      predictMerge(session.driver, target, stash.sha, { mergeBase: stash.baseSha }),
+      this.#zPathList(session, stashShowNameOnlyArgs(stash.sha)),
+      stash.untrackedSha !== undefined
+        ? this.#zPathList(session, stashUntrackedPathsArgs(stash.untrackedSha))
+        : Promise.resolve([]),
+    ]);
+    const existingPaths = this.#existingStashPaths(session, stashUntrackedPaths);
+
+    return classifyStashPop({
+      stash,
+      targetSha: target,
+      prediction,
+      stashPaths,
+      stashUntrackedPaths,
+      dirty: dirtyPathsFrom(statusResult),
+      existingPaths,
+      inProgress,
+    });
+  }
+
+  /** §7.6's pre-flight orchestration for `stash branch`: the branch is created AT THE STASH'S
+   *  OWN BASE (`stash.baseSha`), so the checkout half this composes models a switch onto that sha
+   *  — the apply half gets no merge-tree prediction of its own (probe 11: clean by construction).
+   *  `target.kind: "sha"` makes the composed `CheckoutPreflight.detaches` read `true`, which is not
+   *  quite accurate (`stash branch` always lands on a new named branch, never detached) — there is
+   *  no `RefKind` for "a branch about to be created", `classifyStashBranch` itself never reads
+   *  `detaches`, and no exit criterion depends on it, so this is a known, deliberate imprecision
+   *  rather than a modelled case. `stashAvailable: false`: offering a `stashAndCarry` route while
+   *  already resolving a stash op would be circular. */
+  async preflightStashBranch(
+    repoId: string,
+    sha: string,
+    branch: string,
+  ): Promise<StashBranchPreflight> {
+    const session = this.#requireSession(repoId);
+    const [entries, snapshot, { statusResult, inProgress }] = await Promise.all([
+      stashListQuery(session.driver),
+      fetchRefsSnapshot(session.driver),
+      this.#statusAndInProgress(session),
+    ]);
+    session.stashShapes = new Map(entries.map((e) => [e.sha, e]));
+    const stash = this.#findStashBySha(entries, sha);
+
+    const rewritten = await this.#rewrittenPaths(session, stash.baseSha);
+    const checkout = classifyCheckout({
+      target: { kind: "sha", name: stash.baseSha },
+      mode: "switch",
+      dirty: dirtyPathsFrom(statusResult),
+      rewritten,
+      targetTreePaths: null,
+      inProgress,
+      checkedOutIn: undefined,
+      stashAvailable: false,
+    });
+    const existingBranchNames = new Set(snapshot.branches.map((b) => b.shortName));
+    return classifyStashBranch({ name: branch, existingBranchNames, checkout });
   }
 
   /** §7.11's classification, shared by `statusSummary`, both pre-flights, and `runOp`/`undoRun`'s
@@ -1453,6 +1650,26 @@ export class RepoService {
     // revert fails with `Conflict` and *leaves* `REVERT_HEAD`; this is what surfaces it here
     // rather than waiting on a watcher tick).
     const { inProgress } = await this.#statusAndInProgress(session);
+
+    // P9/W8: a conflicting `stash pop`/`apply` writes its conflict markers to STDOUT and leaves
+    // stderr EMPTY (probe 5) — `classifyGitError` has no pattern that could ever match it, so it
+    // falls through to `Unknown` (`errors.ts`'s own `StashConflict` doc comment states this is
+    // deliberate). This is the one place that refines that guess: `error` is already `Unknown`,
+    // the op just ran was a pop/apply, and the read-back this method takes unconditionally shows
+    // exactly the unmerged-index shape a conflicting pop leaves (no MERGE_HEAD or sibling state
+    // file is ever written — the "unmergedOnly" fallback in `classifyInProgress`'s own precedence
+    // table is what a stash conflict actually looks like on disk).
+    if (
+      error !== undefined &&
+      error.kind === "Unknown" &&
+      (op.kind === "stashPop" || op.kind === "stashApply") &&
+      inProgress?.kind === "unmergedOnly"
+    ) {
+      error = {
+        kind: "StashConflict",
+        message: `Merged with conflicts in ${inProgress.conflictedPaths.join(", ")} — the stash was kept.`,
+      };
+    }
 
     return {
       ok,
@@ -1747,7 +1964,96 @@ export class RepoService {
         }
         return { argvList: [argv], undo: null };
       }
+      case "stashPush": {
+        const opts: {
+          message?: string;
+          includeUntracked?: boolean;
+          keepIndex?: boolean;
+          paths?: readonly string[];
+        } = { includeUntracked: op.includeUntracked, keepIndex: op.keepIndex };
+        if (op.message !== undefined) opts.message = op.message;
+        if (op.paths.length > 0) opts.paths = op.paths;
+        return { argvList: [stashPushArgs(opts)], undo: null };
+      }
+      // `apply` accepts a raw sha (probe 8) — no stack-position guard needed, unlike the three
+      // stack-mutating cases below.
+      case "stashApply":
+        return {
+          argvList: [stashApplyArgs(op.sha, { restoreIndex: op.restoreIndex })],
+          undo: null,
+        };
+      case "stashPop": {
+        const mismatch = await this.#verifyStashPosition(session, op.index, op.sha);
+        if (mismatch) return { argvList: [], undo: null, earlyError: mismatch };
+        return {
+          argvList: [stashPopArgs(op.index, { restoreIndex: op.restoreIndex })],
+          undo: null,
+        };
+      }
+      case "stashDrop": {
+        const mismatch = await this.#verifyStashPosition(session, op.index, op.sha);
+        if (mismatch) return { argvList: [], undo: null, earlyError: mismatch };
+        const undo = await this.#captureStashDropUndo(session, op.sha, op.index);
+        return { argvList: [stashDropArgs(op.index)], undo };
+      }
+      case "stashBranch": {
+        const mismatch = await this.#verifyStashPosition(session, op.index, op.sha);
+        if (mismatch) return { argvList: [], undo: null, earlyError: mismatch };
+        return { argvList: [stashBranchArgs(op.branch, op.index)], undo: null };
+      }
     }
+  }
+
+  /** The pre-write guard every stack-mutating stash op (`pop`/`drop`/`branch`) runs immediately
+   *  before writing: resolve `stash@{index}` and compare it to the sha the request carried. A
+   *  mismatch — someone else changed the stack since the caller's last `stash.list`, or the
+   *  index no longer exists at all (`fatal: log for 'stash' only has N entries`, rc=128, which
+   *  `classifyGitError` has no pattern for and would otherwise fall through to `Unknown`) —
+   *  becomes an `earlyError` of kind `NotFound` with NO write ever spawned, rather than mutating
+   *  whatever now happens to sit at that index (probe 8). Using `#prepareOp`'s existing
+   *  `earlyError` channel (not a thrown error) is what makes "no write ever runs" a guarantee the
+   *  caller (`runOp`) enforces uniformly, the same way it already does for `opContinue`/`opAbort`
+   *  with nothing in progress. */
+  async #verifyStashPosition(
+    session: RepoSession,
+    index: number,
+    expectedSha: string,
+  ): Promise<{ readonly kind: OpErrorKind; readonly message: string } | null> {
+    const refused = {
+      kind: "NotFound" as const,
+      message: `That stash is no longer at stash@{${index}} — the list changed. Refresh and try again.`,
+    };
+    try {
+      const bytes = await collectOneShotBytes(session.driver.read(stashRevParseArgs(index)));
+      const actualSha = decoder.decode(bytes).trim();
+      return actualSha === expectedSha ? null : refused;
+    } catch (err) {
+      if (err instanceof GitError) return refused;
+      throw err;
+    }
+  }
+
+  /** §7.12's stash row. Captured BEFORE the drop, like every other undo capture: `stash store`
+   *  needs the commit sha (still resolvable in the odb after the drop — only the reflog entry
+   *  goes away) and the reflog subject `%gs` written back verbatim (probe 9 — see `parse/stash.ts`'s
+   *  `STASH_FORMAT` doc comment for why `%gs`, never `%s`). Best-effort: a sha not present in
+   *  `session.stashShapes` (its freshness is exactly as good as the most recent `stash.list`/
+   *  `preflightStashPop`/`preflightStashBranch` call — see that field's own doc comment) yields
+   *  `null`, and the drop's own outcome speaks for itself regardless. */
+  async #captureStashDropUndo(
+    session: RepoSession,
+    sha: string,
+    index: number,
+  ): Promise<UndoRecord | null> {
+    const entry = session.stashShapes.get(sha);
+    if (entry === undefined) return null;
+    return {
+      id: randomId(),
+      createdAt: Date.now(),
+      label: `Dropped stash@{${index}}: ${entry.message}`,
+      recoverySha: sha,
+      replay: [stashStoreArgs(entry.message, sha)],
+    };
   }
 
   /** Undo-capture for a branch delete (probe P4): the branch's current tip (still resolvable
@@ -2327,17 +2633,18 @@ export class RepoService {
   // Internals
   // ---------------------------------------------------------------------------------------
 
-  #openSession(identity: RepoIdentity): RepoSession {
+  async #openSession(identity: RepoIdentity): Promise<RepoSession> {
     const git = this.#git();
     const catFile = openCatFileSession(git, this.#deps.runner, identity.root);
     const driver = openGitDriver(git, this.#deps.runner, identity.root, catFile);
     const watcher = watchRepo(this.#deps.fileWatcher, identity);
+    const { stashShapes, stashShas, rowFilter } = await this.#refreshStashGraphInputs(driver);
 
     const session: RepoSession = {
       repoId: identity.root,
       identity,
       driver,
-      logSession: this.#openLogSession(identity),
+      logSession: this.#openLogSession(identity, stashShas),
       store: new CommitStoreImpl(),
       watcher,
       dictionaryMarks: initialDictionaryMarks(),
@@ -2356,6 +2663,8 @@ export class RepoService {
       activeRemoteOp: undefined,
       autoFetchLastAt: Date.now(),
       autoFetchDisabled: false,
+      stashShapes,
+      stashRowFilter: rowFilter,
     };
 
     session.subscriptions.push(watcher.onSignal((signal) => this.#handleSignal(session, signal)));
@@ -2368,11 +2677,46 @@ export class RepoService {
     return session;
   }
 
-  #openLogSession(identity: RepoIdentity): LogSession {
+  #openLogSession(identity: RepoIdentity, stashShas: readonly string[]): LogSession {
     return openLogSession(this.#git(), this.#deps.runner, identity.root, {
-      walk: { kind: "scope", scope: this.#deps.settings()["kiraVersion.graph.scope"] },
+      walk: {
+        kind: "scope",
+        scope: this.#deps.settings()["kiraVersion.graph.scope"],
+        stashShas,
+        includeStash: this.#deps.settings()["kiraVersion.stash.showInGraph"],
+      },
       pageSize: this.#deps.settings()["kiraVersion.graph.pageSize"],
     });
+  }
+
+  /** P9 W12: the one place that reads `stash list` for the graph's own sake — `#openSession` and
+   *  `#resetSession` both call this before building this session's `WalkSpec`, since every stash
+   *  beyond `stash@{0}` must be named as an explicit positional rev to be walkable at all
+   *  (`revSetArgs`'s own doc comment). Also refreshes `stashShapes` (the drop-undo capture's own
+   *  dependency, `RepoSession.stashShapes`'s doc comment) — deliberately unconditional on
+   *  `kiraVersion.stash.showInGraph`, so turning the graph's stash visibility off never degrades
+   *  undo. Only `stashShas`/`rowFilter` (the graph-visible half) are gated by the setting.
+   *  Best-effort: a failed `stash list` (should not happen — it is a plain read) degrades to "no
+   *  stashes known this session" rather than failing the repo open/refresh outright. */
+  async #refreshStashGraphInputs(driver: GitDriver): Promise<{
+    readonly stashShapes: ReadonlyMap<string, StashEntry>;
+    readonly stashShas: readonly string[];
+    readonly rowFilter: StashRowFilter;
+  }> {
+    let entries: readonly StashEntry[] = [];
+    try {
+      entries = await stashListQuery(driver);
+    } catch {
+      entries = [];
+    }
+    const stashShapes = new Map(entries.map((e) => [e.sha, e] as const));
+    const showInGraph = this.#deps.settings()["kiraVersion.stash.showInGraph"];
+    const graphEntries = showInGraph ? entries : [];
+    return {
+      stashShapes,
+      stashShas: graphEntries.map((e) => e.sha),
+      rowFilter: buildStashRowFilter(graphEntries),
+    };
   }
 
   #requireSession(repoId: string): RepoSession {
@@ -2398,25 +2742,43 @@ export class RepoService {
   async #ensureFresh(session: RepoSession): Promise<void> {
     if (!session.staleReason) return;
     session.staleReason = undefined;
-    this.#resetSession(session);
+    await this.#resetSession(session);
   }
 
   /** Resets exactly the panel's own walk state. Deliberately does NOT touch `session.reviewWalk`
    *  (P7/D38): a `refsChanged`/`refresh()` invalidation of the graph's own scoped walk must never
    *  disturb an independently-open review walk on the same repo, and vice versa — the two are
    *  invalidated by entirely separate paths (`#handleSignal`'s `staleReason` here; the review
-   *  view's own quiet re-resolve, per open question 5, for the review walk). */
-  #resetSession(session: RepoSession): void {
+   *  view's own quiet re-resolve, per open question 5, for the review walk).
+   *
+   *  P9 W12: also re-reads the stash list (`#refreshStashGraphInputs`) before rebuilding the log
+   *  session — a stash push/pop/drop is itself a write, so it already reaches here through the
+   *  exact same `refsChanged` path any other ref-moving op does (`driver.onInvalidated`, §4.3);
+   *  this is what keeps the graph's stash rows in sync with no bespoke invalidation of their own. */
+  async #resetSession(session: RepoSession): Promise<void> {
     session.store.clear();
     session.dictionaryMarks = initialDictionaryMarks();
     session.lastRemaining = 0;
     session.logSession.dispose();
-    session.logSession = this.#openLogSession(session.identity);
+    const { stashShapes, stashShas, rowFilter } = await this.#refreshStashGraphInputs(
+      session.driver,
+    );
+    session.stashShapes = stashShapes;
+    session.stashRowFilter = rowFilter;
+    session.logSession = this.#openLogSession(session.identity, stashShas);
+  }
+
+  /** P9 W12's own chunk-build post-pass (`graph/stashRows.ts`'s doc comment): applied to every
+   *  record a page read yields, before it ever reaches `session.store` — a dropped helper-commit
+   *  row is simply never appended. */
+  #appendFilteredRecord(session: RepoSession, record: CommitRecord): void {
+    const filtered = applyStashRowFilter(record, session.stashRowFilter);
+    if (filtered) session.store.append(filtered);
   }
 
   async #readPageIntoStore(session: RepoSession, signal?: AbortSignal): Promise<void> {
     const outcome = await session.logSession.readPage(
-      (record) => session.store.append(record),
+      (record) => this.#appendFilteredRecord(session, record),
       signal ? { signal } : {},
     );
     if (outcome.kind === "stale") {
@@ -2426,7 +2788,7 @@ export class RepoService {
       this.#handleSignal(session, "refsChanged");
       await this.#ensureFresh(session);
       await session.logSession.readPage(
-        (record) => session.store.append(record),
+        (record) => this.#appendFilteredRecord(session, record),
         signal ? { signal } : {},
       );
     }
@@ -2642,7 +3004,11 @@ export class RepoService {
 
   #evict(session: RepoSession): void {
     session.evictTimer = undefined;
-    this.#resetSession(session);
+    // Fire-and-forget: `#resetSession` cannot reject (`#refreshStashGraphInputs`'s own
+    // best-effort try/catch, `openLogSession` itself never throws), and this timer callback has
+    // no caller to propagate a rejection to regardless — same posture as every other synchronous
+    // side effect this method performs below.
+    void this.#resetSession(session);
     // P7/D38: a review's own view (the sidebar) is a *separate* webview from the panel this
     // eviction timer is armed by — hiding the panel must not silently leave a review walk running
     // forever in the background, so it is disposed here alongside everything else this evicts.

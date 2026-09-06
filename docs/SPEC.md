@@ -301,6 +301,8 @@ kira-version-vscode/
 │   │       │                       ops.ts          P6 W12: the four-step op executor (§7's pre-flight →
 │   │       │                                       confirm → execute → reconcile), undo slot, busy state
 │   │       │                       liveAnnouncements.ts  composed live-region text shared across features
+│   │       │                       stash.ts        P9 W13: stash stack + selection/detail-pane
+│   │       │                                       state, mirroring refs.ts/detail.ts (§7.6)
 │   │       │                       viewState.ts    persisted view state (§2.1, §5.4)
 │   │       │                       review.ts       branch-review session state (§6.8)
 │   │       │                       pullRequests.ts branch → PR records for the session (§6.7)
@@ -777,8 +779,14 @@ git --no-optional-locks log --topo-order -z \
     --format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%cn%x1f%ce%x1f%ct%x1f%D%x1f%s \
     --all --glob=refs/stash --max-count=<page>
 ```
-`--all` covers heads/tags/remotes but **not** `refs/stash`, hence the explicit `--glob`.
-`--all` is the default scope — a graph tool showing one branch is not a graph tool — with a
+`--all` covers heads/tags/remotes but **not** `refs/stash`, hence the explicit `--glob`. `refs/stash`
+is *one ref*, though, so the glob reaches only its tip — `stash@{0}` — never `stash@{1..N}`, which
+live purely in that one ref's reflog and no glob can name (P9 probe 7). Every other stash entry the
+UI shows is fetched by passing its sha as an explicit rev to a separate, targeted read, not by
+widening this walk; each reachable stash's index/untracked helper-commit parents are filtered out of
+the row set by sha rather than excluded with `^<sha>` in the walk itself, which would take the
+stash's own base commit down with it. `--all` is the default scope — a graph tool showing one
+branch is not a graph tool — with a
 toggle for current-branch-only (`HEAD` in place of `--all`) for users who want the narrow
 view. Paging (§5.1.1) removes the cost objection to `--all` being the default.
 Bodies are fetched lazily per selected commit, never in the bulk walk. `--topo-order` is
@@ -1537,8 +1545,9 @@ be done" requirement, computed before we run anything:
    - `D ∩ T = ∅` → **clean carry**. Git will carry the local changes across. Proceed with no
      prompt.
    - `D ∩ T ≠ ∅` → **blocked**. Git will refuse ("local changes would be overwritten"). We
-     name the exact files and offer three routes: stash-and-carry (§7.6 prediction runs
-     first), discard, or cancel.
+     name the exact files and offer three routes: stash-and-carry (P9: the stash does not exist
+     until it is pushed, so the route's execution order is stash → predict → switch → pop, the
+     §7.6 prediction run *after* the push rather than before it), discard, or cancel.
    - Untracked file in `T` that exists in the target tree → **blocked by untracked**. Named
      explicitly, since git's own message here is a common confusion.
 4. In-progress operation (merge/rebase/cherry-pick, detected from `.git` state files) →
@@ -1550,8 +1559,12 @@ Operations: `git stash push [-u] [-m <msg>] [-- <pathspec>]`, `git stash list`,
 `git stash show -p <ref>`, `git stash apply/pop/drop <ref>`, `git stash branch`.
 
 Stashes are visible in two places: a dedicated stash list (with message, date, base commit,
-file count) and as nodes in the graph itself (they are commits; `--glob=refs/stash` in the
-walk puts them there), visually distinguished.
+file count) and as nodes in the graph itself (they are commits) — but `--glob=refs/stash` in
+the walk reaches only `stash@{0}`, `refs/stash` being *one ref* with `stash@{1..N}` living
+purely in its reflog (P9 probe 7); every other stash the list shows is fetched by sha as an
+explicit rev instead, and the index/untracked helper-commit parents `-u` mints are filtered out
+of the row set by sha rather than excluded from the walk (which would take the stash's own base
+commit down with it). Visually distinguished from ordinary commits.
 
 **Pre-flight — "would stashing and popping on the other branch work?"** Before offering
 stash-and-carry as a resolution to a blocked checkout, we predict the pop:
@@ -1559,19 +1572,33 @@ stash-and-carry as a resolution to a blocked checkout, we predict the pop:
 1. The stash entry is a merge commit whose first parent is its base commit; the working-tree
    changes are the diff `stash^ → stash`. (With `-u`, the third parent holds the untracked
    set.)
-2. Predict with `git merge-tree --write-tree --messages --name-only <target-commit> <stash-commit>`
-   using `stash^` as the merge base — this is exactly the three-way merge `git stash pop`
-   performs, computed entirely in the object database with no worktree writes and no side
-   effects.
+2. Predict with
+   `git merge-tree --write-tree --messages --name-only --merge-base=<stash^> <target-commit> <stash-commit>`
+   — `--merge-base` is **mandatory, not optional**: left to itself git instead picks
+   `merge-base(target, stash)`, an ancestor of the stash's real base whenever the target has
+   diverged from it, against which the stash's own diff reads as empty — reporting a
+   genuinely conflicting pop as clean (P9 probe 2). Passing `stash^` explicitly is what makes
+   this exactly the three-way merge `git stash pop` performs, computed entirely in the object
+   database with no worktree writes and no side effects.
 3. Exit 0 → **"will apply cleanly"**; the flow runs stash → switch → pop automatically.
    Exit 1 → **"will conflict in these files: …"**; we list them and let the user choose
    stash-and-switch-without-popping (the stash stays safely in the list) or cancel.
-4. The prediction is exact, not heuristic — it is the same merge git would run — so the UI
-   states it as fact. This is what the 2.38 floor (§4.2) buys.
+4. The prediction is exact **about that three-way merge**, not heuristic, so the UI states it
+   as fact for that part — this is what the 2.38 floor (§4.2) buys. Two failure modes the merge
+   itself structurally cannot see are handled as pre-flight **blockers**, computed by simple set
+   intersection over data already fetched, not folded into the prediction as a caveat: an
+   untracked file the stash carries (`stash^3`) that already exists in the worktree with
+   different content, and a dirty tracked path that overlaps the stash's own changed paths. The
+   untracked case is **not atomic** — a real pop applies the tracked half, fails restoring the
+   untracked half, and keeps the stash — so it is reported as a partial-application outcome, not
+   a plain failure.
 
-If a pop is executed and does conflict anyway (a race), we report it, and critically: `pop`
-that conflicts **does not drop the stash** — we say so, so the user knows their work is still
-recoverable.
+If a pop is executed and does conflict anyway (a race, or the untracked/dirty-overlap blocker
+was forced through), we report it, and critically: `pop` that conflicts **does not drop the
+stash** — we say so, so the user knows their work is still recoverable. A conflicting pop writes
+its conflict markers to **stdout** with **stderr left empty** and no state file behind but
+`AUTO_MERGE` — there is no `Continue`/`Abort` for it, unlike a real merge/rebase/revert; the
+remedy is resolving in the editor by hand (the kept stash stands in for a rollback).
 
 ### 7.7 Reset
 
@@ -1761,7 +1788,7 @@ implementing it:
 | Reset (any mode) | previous HEAD from the reflog; `reset --hard`/`--soft` back to it (7.7) |
 | Branch delete | the sha we recorded before deleting; `git branch <name> <sha>` |
 | Tag delete | same, recreating annotated tags from the captured tag object |
-| Stash drop | `git stash store` the dropped `stash@{n}` commit, which survives until gc |
+| Stash drop | `git stash store -m <%gs> <sha>` — the dropped commit's own sha **and** its reflog subject, both captured before the drop |
 
 Scope and honesty about its limits, both stated in the UI:
 
@@ -1780,6 +1807,15 @@ Scope and honesty about its limits, both stated in the UI:
   surprise, not a safety measure (P8/D51).
 - The captured recovery sha is shown alongside the button, so the user can recover manually
   even after the slot is cleared.
+- **A dropped stash's undo captures `%gs`, the reflog subject, never `%s`, the commit subject
+  minted once at push time.** The two diverge the instant a `stash store -m` runs (P9 probe 9)
+  — replaying with `%s` would silently rewrite the stash's own message on every undo. The
+  restored entry lands back at `stash@{0}`, never its original stack position, and the undo
+  announcement says so plainly rather than let the position mismatch read as a failure.
+- **The recovery object survives an ordinary `gc`** (`gc.pruneExpire` ≈ 2 weeks) but not
+  `gc --prune=now`. `undo.run` re-checks the recovery sha still resolves (`cat-file -e`)
+  immediately before replaying, so a pruned object is a clean refusal, never a bad replay
+  against nothing.
 
 Implemented as an `UndoSlot` in `core` populated by each op's executor, so adding a new
 destructive operation without an undo entry is a visible omission rather than a silent one.
@@ -2017,7 +2053,7 @@ Phases are sequential; each ends at a checkpoint.
 | **P6** | Refs & checkout | Branch list and **tag list with full tag manipulation (§7.9)**, create branch, switch branch, detached checkout, delete/rename, **revert (7.10)**, **linked-worktree detection (D12)**, the **undo slot (7.12) seeded by branch and tag deletion**, the **in-progress/conflicted-state banner with VS Code merge-editor delegation, continue and abort (7.11)**, and the full checkout pre-flight engine (§7.5). | Pre-flight classification unit-tested exhaustively; integration tests cover clean-carry, blocked-by-tracked, blocked-by-untracked, in-progress-op; tag create/delete/push incl. annotated and remote-delete asymmetry; revert incl. merge-parent selection; an induced conflicting revert reaches the banner, gates other operations, and both continues and aborts cleanly; undo restores a deleted branch and a deleted annotated tag. |
 | **P7** | Branch review | The sidebar webview view and its own activity-bar container (§2.1), **Review branch changes** on the branch-picker and ref-badge context menus, the base resolver (upstream → detected default branch → ask, never a silent guess) with the header base picker and `review.resolveBase` (§3.5), the `<base>..<branch>` range-scoped walk over P2's existing streaming machinery, and a commit list whose rows expand into **P5's file tree** and whose files open **P5's unified diff, "Open in editor" and line-mapped "Go to file" (D14a)** unchanged (§6.8). | Review opens from both context menus and the palette, first commits painted ≤300 ms on a 200-commit range; base resolves to the tracking branch when it names a different branch, to the detected default branch when it does not, and to the ask-state when neither exists; the override re-runs the comparison in place without reopening the view; a fully-merged branch reports "nothing to review" naming both refs rather than an empty list; every row expands to the same tree P5 renders (renames, merge parent selector, binary/LFS) and every file opens the same diff, with "Go to file" landing on the mapped line in the virtual blob for a branch that is not checked out; hiding the view drops the session and reopening re-resolves and re-walks (no rehydration path, §5.4); Playwright interaction + visual coverage at sidebar widths across all four theme kinds. |
 | **P8** | Remote ops | Fetch (incl. **opt-in background auto-fetch, default off**), push, decomposed pull with strategy selection, force-push with lease + `--force-if-includes`, protected branches, askpass path, progress + typed auth errors. | Met: integration tests against a local bare remote (and, for the auth/timing scenarios, a real `git http-backend` HTTP fixture) cover non-fast-forward rejection, a true lease violation, a `--force-if-includes` violation on a fetched-but-not-integrated remote move, hook rejection with the hook's own stderr preserved onto the result, two independent no-hang paths (a declined credential prompt and the broker's own timeout firing), cancelling a fetch mid-transfer with no orphaned `git` process and refs left consistent, a refused cancel mid-push, all three protected-branch outcomes (typed-confirmation match, mismatch, and plain push left ungated), the auto-fetch scheduler's focused/hidden/busy-skip/disable-after-failure guardrails, all three pull strategies incl. ff-only's diverged refusal, and `--prune-tags` off by default. No operation can hang on a prompt. Full checklist in `docs/plans/P8.md`'s own Findings. |
-| **P9** | Stash | Stash create (incl. `-u`, message, pathspec), list, show, apply/pop/drop/branch, stashes rendered in the graph, and the pop-prediction engine via `merge-tree` (§7.6) wired into checkout resolution. | Prediction verified against actually-executed pops across clean and conflicting cases; a dropped stash is recoverable through the undo slot. |
+| **P9** | Stash | **Done.** Stash create (incl. `-u`, message, pathspec), list, show, apply/pop/drop/branch, stashes rendered in the graph and selectable like a commit (`StashDetailPane.vue`), and the pop-prediction engine via `merge-tree --merge-base=<stash^>` (§7.6) wired into checkout resolution (`stashAndCarry`) and pull's own stash-and-carry route. | Met — `tests/integration/stashLifecycle.test.ts` (W18): clean and conflicting predictions agree with the real executed pop, the `--merge-base` regression is pinned directly, the untracked-collision and local-changes-overwritten blockers are both proven forceable with their documented (non-atomic vs. atomic) outcomes, and `stash branch`'s own non-atomicity is reproduced faithfully. `tests/integration/stashUndo.test.ts` (W19): a dropped stash is recoverable through the undo slot, landing at `stash@{0}` with its original reflog message; a pruned recovery object is refused cleanly; the slot is cleared by the very next op; the byte-identical-shas edge case is pinned as a known, documented limitation rather than silently fixed or ignored. |
 | **P10** | Reset | Soft/mixed/hard with per-mode consequence copy, pre-flight counts, typed confirmation for hard-with-dirty, reflog-backed undo completing the undo slot (7.12). **Also picks up cherry-pick (single commit, §7.13)** — named as a v1 operation with no phase since P6 shipped without it; not designed yet, but reuses P6's sequencer state reader, conflict banner and `OpResult` shape rather than inventing a second mechanism. | Integration tests assert repository state per mode; undo restores; guarded during in-progress operations. Cherry-pick: same conflict-banner/continue/abort path proven for revert, exercised for cherry-pick too. |
 | **P11** | Search | Input with case/whole-word/regex toggles, commit/refs(branches+tags)/both scope, hybrid client-side + git-backed matching, next/prev navigation, live regex validation, abort-on-supersede. | Semantics table fully covered by tests (each toggle × scope); ≤120 ms budget met; malformed regex never throws. |
 | **P12** | GitHub PR links | Branch → pull request resolution (§6.7): GitHub-remote detection from `origin`, the `GitHubAuth` port over VS Code's built-in GitHub authentication provider (D31), the REST lookup, the per-branch cache invalidated by the watcher, `branch.resolvePr` (§3.5), the `#123` badge on branch-picker rows and message-column ref badges opening the PR via `ExternalOpener` (D32), `kiraVersion.github.enabled`, and PR number/title matching added to §7.8's `Refs` scope. | A branch with a pull request shows its badge in both places, distinguishes open/merged/closed, and opens the PR URL externally; search finds that branch by PR number and title within the ≤120 ms budget with no per-keystroke network call; no GitHub remote, no matching PR, the setting off, or a declined session each produce no badge, no request and no repeat prompt, with the rest of the app unaffected; the session is requested on first use only, never at activation, verified by an activation-time assertion. |
@@ -2097,6 +2133,12 @@ deliberately deferred rather than left undecided.**
 | D52 | What protected branches gate | **Force-push (lease and plain) and remote-branch deletion; never plain push.** D19 settled the character (typed confirmation, friction not prohibition) but not the scope. Gating ordinary fast-forward pushes to `main` would make the confirmation reflexive and worthless. Matching is a pure `core` function with `*`-not-crossing-`/` globs, returning the matched pattern so the dialog can name it; enforcement is re-checked host-side because a pre-flight is advice, not a lock. |
 | D53 | The askpass path, and why it cannot hang | **A broker + `GIT_ASKPASS` shim over a unix socket, with four independent no-hang guarantees**: `GIT_TERMINAL_PROMPT=0`; `detached`/`setsid` leaving the child with no controlling terminal; the broker exiting non-zero on timeout or dismissal (probed: git does not retry, it dies with `terminal prompts disabled`); and op-level cancel. A user's own `core.askPass`/`GIT_ASKPASS` is never overridden (§4.1). Windows ships a `.bat` shim without CI coverage. |
 | D54 | One new port, and the three §3.3 predicted that P8 does not add | **`CredentialPrompt` only.** Not `Secrets` — we store no credential, ever; git's own helpers do that better and interposing would hold a user's secret in our process for no gain. Not `Notifications` — progress renders in-webview in the toolbar, per P6's in-webview-dialogs precedent, which keeps it harness-testable and screenshottable. Not `GitHubAuth` — P8 is host-agnostic git plumbing, not a forge integration. |
+| D55 | Stash operations route through `op.run`'s union, not a new request key | **`op.run`, the same key checkout/branch/tag/revert already use.** D51's reasoning for `remote.run` inverts here: `runOp`'s unconditional undo-slot write is exactly what `stashDrop` needs and exactly what the other four stash kinds should do (clear it). Adding a `stash.run` would mean reimplementing the undo capture and the read-back for no gain — stash ops are local, sub-second, unkillable and progress-free, unlike the remote ops D51 carved out. |
+| D56 | The pop prediction always passes `--merge-base=<stash^>` | **Non-negotiable, not an optional refinement.** Left to itself git picks `merge-base(target, stash)`, an ancestor of the stash's real base whenever the target has diverged from it, against which the stash's own diff reads as empty — reporting a genuinely conflicting pop as clean (P9 probe 2). §7.6's "exact, not heuristic" holds only under this exact argv. |
+| D57 | The two prediction gaps are pre-flight blockers, not caveats folded into the prediction | **Blockers, computed by set intersection (§7.5's D∩T pattern), never a fuzzier prediction union.** An untracked-file collision and a dirty worktree path overlapping the stash's own changes are both structurally invisible to a three-way merge-tree — modelling them as a "maybe" on the prediction itself would weaken a promise the 2.38 floor was bought to make. The residual TOCTOU gap (the pre-flight and the real pop still run as two separate spawns) is closed by post-op reconciliation: every executed pop/apply is checked against its own prediction, and any disagreement is announced explicitly rather than silently trusted. |
+| D58 | Stack-mutating stash operations are addressed as `stash@{N}`, never a raw sha | **`pop`, `drop` and `branch` all take the stack index; `apply` and `show` may take the sha.** Git itself refuses a raw sha for `pop`/`drop` — and `stash branch <name> <sha>` is worse, succeeding while silently skipping the drop (P9 probe 8). Every stack-mutating request also carries the sha, verified against `rev-parse stash@{N}` immediately before any write; a mismatch is an `earlyError` with nothing spawned, rather than mutating whatever now happens to sit at that index. |
+| D59 | The stash list is its own request, not part of `refs.list` | **A dedicated `stash.list` returning `StashEntry[]`.** `refs/stash` is one ref with a reflog stack behind it; `RefRow`'s fields (upstream, track, `checkedOutIn`, annotation) are all meaningless for it, and `for-each-ref` sees only the tip. In the graph, `DecorationRef` gains `{kind: "stash", index}` rather than a second variant — a stash decorates a commit the way a branch tip does, and the missing piece was identity (which stack position), not kind — synthesised by sha membership, since `%D` decorates only `stash@{0}`. |
+| D60 | Undo of a drop captures the reflog subject, never the commit subject | **`%gs`, not `%s`.** The two are identical at push time but diverge the instant a `stash store -m` runs (P9 probe 9) — capturing `%s` would silently rewrite the stash's own message on every undo replay. The restored entry lands at `stash@{0}`, never its original stack position, and the undo announcement states that plainly rather than let the position mismatch read as a failure. |
 
 ### 11.3 Behaviour and safety
 

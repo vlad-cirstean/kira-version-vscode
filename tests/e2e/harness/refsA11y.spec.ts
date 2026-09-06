@@ -157,6 +157,59 @@ test.describe("axe: refs & checkout surfaces, no serious/critical violations", (
       await expect(page.getByTestId("conflict-banner")).toBeVisible();
       expect(await unexpectedSeriousViolations(page, kind)).toEqual([]);
     });
+
+    // `docs/plans/P9.md` W14's own "Done when: ... Playwright's accessibility pass is green on
+    // the new dialog" — `StashDialog.vue`'s three modes and the `stash` scenario's own blocked-
+    // checkout target both count as "new" here.
+    test(`StashDialog open (create mode): ${kind} (${scanLabel(kind)})`, async ({ page }) => {
+      await page.goto(`/?scenario=stash&theme=${kind}`);
+      await ready(page);
+      await page.getByTestId("stash-changes-button").click();
+      await expect(page.locator('[aria-labelledby="kv-stash-dialog-title"]')).toBeVisible();
+      expect(await unexpectedSeriousViolations(page, kind)).toEqual([]);
+    });
+
+    test(`StashDialog open (blocked pop): ${kind} (${scanLabel(kind)})`, async ({ page }) => {
+      await page.goto(`/?scenario=stash&theme=${kind}`);
+      await ready(page);
+      await openPicker(page);
+      await page
+        .locator(".kv-branch-row", { hasText: "Backend refactor (WIP)" })
+        .locator('[aria-label="More actions"]')
+        .click();
+      await page.getByRole("menuitem", { name: "Pop" }).click();
+      await expect(page.locator('[aria-labelledby="kv-stash-dialog-title"]')).toContainText(
+        "would be overwritten",
+      );
+      expect(await unexpectedSeriousViolations(page, kind)).toEqual([]);
+    });
+
+    // No PullDialog-stashAndCarry a11y coverage here: `remote.pullPreflight` (both the real
+    // `RepoService` and this mock) always computes its blockers against the settings-resolved
+    // strategy — `resolvePullStrategy`'s own ladder — never against a strategy picked ad hoc from
+    // `PullStrategyPicker.vue`'s popover (`OpsState.runPull`'s `explicitStrategy` only changes
+    // what the *run* uses, after the preflight already answered). The harness also has no
+    // per-scenario settings-override mechanism (`mockBridge.ts`'s own "no per-scenario settings
+    // override mechanism yet" doc comment on `remotePullPreflight`), so no scenario here can make
+    // `dirtyNonFastForward` fire through the UI. `docs/plans/P9.md` W14's own "Done when" only
+    // requires the a11y pass on the new dialog (`StashDialog.vue`) — CheckoutDialog's coverage
+    // above is this suite's own extra diligence, not a second architectural gap to chase.
+    test(`CheckoutDialog open (stashAndCarry route offered): ${kind} (${scanLabel(kind)})`, async ({
+      page,
+    }) => {
+      await page.goto(`/?scenario=stash&theme=${kind}`);
+      await ready(page);
+      await openPicker(page);
+      await page
+        .locator(".kv-branch-row", { hasText: "feature" })
+        .locator(".kv-branch-row-main")
+        .click();
+      const modal = page.locator('[aria-labelledby="kv-checkout-dialog-title"]');
+      await expect(
+        modal.getByRole("button", { name: "Stash changes and check out" }),
+      ).toBeVisible();
+      expect(await unexpectedSeriousViolations(page, kind)).toEqual([]);
+    });
   }
 });
 

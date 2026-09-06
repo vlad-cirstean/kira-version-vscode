@@ -62,12 +62,24 @@ export interface RefListSection {
   readonly hiddenCount: number;
 }
 
+/** The generic half of `capSection` below — split out at P9 W14 so `StashList.vue` gets the same
+ *  "N more" cap over `StashEntry[]` (an already-ordered stack, never filtered or re-sorted) without
+ *  a second list implementation, exactly as `docs/plans/P9.md`'s W14 bullet asks for. `capSection`
+ *  itself is kept as the thin `RefRow`-typed wrapper every existing caller (`BranchPicker.vue`,
+ *  `TagList.vue`) already uses, unchanged. */
+export function capItems<T>(
+  items: readonly T[],
+  cap: number = REF_LIST_SECTION_CAP,
+): { readonly visible: readonly T[]; readonly hiddenCount: number } {
+  if (items.length <= cap) return { visible: items, hiddenCount: 0 };
+  return { visible: items.slice(0, cap), hiddenCount: items.length - cap };
+}
+
 export function capSection(
   rows: readonly RefRow[],
   cap: number = REF_LIST_SECTION_CAP,
 ): RefListSection {
-  if (rows.length <= cap) return { visible: rows, hiddenCount: 0 };
-  return { visible: rows.slice(0, cap), hiddenCount: rows.length - cap };
+  return capItems(rows, cap);
 }
 
 export interface RefListSections {

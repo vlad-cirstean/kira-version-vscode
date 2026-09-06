@@ -56,8 +56,10 @@ test.describe("checkout pre-flight", () => {
       modal.getByRole("button", { name: "Discard changes and check out" }),
     ).toBeVisible();
     await expect(modal.getByRole("button", { name: "Cancel" })).toBeVisible();
-    // §7.5/P6: no stash route exists yet (a future version's own addition, per the dialog's own
-    // disclosure note) — there is no actionable stash button/route, only Discard and Cancel.
+    // §7.5/P9: `dirty.ts`'s own static preflight fixture for this target still lists only
+    // `routes: ["discard"]` — it predates P9 and was never asked to add `"stashAndCarry"` — so
+    // this scenario continues to offer only Discard and Cancel. `stashE2e.spec.ts` exercises the
+    // stash button itself, on a scenario whose preflight actually names that route.
     await expect(modal.getByRole("button", { name: /stash/i })).toHaveCount(0);
 
     await modal.getByRole("button", { name: "Cancel" }).click();

@@ -29,7 +29,7 @@ export type DecorationRef =
   | { readonly kind: "remoteBranch"; readonly name: string }
   | { readonly kind: "tag"; readonly name: string }
   | { readonly kind: "head" }
-  | { readonly kind: "stash" };
+  | { readonly kind: "stash"; readonly index: number };
 
 /** The settings schema's keys and value types (D25, W4) — a structural copy of `core`'s
  *  generated `Settings` type, kept in step by wireConformance.test.ts. */
@@ -44,6 +44,10 @@ export interface SettingsSnapshot {
   readonly "kiraVersion.fetch.autoInterval": number;
   readonly "kiraVersion.pull.strategy": "auto" | "ff-only" | "merge" | "rebase";
   readonly "kiraVersion.protectedBranches": readonly string[];
+  /** P9 W6: the Stash dialog's "include untracked files" checkbox default. */
+  readonly "kiraVersion.stash.includeUntracked": boolean;
+  /** P9 W6: whether stash entries appear as nodes in the commit graph (OQ5 default: true). */
+  readonly "kiraVersion.stash.showInGraph": boolean;
 }
 
 export interface RepoSummary {
@@ -319,6 +323,60 @@ export interface RevertPreflight {
 }
 
 // ---------------------------------------------------------------------------------------
+// P9 — stash (§7.6). Structural copies of `@kira-version/core`'s own; `RefKind` stays
+// untouched (D59) — a stash is its own request, never part of `refs.list`.
+// ---------------------------------------------------------------------------------------
+
+export interface StashEntry {
+  readonly index: number;
+  readonly sha: string;
+  readonly baseSha: string;
+  /** `baseSha`'s own commit subject — see `@kira-version/core`'s own `StashEntry.baseSubject`
+   *  doc comment (P9 W14). */
+  readonly baseSubject: string;
+  readonly indexSha: string;
+  readonly untrackedSha: string | undefined;
+  readonly message: string;
+  readonly branch: string | null;
+  readonly timestamp: number;
+  readonly fileCount: number;
+  readonly includedUntracked: boolean;
+}
+
+export type StashPopBlocker =
+  | { readonly kind: "untrackedCollision"; readonly paths: readonly string[] }
+  | { readonly kind: "localChangesWouldBeOverwritten"; readonly paths: readonly string[] }
+  | { readonly kind: "inProgressOperation"; readonly operation: InProgressOperation };
+
+export interface StashPopPreflight {
+  readonly stashSha: string;
+  readonly stashIndex: number;
+  /** The commit the stash would be applied onto — HEAD today, or the checkout target when this
+   *  is the `stashAndCarry` route's second step. */
+  readonly targetSha: string;
+  /** §7.6's exact prediction. Covers the WORKTREE MERGE ONLY — never `--index` restoration and
+   *  never the two blockers below. */
+  readonly prediction:
+    | { readonly kind: "clean" }
+    | { readonly kind: "conflicts"; readonly paths: readonly string[] }
+    | { readonly kind: "unknown"; readonly reason: string };
+  readonly blockers: readonly StashPopBlocker[];
+  readonly verdict: "clean" | "willConflict" | "blocked";
+}
+
+export interface StashBranchPreflight {
+  readonly name: {
+    readonly valid: boolean;
+    readonly error: string | undefined;
+    readonly exists: boolean;
+  };
+  /** The `checkout -b <name> <stash>^` half. No pop prediction exists: the branch starts at the
+   *  stash's own base, so the apply is clean by construction (probe 11). */
+  readonly checkout: CheckoutPreflight;
+  readonly verdict: "clean" | "invalidName" | "blocked";
+}
+
+// ---------------------------------------------------------------------------------------
 // P8 — remote-op vocabulary, and pull/push pre-flight (§7.3/§7.4). Structural copies of
 // `@kira-version/core`'s own (B3 — core and ipc both depend on nothing, so neither imports the
 // other); `tests/unit/ipc/wireConformance.test.ts` keeps the two in step.
@@ -467,7 +525,35 @@ export type OpRequest =
       readonly noCommit: boolean;
     }
   | { readonly kind: "opContinue" }
-  | { readonly kind: "opAbort" };
+  | { readonly kind: "opAbort" }
+  | {
+      readonly kind: "stashPush";
+      /** Undefined → git's own `WIP on <branch>: …`. */
+      readonly message: string | undefined;
+      readonly includeUntracked: boolean;
+      readonly keepIndex: boolean;
+      /** Joined after a literal `--`. Empty ⇒ the whole worktree. */
+      readonly paths: readonly string[];
+    }
+  /** `apply` accepts a raw sha, so this addresses by sha and needs no index guard (probe 8). */
+  | { readonly kind: "stashApply"; readonly sha: string; readonly restoreIndex: boolean }
+  /** `pop` REFUSES a raw sha, so the argv must use `stash@{index}` and the service verifies
+   *  `rev-parse stash@{index} === sha` immediately before writing (probe 8). */
+  | {
+      readonly kind: "stashPop";
+      readonly sha: string;
+      readonly index: number;
+      readonly restoreIndex: boolean;
+    }
+  | { readonly kind: "stashDrop"; readonly sha: string; readonly index: number }
+  /** Addressed by `stash@{index}`: given a raw sha, `stash branch` applies but silently never
+   *  drops (probe 8). */
+  | {
+      readonly kind: "stashBranch";
+      readonly branch: string;
+      readonly sha: string;
+      readonly index: number;
+    };
 
 export type OpErrorKind =
   | "AuthFailed"
@@ -501,6 +587,19 @@ export type OpErrorKind =
   | "ProtectedBranch"
   /** P8: a remote op was cancelled mid-flight (D50) — never a git-reported failure either. */
   | "Cancelled"
+  /** P9: a pop/apply merged with conflicts. Deliberately NOT detected from a stderr pattern — a
+   *  conflicting pop writes to stdout and leaves stderr empty (probe 5) — the service classifies
+   *  it from `exitCode !== 0` plus a post-op status read-back finding unmerged paths. The stash
+   *  is ALWAYS kept (§7.6); the message says so. */
+  | "StashConflict"
+  /** P9: `apply --index`/`pop --index` onto an already-conflicted index —
+   *  `error: conflicts in index. Try without --index.` (probe 10). Distinct from `StashConflict`:
+   *  git names its own remedy exactly (retry the same op with `restoreIndex: false`). */
+  | "StashIndexConflict"
+  /** P9: untracked files in the way of restoring the stash's own untracked half — the ONE
+   *  non-atomic failure in the phase: the tracked half was already applied and the stash was
+   *  kept (probe 3). */
+  | "StashUntrackedCollision"
   | "Unknown";
 
 export interface UndoSlotSnapshot {
@@ -769,6 +868,27 @@ export type Contract = {
     "preflight.revert": {
       params: { repoId: string; shas: readonly string[]; mainline?: number };
       result: RevertPreflight;
+    };
+    "stash.list": {
+      params: { repoId: string };
+      /** One spawn: `stash list -z --numstat -M -C --format=…` (probe 12). */
+      result: { entries: readonly StashEntry[] };
+    };
+    /** The stash's own file list for the detail pane — tracked and, with `-u`, untracked, from
+     *  one `stash show --numstat/--name-status -z -u -M -C` pair (probe 12). */
+    "stash.show": {
+      params: { repoId: string; sha: string };
+      result: { sha: string; changes: readonly FileChange[] };
+    };
+    /** `targetSha` omitted ⇒ HEAD. Supplied by the `stashAndCarry` route, which predicts against
+     *  the commit it is about to switch to. */
+    "preflight.stashPop": {
+      params: { repoId: string; sha: string; index: number; targetSha?: string };
+      result: StashPopPreflight;
+    };
+    "preflight.stashBranch": {
+      params: { repoId: string; sha: string; branch: string };
+      result: StashBranchPreflight;
     };
     "op.run": {
       params: { repoId: string; op: OpRequest };

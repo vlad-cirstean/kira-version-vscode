@@ -5,6 +5,8 @@ export type { LaneAssignment } from "./graph/lanes.ts";
 export { assignLanes } from "./graph/lanes.ts";
 export type { LayoutAppendResult } from "./graph/layout.ts";
 export { layoutAppend, layoutTransferList } from "./graph/layout.ts";
+export type { StashRowFilter } from "./graph/stashRows.ts";
+export { applyStashRowFilter, buildStashRowFilter } from "./graph/stashRows.ts";
 export type {
   ColorState,
   EdgeKind,
@@ -127,11 +129,13 @@ export type { PullConfigValues } from "./preflight/pull.ts";
 export { buildPullPreflight, resolvePullStrategy } from "./preflight/pull.ts";
 export { classifyPush } from "./preflight/push.ts";
 export { classifyRevert } from "./preflight/revert.ts";
+export { classifyStashBranch, classifyStashPop } from "./preflight/stashPop.ts";
 export { classifyTagCreate, validateRefName } from "./preflight/tag.ts";
 export type {
   CheckoutBlocker,
   CheckoutPreflight,
   DirtyPath,
+  MergeOutcomePrediction,
   PullBlocker,
   PullPreflight,
   PullRoute,
@@ -139,6 +143,9 @@ export type {
   RevertParentChoice,
   RevertPrediction,
   RevertPreflight,
+  StashBranchPreflight,
+  StashPopBlocker,
+  StashPopPreflight,
   TagCreatePreflight,
 } from "./preflight/types.ts";
 export type {

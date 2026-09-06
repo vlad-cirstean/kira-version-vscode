@@ -12,7 +12,7 @@
  * picker's own label, the rendered rows themselves).
  */
 import { SETTINGS } from "@kira-version/core";
-import type { HostKind, Transport } from "@kira-version/ipc";
+import type { HostKind, StashEntry, Transport } from "@kira-version/ipc";
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { BridgeClient } from "./bridge/client.ts";
 import AppToolbar from "./components/AppToolbar.vue";
@@ -21,8 +21,10 @@ import ConflictBanner from "./components/ConflictBanner.vue";
 import BranchDialog from "./components/dialogs/BranchDialog.vue";
 import CheckoutDialog from "./components/dialogs/CheckoutDialog.vue";
 import ForcePushDialog from "./components/dialogs/ForcePushDialog.vue";
+import PullDialog from "./components/dialogs/PullDialog.vue";
 import RenameRefDialog from "./components/dialogs/RenameRefDialog.vue";
 import RevertDialog from "./components/dialogs/RevertDialog.vue";
+import StashDialog from "./components/dialogs/StashDialog.vue";
 import TagDialog from "./components/dialogs/TagDialog.vue";
 import EmptyRepositoryPanel from "./components/EmptyRepositoryPanel.vue";
 import GitBlockedPanel from "./components/GitBlockedPanel.vue";
@@ -31,7 +33,13 @@ import NoRepositoryPanel from "./components/NoRepositoryPanel.vue";
 import DetailPane from "./components/DetailPane.vue";
 import { remoteCheckoutTarget } from "./components/refListModel.ts";
 import RowContextMenu from "./components/RowContextMenu.vue";
-import { buildRefMenu, buildRowMenu, type MenuSection } from "./components/rowMenuModel.ts";
+import {
+  buildRefMenu,
+  buildRowMenu,
+  buildStashMenu,
+  type MenuSection,
+} from "./components/rowMenuModel.ts";
+import StashDetailPane from "./components/StashDetailPane.vue";
 import { DetailState } from "./state/detail.ts";
 import { type DetailActions, createDetailActions } from "./state/detailActions.ts";
 import { GraphViewState } from "./state/graphView.ts";
@@ -44,6 +52,7 @@ import { RefsState } from "./state/refs.ts";
 import { RepoState } from "./state/repo.ts";
 import { SelectionState } from "./state/selection.ts";
 import { SettingsState } from "./state/settings.ts";
+import { StashState } from "./state/stash.ts";
 import {
   type ColumnWidths,
   DEFAULT_COLUMN_WIDTHS,
@@ -80,6 +89,9 @@ const actions = shallowRef<DetailActions | undefined>(undefined);
 // reset them via `setRepoId` rather than replacing either instance.
 const refsState = new RefsState(bridge);
 const opsState = new OpsState(bridge, refsState);
+// `docs/plans/P9.md` W13: one `StashState` for the life of this component, exactly like
+// `refsState`/`opsState` above — reset via `setRepoId` rather than replaced.
+const stashState = new StashState(bridge);
 
 const repoState = shallowRef<RepoState | undefined>(undefined);
 const settingsState = shallowRef<SettingsState | undefined>(undefined);
@@ -104,6 +116,15 @@ const FALLBACK_PAGE_SIZE = SETTINGS["kiraVersion.graph.pageSize"].default;
 
 const pageSize = computed(
   () => settingsState.value?.settings.value["kiraVersion.graph.pageSize"] ?? FALLBACK_PAGE_SIZE,
+);
+
+/** `StashDialog.vue`'s create mode default — same "read the schema's own default as the fallback"
+ *  shape as `pageSize` above. */
+const FALLBACK_INCLUDE_UNTRACKED = SETTINGS["kiraVersion.stash.includeUntracked"].default;
+const stashIncludeUntrackedDefault = computed(
+  () =>
+    settingsState.value?.settings.value["kiraVersion.stash.includeUntracked"] ??
+    FALLBACK_INCLUDE_UNTRACKED,
 );
 
 const commitGridRef = ref<InstanceType<typeof CommitGrid> | null>(null);
@@ -162,9 +183,29 @@ watch(graphView.loadedRows, () => {
 // requirement is satisfied — there is no special-case caching to write, the cache is simply never
 // invalidated because nothing here re-requests when nothing has actually changed.
 // ---------------------------------------------------------------------------------------
+/** OQ4: a stash node is selectable like a commit, but shows its OWN changes
+ *  (`StashDetailPane.vue`/`StashState`), not a commit diff — so this watch, unlike its P5
+ *  original, first checks whether the newly selected sha's row carries a `"stash"` decoration and
+ *  routes to `stashState.select` instead of `detailState.select` when it does, clearing whichever
+ *  of the two panes did not win (mirroring `StashState`'s own doc comment: "the two selections are
+ *  independent... `App.vue` decides which pane wins when both exist"). */
+function isStashSha(sha: string): boolean {
+  const row = graphView.store.rowOfSha(sha);
+  if (row === -1) return false;
+  return graphView.store.decorationAt(row).some((d) => d.kind === "stash");
+}
+
 watch(
   () => selection.sha.value,
-  (sha) => detailState.select(sha),
+  (sha) => {
+    if (sha !== null && isStashSha(sha)) {
+      stashState.select(sha);
+      detailState.select(null);
+    } else {
+      detailState.select(sha);
+      stashState.select(null);
+    }
+  },
 );
 
 watch(
@@ -173,6 +214,7 @@ watch(
     detailState.setRepoId(repoId);
     refsState.setRepoId(repoId);
     opsState.setRepoId(repoId);
+    stashState.setRepoId(repoId);
   },
   { immediate: true },
 );
@@ -270,6 +312,65 @@ async function onCommitMenuSelect(id: string): Promise<void> {
       return;
   }
 }
+
+// ---------------------------------------------------------------------------------------
+// `docs/plans/P9.md` W14: the stash-badge context menu — `CommitGrid.vue`'s own hit-test
+// (`refBadges.ts`'s `refKind === "stash"`) reports only the row (own doc comment: "the row itself
+// IS the stash commit"), so the full `StashEntry` is resolved here by matching the row's sha
+// against `stashState.entries` (`commitAt`/`decorationAt` alone only give sha + stack index, not
+// `message`/`timestamp`/`baseSubject`/etc.).
+// ---------------------------------------------------------------------------------------
+const stashContextMenuState = ref<{ row: number; x: number; y: number } | undefined>(undefined);
+const stashBranchTarget = ref<StashEntry | undefined>(undefined);
+
+function handleStashContextMenu(detail: { row: number; x: number; y: number }): void {
+  stashContextMenuState.value = detail;
+}
+
+const stashMenuSections = computed<MenuSection[]>(() => {
+  if (!stashContextMenuState.value) return [];
+  return buildStashMenu(opsState.statusSummary.value?.inProgress ?? null);
+});
+
+function stashEntryForContextMenu(): StashEntry | undefined {
+  const state = stashContextMenuState.value;
+  if (!state) return undefined;
+  const commit = graphView.store.commitAt(state.row);
+  return stashState.entries.value.find((entry) => entry.sha === commit.sha);
+}
+
+async function onStashMenuSelect(id: string): Promise<void> {
+  const entry = stashEntryForContextMenu();
+  stashContextMenuState.value = undefined;
+  if (!entry) return;
+  switch (id) {
+    case "stashApply":
+      await opsState.runStashApply(entry);
+      return;
+    case "stashPop":
+      await opsState.runStashPop(entry);
+      return;
+    case "stashDrop":
+      await opsState.runStashDrop(entry);
+      return;
+    case "stashBranch":
+      stashBranchTarget.value = entry;
+      return;
+    case "stashShow":
+      stashState.select(entry.sha);
+      return;
+    default:
+      return;
+  }
+}
+
+/** `StashList.vue`'s own "Create branch from stash…" row action, bubbled through
+ *  `BranchPicker.vue` — same target field the badge context menu's `stashBranch` case sets. */
+function handleBranchFromStash(entry: StashEntry): void {
+  stashBranchTarget.value = entry;
+}
+
+const stashCreateOpen = ref(false);
 
 // ---------------------------------------------------------------------------------------
 // `docs/plans/P7.md` W14: the ref-badge context menu — a right-click that lands on a
@@ -555,9 +656,14 @@ function toggleDetail(): void {
  *  is outside the grid's host and so outside its own keydown listener's reach) call — "the
  *  ordering lives in one handler in App.vue" (§6.6's own words), not duplicated per input
  *  source. */
+const selectionIsStash = computed(() => stashState.selected.value !== undefined);
+
 function closeDetail(): void {
-  if (detailState.mode.value === "diff") {
-    detailState.showTree();
+  if (
+    selectionIsStash.value ? stashState.mode.value === "diff" : detailState.mode.value === "diff"
+  ) {
+    if (selectionIsStash.value) stashState.showTree();
+    else detailState.showTree();
     return;
   }
   detailOpen.value = false;
@@ -658,6 +764,7 @@ onBeforeUnmount(() => {
   graphView.dispose();
   refsState.dispose();
   opsState.dispose();
+  stashState.dispose();
   repoState.value?.dispose();
   settingsState.value?.dispose();
   bridge.dispose();
@@ -699,8 +806,11 @@ onBeforeUnmount(() => {
           :repo-state="repoState"
           :refs-state="refsState"
           :ops-state="opsState"
+          :stash-state="stashState"
           :actions="actions"
           @repo-opened="handleRepoOpened"
+          @stash-changes="stashCreateOpen = true"
+          @branch-from-stash="handleBranchFromStash"
         />
         <EmptyRepositoryPanel :branch-name="repoState.activeRepo.value.head.name" />
       </template>
@@ -712,8 +822,11 @@ onBeforeUnmount(() => {
           :repo-state="repoState"
           :refs-state="refsState"
           :ops-state="opsState"
+          :stash-state="stashState"
           :actions="actions"
           @repo-opened="handleRepoOpened"
+          @stash-changes="stashCreateOpen = true"
+          @branch-from-stash="handleBranchFromStash"
         />
         <ConflictBanner
           :ops="opsState"
@@ -739,6 +852,7 @@ onBeforeUnmount(() => {
               @copy-sha="handleCopySha"
               @context-menu="handleGridContextMenu"
               @ref-context-menu="handleGridRefContextMenu"
+              @stash-context-menu="handleStashContextMenu"
             />
             <LoadMoreButton :graph-view="graphView" :page-size="pageSize" />
             <span class="kv-visually-hidden" data-testid="chunk-source">{{
@@ -767,6 +881,12 @@ onBeforeUnmount(() => {
               @keydown="handleDetailHandleKeydown"
             ></div>
             <p v-if="!hasSelection" class="kv-detail-empty">Select a commit to see its details.</p>
+            <StashDetailPane
+              v-else-if="selectionIsStash && actions"
+              :stash="stashState"
+              :store="graphView.store"
+              :actions="actions"
+            />
             <DetailPane
               v-else-if="actions"
               :detail-state="detailState"
@@ -780,10 +900,18 @@ onBeforeUnmount(() => {
         <div
           v-if="detailOpen && breakpoint === 'overlay'"
           class="kv-detail-drawer"
-          :class="{ 'kv-detail-drawer--diff': detailState.mode.value === 'diff' }"
+          :class="{
+            'kv-detail-drawer--diff': (selectionIsStash ? stashState.mode.value : detailState.mode.value) === 'diff',
+          }"
         >
           <aside class="kv-detail-region" data-testid="detail-region" aria-label="Commit detail">
             <p v-if="!hasSelection" class="kv-detail-empty">Select a commit to see its details.</p>
+            <StashDetailPane
+              v-else-if="selectionIsStash && actions"
+              :stash="stashState"
+              :store="graphView.store"
+              :actions="actions"
+            />
             <DetailPane
               v-else-if="actions"
               :detail-state="detailState"
@@ -812,6 +940,15 @@ onBeforeUnmount(() => {
           :title="refContextMenuState.name"
           @select="onRefMenuSelect"
           @close="refContextMenuState = undefined"
+        />
+        <RowContextMenu
+          v-if="stashContextMenuState"
+          :sections="stashMenuSections"
+          :x="stashContextMenuState.x"
+          :y="stashContextMenuState.y"
+          label="Stash actions"
+          @select="onStashMenuSelect"
+          @close="stashContextMenuState = undefined"
         />
         <div
           v-if="forceDeleteRefCandidate"
@@ -844,6 +981,15 @@ onBeforeUnmount(() => {
         <CheckoutDialog :ops="opsState" />
         <RevertDialog :ops="opsState" />
         <ForcePushDialog :ops="opsState" />
+        <PullDialog :ops="opsState" />
+        <StashDialog
+          :ops="opsState"
+          :create-open="stashCreateOpen"
+          :include-untracked-default="stashIncludeUntrackedDefault"
+          :branch-target="stashBranchTarget"
+          @close-create="stashCreateOpen = false"
+          @close-branch="stashBranchTarget = undefined"
+        />
       </template>
     </template>
   </div>
