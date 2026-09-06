@@ -37,7 +37,10 @@ function fnv1aWord(input: string, seed: number): number {
   return hash >>> 0;
 }
 
-function shaFor(name: string): string {
+// Exported (P11 W18) so tests/perf/graphUi.ts's `searchKeystrokeMs` sha-prefix probe can name a
+// real, known commit's sha without duplicating this hash — the same reason `chain`/`EPOCH_SECONDS`
+// above are already exported for that same script.
+export function shaFor(name: string): string {
   const input = `topology-fixture:${name}`;
   let hex = "";
   for (let word = 0; word < 5; word++) {

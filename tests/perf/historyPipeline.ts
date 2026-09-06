@@ -28,14 +28,19 @@ import { join } from "node:path";
 import { layoutAppend } from "../../packages/core/src/graph/layout.ts";
 import type { LayoutChunk, LayoutFrontier } from "../../packages/core/src/graph/types.ts";
 import { FakeLogger } from "../../packages/core/src/ports/testFakes.ts";
+import { matchCommitFields } from "../../packages/core/src/search/matcher.ts";
+import { compileQuery } from "../../packages/core/src/search/query.ts";
 import { defaultSettings } from "../../packages/core/src/settings/schema.ts";
 import { CommitStore } from "../../packages/core/src/store/commitStore.ts";
 import { locateGit } from "../../packages/git/src/discovery.ts";
+import { openGitDriver } from "../../packages/git/src/driver.ts";
 import { openLogSession } from "../../packages/git/src/logSession.ts";
 import { NodeFileWatcher } from "../../packages/git/src/nodeFileWatcher.ts";
 import { NodeProcessRunner } from "../../packages/git/src/nodeProcessRunner.ts";
+import { logScanArgs, parseScanRecord } from "../../packages/git/src/parse/log.ts";
 import { RepoService } from "../../packages/git/src/repoService.ts";
-import { detailWorkload, largeBranchy } from "../fixtures/generateRepo.ts";
+import { noopCatFileSession } from "../../packages/git/src/testFakes.ts";
+import { detailWorkload, largeBranchy, searchable } from "../fixtures/generateRepo.ts";
 
 const BASELINE_PATH = join(import.meta.dir, "historyPipeline.budget.json");
 const REGRESSION_TOLERANCE = 0.2; // 20%, matching run.ts's and parserThroughput.ts's §5.1 convention
@@ -63,6 +68,76 @@ interface Measurement {
   /** Median over 20 files from the many-files commit, one of them 5,000 lines. Recorded, not
    *  gated — §5.1 sets no budget for a per-file diff. */
   readonly fileDiffMs: number;
+  /** `docs/plans/P11.md` W18/probe 6 — the git-backed tail's own end-to-end cost against
+   *  `searchable(30_000)`: one `git log` scan, NUL-split, six-field-OR matched in JS. Recorded,
+   *  not gated — §5.1's ≤120ms budget is scoped to already-loaded history; this is the *other*
+   *  half `RepoService.searchCommits` (P11 W8) spawns on the debounced tail. */
+  readonly searchTailMs: number;
+  /** Time to the first matching row, not the whole scan — the number that actually matters for
+   *  "does the box feel responsive while the tail is still running": the scan streams, so a hit
+   *  near the walk's own start is visible long before `searchTailMs` settles. */
+  readonly searchTailFirstHitMs: number;
+}
+
+/**
+ * `docs/plans/P11.md` W18/probe 6's own methodology, re-run against `searchable(30_000)`: a
+ * driver instance `RepoService` never sees, `logScanArgs` + `parseScanRecord` +
+ * `matchCommitFields` — the exact three calls `RepoService.searchCommits` itself makes per row
+ * (`packages/git/src/repoService.ts`) — timed here directly rather than through that method,
+ * since a per-row timestamp (`searchTailFirstHitMs`) is not something its own aggregate result
+ * shape has anywhere to carry.
+ */
+async function measureSearchTail(
+  dir: string,
+  queryText: string,
+): Promise<{ readonly searchTailMs: number; readonly searchTailFirstHitMs: number }> {
+  const compiled = compileQuery({
+    text: queryText,
+    caseSensitive: false,
+    wholeWord: false,
+    regex: false,
+    scope: "commits",
+  });
+  if (compiled.kind !== "ok") throw new Error(`expected an ok query, got ${compiled.kind}`);
+  const runner = new NodeProcessRunner();
+  const resolution = await locateGit({ runner });
+  if (resolution.kind !== "ok") throw new Error("no usable system git found for this measurement");
+  const driver = openGitDriver(resolution.git, runner, dir, noopCatFileSession());
+  try {
+    const start = performance.now();
+    let searchTailFirstHitMs = -1;
+    let rows = 0;
+    let matches = 0;
+    const read = driver.read(logScanArgs({ kind: "scope", scope: "all" }));
+    for await (const record of read.records(0x00)) {
+      if (record.length === 0) continue;
+      rows++;
+      const parsed = parseScanRecord(record);
+      const fields = matchCommitFields(
+        {
+          sha: parsed.sha,
+          subject: parsed.subject,
+          body: parsed.body,
+          authorName: parsed.author.name,
+          authorEmail: parsed.author.email,
+          committerName: parsed.committer.name,
+          committerEmail: parsed.committer.email,
+        },
+        compiled,
+      );
+      if (fields.length > 0) {
+        matches++;
+        if (searchTailFirstHitMs < 0) searchTailFirstHitMs = performance.now() - start;
+      }
+    }
+    await read.done;
+    const searchTailMs = performance.now() - start;
+    if (rows !== 30_000) throw new Error(`expected 30000 rows scanned, got ${rows}`);
+    if (matches === 0) throw new Error(`query ${JSON.stringify(queryText)} matched nothing`);
+    return { searchTailMs, searchTailFirstHitMs };
+  } finally {
+    driver.dispose();
+  }
 }
 
 function median(samples: readonly number[]): number {
@@ -227,6 +302,10 @@ async function measure(): Promise<Measurement> {
     largeBranchy(COMMIT_COUNT, { commitGraph: false }).dir,
   );
   const { commitDetailMs, commitDetailCachedMs, fileDiffMs } = await measureCommitDetail();
+  const { searchTailMs, searchTailFirstHitMs } = await measureSearchTail(
+    searchable(30_000).dir,
+    "widget",
+  );
 
   return {
     firstPageMs: pageMs[0] as number,
@@ -241,6 +320,8 @@ async function measure(): Promise<Measurement> {
     commitDetailMs,
     commitDetailCachedMs,
     fileDiffMs,
+    searchTailMs,
+    searchTailFirstHitMs,
   };
 }
 
@@ -268,6 +349,8 @@ const RECORDED_ONLY_METRICS = [
   "firstPageMsNoGraph",
   "commitDetailCachedMs",
   "fileDiffMs",
+  "searchTailMs",
+  "searchTailFirstHitMs",
 ] as const;
 
 function report(actual: Measurement, baseline: Measurement): boolean {

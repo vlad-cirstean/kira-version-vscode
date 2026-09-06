@@ -123,6 +123,13 @@ interface Measurement {
    *  ceiling §5.1's `firstPaintMs` uses — it is that same budget applied to the review surface,
    *  not a new one. */
   readonly reviewFirstPaintMs: number;
+  /** `docs/plans/P11.md` W18 — §5.1's client-side search ceiling (hard part 4), worst of six
+   *  query shapes against a fully-loaded `hugeRepo` (20,000 rows). `hugeRepo`'s own row count
+   *  sits exactly at `ui/src/state/search.ts`'s `SKIP_TAIL_MAX_ROWS`, so once every page is
+   *  loaded the debounced git-backed tail is skipped for every shape measured here — this is the
+   *  client-side scan-and-render cost alone (probe 9b: 13-38ms for the matcher), not the tail's
+   *  own separate, unbudgeted latency (`historyPipeline.ts`'s `searchTailMs`). */
+  readonly searchKeystrokeMs: number;
 }
 
 const CEILINGS: Readonly<Record<string, number>> = {
@@ -134,6 +141,7 @@ const CEILINGS: Readonly<Record<string, number>> = {
   heapFirstPageMB: 80,
   heapFullMB: 250,
   reviewFirstPaintMs: 300,
+  searchKeystrokeMs: 120,
 };
 
 const GATED_METRICS = [
@@ -145,6 +153,7 @@ const GATED_METRICS = [
   "heapFirstPageMB",
   "heapFullMB",
   "reviewFirstPaintMs",
+  "searchKeystrokeMs",
 ] as const;
 
 const RECORDED_ONLY_METRICS = [
@@ -283,6 +292,49 @@ async function scrollToRow(page: Page, row: number, rowHeightPx = 22): Promise<v
   // Let the grid actually rebuild rows at the new position before frame timing starts, so the
   // jump itself (a much bigger single render than any one fling frame) is never in-sample.
   await page.waitForTimeout(150);
+}
+
+interface SearchShapeSpec {
+  readonly name: string;
+  readonly text: string;
+  readonly caseSensitive?: boolean;
+  readonly wholeWord?: boolean;
+  readonly regex?: boolean;
+}
+
+/** `SearchBox.vue`'s three toggle buttons are `aria-pressed` icon buttons, not checkboxes —
+ *  clicked only when the button's current state disagrees with what this shape needs, so two
+ *  consecutive shapes sharing a toggle (e.g. both off) cost no extra click. */
+async function setSearchToggle(page: Page, testId: string, desired: boolean): Promise<void> {
+  const button = page.locator(`[data-testid="${testId}"]`);
+  const pressed = (await button.getAttribute("aria-pressed")) === "true";
+  if (pressed !== desired) await button.click();
+}
+
+/**
+ * One query shape's own keystroke cost. Resets to an empty box first (waiting for the count
+ * indicator to disappear, so the *next* fill's own reappearance is unambiguous — `SearchBox.vue`
+ * renders `[data-testid="search-count"]` only once `compiled.kind === "ok"`, nothing while the
+ * box is empty), sets the toggles this shape needs, then brackets a single `fill()` — Playwright's
+ * own one-shot value-set-plus-one-native-`input`-event, exactly what `onInput` (`SearchBox.vue`)
+ * reacts to for a real keystroke, whole-string paste or not — against that same count indicator
+ * reappearing with real text (`"No matches"` counts — it is still non-empty).
+ */
+async function measureSearchShapeMs(page: Page, shape: SearchShapeSpec): Promise<number> {
+  const input = page.locator('[data-testid="search-input"]');
+  await input.fill("");
+  await page.waitForFunction(() => document.querySelector('[data-testid="search-count"]') === null);
+  await setSearchToggle(page, "search-toggle-case", shape.caseSensitive ?? false);
+  await setSearchToggle(page, "search-toggle-whole-word", shape.wholeWord ?? false);
+  await setSearchToggle(page, "search-toggle-regex", shape.regex ?? false);
+
+  const start = performance.now();
+  await input.fill(shape.text);
+  await page.waitForFunction(() => {
+    const el = document.querySelector('[data-testid="search-count"]');
+    return el !== null && (el.textContent ?? "").trim().length > 0;
+  });
+  return performance.now() - start;
 }
 
 /** Reads the emitted webview+renderer JS output's total gzipped size out of `dist/ui`, rebuilt
@@ -509,6 +561,36 @@ async function measure(): Promise<Measurement> {
     await page.locator('[data-testid="file-tree"]').waitFor({ state: "attached" });
     const detailPaintMs = performance.now() - detailPaintStart;
 
+    // --- searchKeystrokeMs: `docs/plans/P11.md` W18 — worst of six query shapes against a
+    // fully-loaded `hugeRepo` (20,000 rows; a fresh navigation, not `ceiling`'s reused page, so
+    // this scenario's own row count — exactly `SKIP_TAIL_MAX_ROWS`, `ui/src/state/search.ts` —
+    // is what puts every shape on the client-side-only path). Same "Alt-click load all" gesture
+    // `heapFullMB` above already uses to reach every row before scrolling. ---
+    await page.goto(`${HARNESS_BASE}/?scenario=hugeRepo`);
+    await page.waitForFunction(
+      () => performance.getEntriesByName("kira:layout-complete").length > 0,
+    );
+    await page.locator(".kv-load-more-button:not([disabled])").click({ modifiers: ["Alt"] });
+    await page.waitForFunction(
+      () => document.querySelector(".kv-load-more-button") === null,
+      undefined,
+      { timeout: 60_000 },
+    );
+    const { shaFor } = await import("../../apps/harness/src/scenarios/topology.ts");
+    const shaProbe = shaFor("huge-0").slice(0, 8);
+    const searchShapes: readonly SearchShapeSpec[] = [
+      { name: "literal", text: "huge" },
+      { name: "case-sensitive", text: "huge", caseSensitive: true },
+      { name: "whole-word", text: "huge-100", wholeWord: true },
+      { name: "regex", text: "^huge-\\d{4}$", regex: true },
+      { name: "no-match", text: "zzz-nonexistent-zzz" },
+      { name: "sha-prefix", text: shaProbe },
+    ];
+    let searchKeystrokeMs = 0;
+    for (const shape of searchShapes) {
+      searchKeystrokeMs = Math.max(searchKeystrokeMs, await measureSearchShapeMs(page, shape));
+    }
+
     // --- reviewFirstPaintMs: `docs/plans/P7.md` W18 — §10's own P7 row, measured the same way
     // `firstPaintMs` above measures the graph panel's, against the review sidebar's own root and
     // the dedicated 200-commit `reviewPerf` fixture (see that file's own doc comment for why a
@@ -537,6 +619,7 @@ async function measure(): Promise<Measurement> {
       scenarioBuildMsReference,
       detailPaintMs,
       reviewFirstPaintMs,
+      searchKeystrokeMs,
     };
   } finally {
     await browser.close();
