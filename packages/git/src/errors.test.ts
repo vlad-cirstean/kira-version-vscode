@@ -429,6 +429,68 @@ describe("classifyGitError", () => {
       expect(classifyGitError(["fetch", "origin"], 128, stderr).kind).toBe("AuthFailed");
     }
   });
+
+  // P9/W7 — every stderr string below was captured from a real git 2.43.0 run (see the fixture
+  // commands in the comment above each), exactly like every pattern above it.
+  test("StashUntrackedCollision — pop, an untracked file collides with one the stash carries", () => {
+    // `git init`; commit `base.txt`; `echo untracked-orig > u.txt`; `git stash push -u -m s1`;
+    // `echo untracked-new > u.txt`; `git stash pop`.
+    const stderr = [
+      "u.txt already exists, no checkout",
+      "error: could not restore untracked files from stash",
+    ].join("\n");
+    expect(classifyGitError(["stash", "pop"], 1, stderr).kind).toBe("StashUntrackedCollision");
+  });
+
+  test("StashUntrackedCollision — apply's own wording for the same collision matches too", () => {
+    const stderr = "error: could not restore untracked files from stash\n";
+    expect(classifyGitError(["stash", "apply"], 1, stderr).kind).toBe("StashUntrackedCollision");
+  });
+
+  test("StashIndexConflict — pop --index, restoring the index would itself conflict", () => {
+    // A staged change, stashed, then a *different* staged change made before `stash pop --index`.
+    const stderr = [
+      "error: patch failed: a.txt:1",
+      "error: a.txt: patch does not apply",
+      "error: conflicts in index. Try without --index.",
+      "The stash entry is kept in case you need it again.",
+    ].join("\n");
+    expect(classifyGitError(["stash", "pop", "--index"], 1, stderr).kind).toBe(
+      "StashIndexConflict",
+    );
+  });
+
+  test("NotFound — stash branch/show given a real commit that is not stash-shaped", () => {
+    // `git stash branch recovered <sha of an ordinary commit>` (also reachable via `stash
+    // show`/`apply`/`pop`/`drop` given the same sha — one message, five call sites).
+    const stderr = "fatal: '6876cf6790b621a3f4738afef6ea91272c7f34a2' is not a stash-like commit\n";
+    expect(classifyGitError(["stash", "branch", "recovered"], 128, stderr).kind).toBe("NotFound");
+  });
+
+  test("NotFound — 'is not a stash reference' wording, present in git's own string table", () => {
+    // Unlike every other case in this file, this exact phrasing was NOT reproduced by any real
+    // invocation this phase's probing tried (`stash apply/pop/drop/branch/show/store`, each given
+    // an out-of-range index, a plain commit sha, a branch name, a blob, and a bad ref string, all
+    // in git 2.43.0) — every one of those instead produced "is not a stash-like commit" (the case
+    // above) or, for an out-of-range `stash@{N}`, "log for 'stash' only has N entries" (rc=128,
+    // handled by `RepoService#verifyStashPosition`, not this file). `strings
+    // /usr/lib/git-core/git` confirms the format string exists in the git 2.43.0 binary, so the
+    // pattern below is kept per the plan (defense in depth, and it costs nothing), but this test
+    // only pins the pattern's own regex behavior — not a call site that reaches it.
+    expect(
+      classifyGitError(["stash", "apply", "x"], 128, "fatal: 'x' is not a stash reference\n").kind,
+    ).toBe("NotFound");
+  });
+
+  test("Unknown — a conflicting pop's own empty stderr does not classify as StashConflict here", () => {
+    // Probe 5: a conflicting `stash pop` writes its conflict markers to *stdout* and leaves
+    // stderr EMPTY. `StashConflict` is therefore deliberately absent from `PATTERNS` (see the
+    // kind's own doc comment in errors.ts) — `RepoService` classifies it from `exitCode !== 0`
+    // plus a post-op status read-back finding unmerged paths, never from this file. This test
+    // locks in *why*: empty stderr through this classifier alone can only ever fall through to
+    // `Unknown`.
+    expect(classifyGitError(["stash", "pop"], 1, "").kind).toBe("Unknown");
+  });
 });
 
 describe("GitCancelled / GitSpawnFailed", () => {
