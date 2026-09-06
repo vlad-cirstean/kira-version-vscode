@@ -41,6 +41,13 @@ export class StringInterner {
     return value;
   }
 
+  /** The backing array itself, index === id — a view, not a copy: valid only until the next
+   *  `intern()` call adds to it. `search/matcher.ts`'s once-per-query dictionary pre-match
+   *  (`docs/plans/P11.md` probe 9b) is the one caller; it never awaits while holding this. */
+  values(): readonly string[] {
+    return this.#values;
+  }
+
   get size(): number {
     return this.#values.length;
   }
