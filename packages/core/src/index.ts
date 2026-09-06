@@ -127,6 +127,7 @@ export type { PullConfigValues } from "./preflight/pull.ts";
 export { buildPullPreflight, resolvePullStrategy } from "./preflight/pull.ts";
 export { classifyPush } from "./preflight/push.ts";
 export { classifyRevert } from "./preflight/revert.ts";
+export { classifyStashBranch, classifyStashPop } from "./preflight/stashPop.ts";
 export { classifyTagCreate, validateRefName } from "./preflight/tag.ts";
 export type {
   CheckoutBlocker,
