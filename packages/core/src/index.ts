@@ -158,6 +158,7 @@ export type {
   CommitFields,
   LoadedScanOptions,
   LoadedScanResult,
+  MatchableRef,
   SearchField,
 } from "./search/matcher.ts";
 export { matchCommitFields, matchRef, searchLoadedCommits } from "./search/matcher.ts";

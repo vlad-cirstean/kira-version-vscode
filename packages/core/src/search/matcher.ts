@@ -4,9 +4,17 @@
  * exactly one place §7.8's six-field-OR-plus-sha-prefix semantics is implemented and one place
  * W16's semantics table is asserted against.
  */
-import type { CompiledQuery } from "./query.ts";
-import type { CommitStore } from "../store/commitStore.ts";
+
 import type { RefRecord } from "../model/ref.ts";
+import type { CommitStore } from "../store/commitStore.ts";
+import type { CompiledQuery } from "./query.ts";
+
+/** Exactly what `matchRef` reads off a ref — `RefRecord` (core, `refs.list`'s own fixture-free
+ *  shape) satisfies this structurally, and so does `RefRow` (`@kira-version/ipc`'s wire mirror,
+ *  identical but for the `objectType` field `matchRef` never touches), so `ui/src/state/
+ *  search.ts` (W10) can call this directly against `RefsState`'s own `RefRow[]` with no adapter
+ *  or cast. */
+export type MatchableRef = Pick<RefRecord, "shortName" | "annotation">;
 
 /** What a hit matched on — the dropdown labels a hit with this, and it is why body-only hits
  *  (hard part 1) are visible as something other than a mystery row. */
@@ -213,7 +221,7 @@ export function searchLoadedCommits(
  * unused for the whole of this phase and never passed by any P11 caller.
  */
 export function matchRef(
-  ref: RefRecord,
+  ref: MatchableRef,
   query: Extract<CompiledQuery, { kind: "ok" }>,
   pr?: { readonly number: number; readonly title: string },
 ): readonly SearchField[] {
