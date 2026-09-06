@@ -28,6 +28,16 @@ export type GitErrorKind =
   | "OperationInProgress"
   | "RemoteRefMissing"
   | "HookRejected"
+  /** P8: `git`'s own `(stale info)` — the bare `--force-with-lease` lease was violated because
+   *  the remote moved and we never fetched it. Probe 1, rows 1-2. */
+  | "LeaseViolation"
+  /** P8: `git`'s own `(remote ref updated since checkout)` — `--force-if-includes` caught a
+   *  remote move we DID fetch but have not integrated. Probe 1, row 3. */
+  | "RemoteRefUpdated"
+  /** P8: a transport-level failure — never git's own decision, always the network. */
+  | "NetworkFailed"
+  /** P8: the remote itself does not exist. */
+  | "RemoteNotFound"
   | "Unknown";
 
 export class GitError extends Error {
@@ -37,12 +47,18 @@ export class GitError extends Error {
   /** Preserved verbatim and always surfacable — an `Unknown` classification is only
    *  unactionable if this text is discarded, so it never is. */
   readonly stderr: string;
+  /** P8/W11: on a `HookRejected` failure, the hook's own `remote: `-prefixed lines with that
+   *  prefix stripped — probe 4's finding that this is the only actionable content in an
+   *  otherwise-buried wall of git output. `undefined` for every other kind, and for a
+   *  `HookRejected` whose stderr happened to carry no `remote: ` lines at all. */
+  readonly remoteMessage: string | undefined;
 
   constructor(
     kind: GitErrorKind,
     argv: readonly string[],
     exitCode: number | null,
     stderr: string,
+    remoteMessage?: string,
   ) {
     const summary = stderr.trim().split("\n")[0] || `exited ${exitCode}`;
     super(`git ${argv.join(" ")} failed (${kind}): ${summary}`);
@@ -51,6 +67,7 @@ export class GitError extends Error {
     this.argv = argv;
     this.exitCode = exitCode;
     this.stderr = stderr;
+    this.remoteMessage = remoteMessage;
   }
 }
 
@@ -101,6 +118,29 @@ const PATTERNS: readonly Pattern[] = [
     kind: "AlreadyExists",
     pattern:
       /a branch named '.*' already exists|tag '.*' already exists|! \[rejected\].*\(already exists\)/,
+  },
+  // P8/W11, probe 1 rows 1-2: "! [rejected] main -> main (stale info)" — a bare
+  // `--force-with-lease`'s lease was violated because the remote moved and we never fetched it.
+  // MUST be checked before `NonFastForward` below, whose `! \[rejected\]` alternative is broad
+  // enough to swallow it (docs/plans/P8.md's "The hard parts" §8).
+  { kind: "LeaseViolation", pattern: /\(stale info\)/ },
+  // P8/W11, probe 1 row 3: "! [rejected] main -> main (remote ref updated since checkout)" —
+  // `--force-if-includes` caught a remote move we DID fetch but have not integrated. Kept
+  // distinct from `LeaseViolation`: the remedies differ (fetch-and-look vs.
+  // you-already-saw-this).
+  { kind: "RemoteRefUpdated", pattern: /\(remote ref updated since checkout\)/ },
+  // P8/W11: a transport-level failure — never git's own decision, always the network reachable
+  // (or not) underneath it. Three real shapes: an unresolvable host, a refused/timed-out
+  // connection, and libcurl's own "unable to access '<url>': …" wrapper.
+  {
+    kind: "NetworkFailed",
+    pattern: /Could not resolve host|Connection (refused|timed out)|unable to access '.*': /,
+  },
+  // P8/W11: the remote itself does not exist — an SSH transport says the first, a dumb-HTTP/
+  // smart-HTTP transport the second.
+  {
+    kind: "RemoteNotFound",
+    pattern: /does not appear to be a git repository|Repository not found/,
   },
   // "! [rejected]  main -> main (fetch first)" / "(non-fast-forward)" — needs a fetch/rebase.
   { kind: "NonFastForward", pattern: /! \[rejected\]|non-fast-forward/ },
@@ -165,13 +205,27 @@ const PATTERNS: readonly Pattern[] = [
   { kind: "Conflict", pattern: /could not apply|could not revert|CONFLICT \(/ },
 ];
 
+/** P8/W11: collects `remote: `-prefixed lines and strips the prefix — the hook's own message,
+ *  per probe 4. `undefined` (not `""`) when stderr carried no such lines, so a `HookRejected`
+ *  error's `remoteMessage` is always either real content or explicitly absent. */
+function extractHookRemoteMessage(stderr: string): string | undefined {
+  const lines = stderr
+    .split("\n")
+    .filter((line) => line.startsWith("remote: "))
+    .map((line) => line.slice("remote: ".length));
+  return lines.length > 0 ? lines.join("\n") : undefined;
+}
+
 export function classifyGitError(
   argv: readonly string[],
   exitCode: number | null,
   stderr: string,
 ): GitError {
   for (const { kind, pattern } of PATTERNS) {
-    if (pattern.test(stderr)) return new GitError(kind, argv, exitCode, stderr);
+    if (pattern.test(stderr)) {
+      const remoteMessage = kind === "HookRejected" ? extractHookRemoteMessage(stderr) : undefined;
+      return new GitError(kind, argv, exitCode, stderr, remoteMessage);
+    }
   }
   return new GitError("Unknown", argv, exitCode, stderr);
 }

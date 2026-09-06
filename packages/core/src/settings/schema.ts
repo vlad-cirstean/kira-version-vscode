@@ -74,6 +74,35 @@ export const SETTINGS = {
       "after the branch's own upstream and the repository's detected default branch " +
       "(origin/HEAD) both fail to resolve.",
   },
+  "kiraVersion.fetch.autoInterval": {
+    key: "kiraVersion.fetch.autoInterval",
+    type: "number",
+    default: 0,
+    minimum: 0,
+    maximum: 1440,
+    description:
+      "Minutes between automatic background fetches. 0 disables it (the default). " +
+      "Auto-fetch runs only while the window is focused and the panel is visible, never while " +
+      "another operation is running, and disables itself for the session after a failure.",
+  },
+  "kiraVersion.pull.strategy": {
+    key: "kiraVersion.pull.strategy",
+    type: "enum",
+    default: "auto",
+    enum: ["auto", "ff-only", "merge", "rebase"],
+    description:
+      'How Pull integrates fetched commits. "auto" follows your git configuration ' +
+      "(branch.<name>.rebase, then pull.rebase, then pull.ff), falling back to fast-forward-only.",
+  },
+  "kiraVersion.protectedBranches": {
+    key: "kiraVersion.protectedBranches",
+    type: "stringArray",
+    default: ["main", "master", "release/*"],
+    description:
+      "Branches that require typing the branch name to confirm a force-push or a " +
+      'remote-branch deletion. "*" matches any characters except "/". Ordinary pushes are ' +
+      "never gated.",
+  },
 } as const satisfies Record<string, SettingDef<unknown>>;
 
 export type SettingKey = keyof typeof SETTINGS;

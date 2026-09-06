@@ -59,7 +59,7 @@ async function measure(): Promise<Measurement> {
     runner,
     fileWatcher: new NodeFileWatcher(),
     logger: new FakeLogger(),
-    settings: defaultSettings(),
+    settings: () => defaultSettings(),
     configuredGitCandidates: [],
   });
   const opened = await service.open(repo.dir);

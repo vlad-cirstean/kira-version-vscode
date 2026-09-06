@@ -1,9 +1,13 @@
 import type { CommitRecord, DocumentRef, FileChange, RefRecord } from "@kira-version/core";
 import {
+  buildPullPreflight,
   CommitStore,
+  classifyPush,
   resolveBase as coreResolveBase,
   defaultSettings,
   mapLineAcrossDiff,
+  matchProtectedBranch,
+  resolvePullStrategy,
   UNDO_POLICY,
 } from "@kira-version/core";
 import type {
@@ -19,6 +23,8 @@ import type {
   OpResult,
   RefKind,
   RefRow,
+  RemoteOpParams,
+  RemoteOpResult,
   RequestHandler,
   RevertParentChoice,
   RevertPreflight,
@@ -587,6 +593,9 @@ function toSettingsSnapshot(): SettingsSnapshot {
     "kiraVersion.graph.scope": settings["kiraVersion.graph.scope"],
     "kiraVersion.log.level": settings["kiraVersion.log.level"],
     "kiraVersion.review.baseCandidates": settings["kiraVersion.review.baseCandidates"],
+    "kiraVersion.fetch.autoInterval": settings["kiraVersion.fetch.autoInterval"],
+    "kiraVersion.pull.strategy": settings["kiraVersion.pull.strategy"],
+    "kiraVersion.protectedBranches": settings["kiraVersion.protectedBranches"],
   };
 }
 
@@ -834,6 +843,17 @@ export interface RecordedUndo {
   readonly result: OpResult;
 }
 
+/** One `remote.run` call as the mock recorded it — `RecordedOp`'s own P8 analogue (`docs/plans/P8.md`
+ *  W21). Kept distinct from `RecordedOp` rather than folded into it, mirroring `OpsState`'s own
+ *  `#runRemote`/`#runSimple` split (D51): a `RemoteOpParams` is not an `OpRequest`, and a
+ *  `RemoteOpResult` carries no `undo` field. `remoteOps.spec.ts` asserts on this the same way
+ *  `refOps.spec.ts` asserts on `lastOp` — the wire-level request the toolbar/dialogs actually
+ *  built (which strategy, which `confirmToken`, `plainForce`) alongside what the mock decided. */
+export interface RecordedRemoteOp {
+  readonly request: RemoteOpParams;
+  readonly result: RemoteOpResult;
+}
+
 /** One `review.open` call as the mock recorded it — `docs/plans/P7.md` W16's "both entry points
  *  open the review on the right branch" needs something to assert against even though the
  *  harness serves one view per page load and so cannot literally reveal a second one
@@ -857,6 +877,8 @@ interface MockHandlers {
   getLastOp(): RecordedOp | undefined;
   /** P6 W19's own hook — see `RecordedUndo`'s doc comment. */
   getLastUndo(): RecordedUndo | undefined;
+  /** P8 W21's own hook — see `RecordedRemoteOp`'s doc comment. */
+  getLastRemoteOp(): RecordedRemoteOp | undefined;
   /** P7 W15/W16's own hook — see `RecordedReviewOpen`'s doc comment. */
   getLastReviewOpen(): RecordedReviewOpen | undefined;
   /** `docs/plans/P7.md` W16's "a collapsed-then-re-expanded row does not re-request" — `sha`'s
@@ -884,6 +906,7 @@ function createHandlers(
   let lastEditorAction: HarnessEditorAction | undefined;
   let lastOp: RecordedOp | undefined;
   let lastUndo: RecordedUndo | undefined;
+  let lastRemoteOp: RecordedRemoteOp | undefined;
   let lastReviewOpen: RecordedReviewOpen | undefined;
   const commitDetailCallCounts = new Map<string, number>();
 
@@ -1301,6 +1324,237 @@ function createHandlers(
     return true;
   }
 
+  // ---------------------------------------------------------------------------------------
+  // P8 W16/W21 — Remote ops. The harness models no second git process at the other end of
+  // "the remote": `session.refs.remoteBranches` (a `RefRow` per `<remote>/<branch>`) *is* the
+  // remote's state as far as this mock is concerned, the same way `applyOp` mutates
+  // `session.refs.branches`/`session.status` in place rather than replaying a real spawn.
+  // A consequence worth stating once: `fetch` never discovers anything a scenario didn't
+  // already put in `remoteBranches` — there is no separate remote timeline to have diverged
+  // from it — so it always succeeds with no updates. A scenario that wants a real
+  // "someone else pushed first" story needs a dedicated fixture hook; none exists yet (no W16
+  // work item asked for one), so this is left for W21's own Playwright specs to add if a test
+  // needs it, the same deferral `preflight.checkout`/`preflight.revert`'s own doc comments
+  // already model for their hazard-shaped cases.
+  //
+  // `defaultSettings()` stands in for `kiraVersion.pull.strategy`/`protectedBranches` — the
+  // harness has no per-scenario settings override mechanism yet (`toSettingsSnapshot` above is
+  // likewise always the same fixed snapshot), so every scenario sees the same defaults here.
+  // ---------------------------------------------------------------------------------------
+
+  function currentBranchName(session: RepoSession): string | undefined {
+    return session.head.kind === "branch" ? session.head.name : undefined;
+  }
+
+  function remoteRefName(remote: string, branch: string): string {
+    return `${remote}/${branch}`;
+  }
+
+  function remoteOpError(kind: OpErrorKind, message: string): RemoteOpResultLike {
+    return { ok: false, error: { kind, message, remoteMessage: undefined }, updates: [] };
+  }
+
+  /** The shape every `remote.run` branch below returns before `head`/`inProgress` are filled in
+   *  from the session at the very end — kept separate so each branch only states what it
+   *  actually decided (ok/error/updates), matching `opOk`/`opError`'s own split. */
+  interface RemoteOpResultLike {
+    readonly ok: boolean;
+    readonly error:
+      | { readonly kind: OpErrorKind; readonly message: string; readonly remoteMessage: undefined }
+      | undefined;
+    readonly updates: readonly {
+      from: string | null;
+      to: string | null;
+      ref: string;
+      forced: boolean;
+    }[];
+  }
+
+  // `branch` mirrors the real `RepoService.preflightPull`'s own signature (it reads
+  // `branch.<name>.rebase` for that one branch) but is otherwise unused here: the mock has no
+  // git config to read, and `session.status.upstream` already reports ahead/behind for
+  // whichever branch is checked out, the same "current branch only" assumption the real
+  // implementation's own doc comment states for `preflightPush`.
+  const remotePullPreflight: RequestHandler<"remote.pullPreflight"> = async ({
+    repoId,
+    branch: _branch,
+  }) => {
+    const session = requireSession(sessions, repoId);
+    const { strategy, source } = resolvePullStrategy({
+      settingStrategy: defaultSettings()["kiraVersion.pull.strategy"],
+      gitConfig: {},
+    });
+    const upstream = session.status.upstream;
+    return buildPullPreflight({
+      strategy,
+      source,
+      upstream: upstream?.name ?? null,
+      ahead: upstream?.ahead ?? 0,
+      behind: upstream?.behind ?? 0,
+      dirty: !session.status.isClean,
+    });
+  };
+
+  const remotePushPreflight: RequestHandler<"remote.pushPreflight"> = async ({
+    repoId,
+    branch,
+    remote,
+  }) => {
+    const session = requireSession(sessions, repoId);
+    const upstream = session.status.upstream;
+    const remoteRow = findRef(session.refs, remoteRefName(remote, branch));
+    return classifyPush({
+      branch,
+      upstream: upstream?.name ?? null,
+      ahead: upstream?.ahead ?? 0,
+      behind: upstream?.behind ?? 0,
+      remoteTip: remoteRow?.row.objectId ?? null,
+      protectedBranches: defaultSettings()["kiraVersion.protectedBranches"],
+    });
+  };
+
+  function applyRemoteOp(
+    session: RepoSession,
+    request: {
+      readonly kind: "fetch" | "push" | "pull" | "forcePush" | "deleteRemoteBranch";
+      readonly remote: string;
+      readonly branch: string | undefined;
+      readonly expectedRemoteTip: string | null | undefined;
+      readonly confirmToken: string | undefined;
+    },
+  ): RemoteOpResultLike {
+    if (request.kind === "fetch") return { ok: true, error: undefined, updates: [] };
+
+    const branch = request.branch ?? currentBranchName(session);
+    if (branch === undefined) {
+      return remoteOpError("NotFound", "No branch is checked out.");
+    }
+    const refName = remoteRefName(request.remote, branch);
+
+    if (request.kind === "forcePush" || request.kind === "deleteRemoteBranch") {
+      const match = matchProtectedBranch(
+        branch,
+        defaultSettings()["kiraVersion.protectedBranches"],
+      );
+      if (match && request.confirmToken !== branch) {
+        return remoteOpError("ProtectedBranch", `${branch} is a protected branch.`);
+      }
+    }
+
+    if (request.kind === "deleteRemoteBranch") {
+      const existing = findRef(session.refs, refName);
+      if (!existing) return remoteOpError("RemoteRefMissing", `${refName} does not exist.`);
+      session.refs.remoteBranches = session.refs.remoteBranches.filter(
+        (r) => r.shortName !== existing.row.shortName,
+      );
+      return {
+        ok: true,
+        error: undefined,
+        updates: [{ ref: refName, from: existing.row.objectId, to: null, forced: false }],
+      };
+    }
+
+    const localRow = findRef(session.refs, branch);
+    if (!localRow) return remoteOpError("NotFound", `${branch} does not exist locally.`);
+    const remoteRow = findRef(session.refs, refName);
+
+    if (request.kind === "forcePush") {
+      const actualTip = remoteRow?.row.objectId ?? null;
+      if (request.expectedRemoteTip !== undefined && request.expectedRemoteTip !== actualTip) {
+        return remoteOpError(
+          "LeaseViolation",
+          "The remote moved since this was checked; fetch and try again.",
+        );
+      }
+      updateRemoteBranchTip(session, refName, localRow.row.objectId);
+      return {
+        ok: true,
+        error: undefined,
+        updates: [{ ref: refName, from: actualTip, to: localRow.row.objectId, forced: true }],
+      };
+    }
+
+    if (request.kind === "push") {
+      const upstream = session.status.upstream;
+      if (upstream !== undefined && upstream.behind > 0) {
+        return remoteOpError(
+          "NonFastForward",
+          "Updates were rejected because the remote contains work you do not have locally.",
+        );
+      }
+      const from = remoteRow?.row.objectId ?? null;
+      updateRemoteBranchTip(session, refName, localRow.row.objectId);
+      session.status.upstream = { name: refName, ahead: 0, behind: 0 };
+      return {
+        ok: true,
+        error: undefined,
+        updates: [{ ref: refName, from, to: localRow.row.objectId, forced: false }],
+      };
+    }
+
+    // pull: the fetch phase above never finds anything new (this mock's own doc comment above
+    // explains why), so integration only ever has to reconcile against what `remoteBranches`
+    // already states. ff-only when there is something to bring in, else a no-op "up to date".
+    const upstream = session.status.upstream;
+    if (upstream === undefined || upstream.behind === 0) {
+      return { ok: true, error: undefined, updates: [] };
+    }
+    if (!session.status.isClean) {
+      return remoteOpError("DirtyWorktree", "The working tree has local changes.");
+    }
+    if (!remoteRow) return remoteOpError("RemoteRefMissing", `${refName} does not exist.`);
+    const from = localRow.row.objectId;
+    (localRow.row as { objectId: string }).objectId = remoteRow.row.objectId;
+    session.status.upstream = { name: refName, ahead: upstream.ahead, behind: 0 };
+    return {
+      ok: true,
+      error: undefined,
+      updates: [{ ref: branch, from, to: remoteRow.row.objectId, forced: false }],
+    };
+  }
+
+  function updateRemoteBranchTip(session: RepoSession, refName: string, sha: string): void {
+    const existing = session.refs.remoteBranches.find((r) => r.shortName === refName);
+    if (existing) {
+      (existing as { objectId: string }).objectId = sha;
+      return;
+    }
+    session.refs.remoteBranches.push({
+      refname: `refs/remotes/${refName}`,
+      kind: "remoteBranch",
+      shortName: refName,
+      objectId: sha,
+      peeledObjectId: undefined,
+      upstream: undefined,
+      track: undefined,
+      committerDate: Date.now() / 1000,
+      isHead: false,
+      checkedOutIn: undefined,
+      annotation: undefined,
+    });
+  }
+
+  const remoteRun: RequestHandler<"remote.run"> = async ({ repoId, ...request }) => {
+    const session = requireSession(sessions, repoId);
+    const outcome = applyRemoteOp(session, request);
+    if (outcome.ok && outcome.updates.length > 0) notifyChanged(repoId, "refsChanged");
+    const result: RemoteOpResult = {
+      ok: outcome.ok,
+      error: outcome.error,
+      updates: outcome.updates,
+      head: session.head,
+      inProgress: session.inProgress,
+    };
+    lastRemoteOp = { request: { repoId, ...request }, result };
+    return result;
+  };
+
+  // Every mock remote op above completes synchronously within the same request/response —
+  // there is never anything left running for `remote.cancel` to find, unlike the real
+  // `RepoService` (a live child process it can sensibly interrupt). `false` here is that real
+  // difference showing through honestly rather than a stub pretending to cancel something.
+  const remoteCancel: RequestHandler<"remote.cancel"> = async (_params) => ({ cancelled: false });
+
   return {
     serverHandlers: {
       requests: {
@@ -1327,6 +1581,10 @@ function createHandlers(
         "undo.run": undoRun,
         "review.resolveBase": reviewResolveBase,
         "review.open": reviewOpen,
+        "remote.pullPreflight": remotePullPreflight,
+        "remote.pushPreflight": remotePushPreflight,
+        "remote.run": remoteRun,
+        "remote.cancel": remoteCancel,
       },
       streams: {
         "graph.stream": graphStream,
@@ -1336,6 +1594,7 @@ function createHandlers(
     getLastEditorAction: () => lastEditorAction,
     getLastOp: () => lastOp,
     getLastUndo: () => lastUndo,
+    getLastRemoteOp: () => lastRemoteOp,
     getLastReviewOpen: () => lastReviewOpen,
     getCommitDetailCallCount: (sha) => commitDetailCallCounts.get(sha) ?? 0,
     resolveOneConflictedPath,
@@ -1363,6 +1622,9 @@ export interface MockBridge extends Transport {
   /** P6 W19: the most recent `undo.run` call the mock recorded — `main.ts` exposes this as
    *  `window.__kiraHarness.lastUndo`. */
   getLastUndo(): RecordedUndo | undefined;
+  /** P8 W21: the most recent `remote.run` call the mock recorded — `main.ts` exposes this as
+   *  `window.__kiraHarness.lastRemoteOp`. See `RecordedRemoteOp`'s own doc comment. */
+  getLastRemoteOp(): RecordedRemoteOp | undefined;
   /** P7 W15/W16: the most recent `review.open` call the mock recorded — `main.ts` exposes this
    *  as `window.__kiraHarness.lastReviewOpen`. See `RecordedReviewOpen`'s own doc comment. */
   getLastReviewOpen(): RecordedReviewOpen | undefined;
@@ -1392,6 +1654,7 @@ export function createMockBridge(scenarioName: string): MockBridge {
     getLastEditorAction,
     getLastOp,
     getLastUndo,
+    getLastRemoteOp,
     getLastReviewOpen,
     getCommitDetailCallCount,
     resolveOneConflictedPath,
@@ -1414,6 +1677,7 @@ export function createMockBridge(scenarioName: string): MockBridge {
     getLastEditorAction,
     getLastOp,
     getLastUndo,
+    getLastRemoteOp,
     getLastReviewOpen,
     getCommitDetailCallCount,
     resolveOneConflictedPath,

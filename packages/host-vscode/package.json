@@ -112,6 +112,36 @@
           "items": {
             "type": "string"
           }
+        },
+        "kiraVersion.fetch.autoInterval": {
+          "type": "number",
+          "default": 0,
+          "description": "Minutes between automatic background fetches. 0 disables it (the default). Auto-fetch runs only while the window is focused and the panel is visible, never while another operation is running, and disables itself for the session after a failure.",
+          "minimum": 0,
+          "maximum": 1440
+        },
+        "kiraVersion.pull.strategy": {
+          "type": "string",
+          "default": "auto",
+          "description": "How Pull integrates fetched commits. \"auto\" follows your git configuration (branch.<name>.rebase, then pull.rebase, then pull.ff), falling back to fast-forward-only.",
+          "enum": [
+            "auto",
+            "ff-only",
+            "merge",
+            "rebase"
+          ]
+        },
+        "kiraVersion.protectedBranches": {
+          "type": "array",
+          "default": [
+            "main",
+            "master",
+            "release/*"
+          ],
+          "description": "Branches that require typing the branch name to confirm a force-push or a remote-branch deletion. \"*\" matches any characters except \"/\". Ordinary pushes are never gated.",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },

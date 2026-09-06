@@ -435,6 +435,7 @@ under `packages/`) and changes nothing to the left of it (§2.2).
 | `Storage` | small persisted key/value (per repo and global) | `Memento` (workspace + global) |
 | `Secrets` | credentials the app itself holds (rare — Git owns auth) | `SecretStorage` |
 | `GitHubAuth` | a host-brokered GitHub session token for §6.7's PR lookup, requested lazily and allowed to return none | `authentication.getSession('github', ['repo'])` |
+| `CredentialPrompt` | one prompt for a git credential (username/password/passphrase), asked by the askpass broker (§4.3/§7.4, P8), answerable or dismissable, never blocking | `window.showInputBox({ password, ignoreFocusOut: true, prompt })` |
 | `Clipboard` | copy sha, branch, message | `env.clipboard` |
 | `ExternalOpener` | open compare/PR URLs (§6.7's PR badge is what opens them) | `env.openExternal` |
 | `Dialogs` | native confirm / pick folder / save file | `window.show*` |
@@ -446,6 +447,18 @@ under `packages/`) and changes nothing to the left of it (§2.2).
 A port with one shipped implementation, like `Secrets`, is still the app's complete statement
 of what it needs from a host — the row stays even though nothing today exercises the gap a
 second host's implementation would fill.
+
+`CredentialPrompt` is the **only** port P8's remote ops add (D54); the other three a
+credential-handling feature might suggest are each declined for a stated reason rather than
+overlooked. Not a second use of `Secrets` — kira-version stores no credential of its own,
+ever, ceding that entirely to git's own credential helpers, which already do it better; asking
+this port to relay one through our process would hold a user's secret in memory for no gain.
+Not `Notifications` — remote-op progress (§7.1, §7.4) renders in-webview, in the toolbar,
+matching P6's in-webview-dialogs precedent, which is what keeps it harness-testable and
+Playwright-screenshottable rather than living in a host-native toast this document cannot
+assert against. Not a new use of `GitHubAuth` — P8 is host-agnostic git plumbing over the
+smart-HTTP/SSH transports any remote speaks, not a forge integration; §6.7's existing
+`GitHubAuth` row is unrelated and untouched.
 
 `EditorIntegration` is the one port whose contract is genuinely richer than a single call: v1
 ships a **read-only unified diff view inside the UI**, because §6.4 makes clicking a file open
@@ -539,9 +552,17 @@ else in the window.
 
 - **Requests** (UI → host, one response): `repo.open`, `graph.status`, `graph.loadMore`,
   `graph.refresh`, `commit.detail`, `refs.list`, `status.get`, `search.run`,
-  `review.resolveBase`, `review.open`, `branch.resolvePr`, `op.<name>`, `preflight.<name>`.
+  `review.resolveBase`, `review.open`, `branch.resolvePr`, `op.<name>`, `preflight.<name>`,
+  and (P8) `remote.run`, `remote.cancel`, `remote.pullPreflight`, `remote.pushPreflight`.
 - **Events** (host → UI, push): `repo.changed`, `graph.invalidated`, `review.target`,
-  `op.progress`, `op.finished`, `log`.
+  `log`, and (P8) `remote.progress` — remote ops' one and only progress signal. Earlier
+  drafts of this section named `op.progress`/`op.finished`; neither exists. There is no
+  `op.` progress event at all (P6's `op.run` is a single request/response with no
+  intermediate signal), and remote ops have no separate "finished" event either — the
+  `remote.run` request's own response *is* the finish, so a second finish signal would just
+  be a second source of truth that can race it. `remote.progress` correlates by `repoId`
+  alone (P8 allows at most one remote op in flight per repo at a time), not by an `opId` on
+  the wire.
 - **Streams** (host → UI, chunked with backpressure): `graph.stream` — commit records
   arrive in batches as the `git log` process produces them, so the first screenful renders
   before the walk completes.
@@ -556,7 +577,8 @@ candidate list the override picker offers — and `review.open`, which reveals t
 sidebar view for a given branch from the panel or the palette; `review.target` is the event
 that tells an already-visible review view to switch to a newly opened branch. Wire format,
 chunking and version number were P7's plan to settle, not this document's (P7 landed at
-`CONTRACT_VERSION` 7).
+`CONTRACT_VERSION` 7; P16 took it to 8; P8's four new remote-op requests and its one new
+event bump it again, to 9).
 
 Pull request linking (§6.7) adds one request and no events or streams: `branch.resolvePr`,
 which answers "which pull request, if any, belongs to this branch" with a PR number, title,
@@ -699,7 +721,8 @@ Every spawn goes through one `GitDriver`. Non-negotiable rules:
 - **`git --no-optional-locks`** on every read command, and `GIT_OPTIONAL_LOCKS=0` in the env,
   so background reads never fight the user's terminal for `index.lock`.
 - **`GIT_TERMINAL_PROMPT=0`** always. Git must never block on an invisible TTY prompt. Auth
-  goes through the askpass path in §7.4 or fails fast with a typed error.
+  goes through the askpass path in §7.4 (P8: a broker + `GIT_ASKPASS` shim, not a bare
+  `GIT_TERMINAL_PROMPT=0` alone) or fails fast with a typed `AuthFailed`.
 - **`GIT_EDITOR=true`** always (P6). Git must never block on an invisible commit-message editor
   either — `git <op> --continue` (merge/cherry-pick/revert) and an unmessaged `tag -a` both
   reach one; with no TTY and no `GIT_EDITOR`, the spawn fails and leaves the operation in
@@ -708,14 +731,36 @@ Every spawn goes through one `GitDriver`. Non-negotiable rules:
   `git switch`/`git restore` is clearer**.
 - **Streaming, not buffering.** `git log` output is consumed as a stream with an incremental
   NUL-splitting parser; nothing waits for process exit. Every long-running spawn is
-  cancellable via `AbortSignal` and is killed when its query is superseded.
+  cancellable via `AbortSignal` and is killed when its query is superseded. A write's own
+  stderr can additionally be teed live to a progress parser (`onStderr`, P8) while it runs,
+  independent of the buffered `stderr` string every write still resolves with on completion
+  — the tee is for a live "Receiving objects, 47%" readout, not a replacement for the
+  after-the-fact text `errors.ts` classifies against.
 - **Serialized writes.** A per-repository queue serializes mutating operations; reads run
   concurrently up to a bounded pool. A mutating op invalidates the graph cache on completion.
+  **A write that has already started is never killed — except a network fetch (P8, D50),
+  which may be.** The rule protects against exactly what a kill mid-write would strand: a
+  half-updated ref, a stale `index.lock`, partial sequencer state. A `git fetch` (and pull's
+  own fetch phase, before it hands off to a non-killable merge/rebase) has none of these
+  hazards — it only ever writes collectable loose objects and moves no ref the user can see
+  until the whole fetch completes — so cancelling it is safe in a way cancelling a push,
+  whose remote-side outcome after a kill is unknowable, is not.
+- **`detached: true` / `setsid()`** on every spawn (P8) is a standing no-hang guarantee, not
+  an incidental process-group flag: a detached child has no controlling terminal to prompt
+  against, closing the one credential-prompt path `GIT_TERMINAL_PROMPT=0` and the askpass
+  broker do not already cover on their own.
 - **Persistent `git cat-file --batch`** per repo for object reads (blobs for diffs, commit
   bodies on demand), avoiding process spawn per file.
 - Errors are classified into a typed union (`AuthFailed`, `NonFastForward`, `Conflict`,
-  `DirtyWorktree`, `LockHeld`, `NotFound`, `HookRejected`, `Unknown`) from exit code +
-  stderr pattern matching, with the raw stderr always preserved and surfacable.
+  `DirtyWorktree`, `LockHeld`, `NotFound`, `HookRejected`, `Unknown`, and — P8 —
+  `LeaseViolation`, `RemoteRefUpdated`, `NetworkFailed`, `RemoteNotFound`, `ProtectedBranch`,
+  `Cancelled`) from exit code + stderr pattern matching, with the raw stderr always preserved
+  and surfacable.
+- **Remote-op env additions (P8).** A remote op's spawn env is `buildGitEnv()`'s usual set
+  plus, only when the askpass broker is interposed for that repo (§7.4; never when the user
+  has their own `core.askPass`/`GIT_ASKPASS`), the broker's own `GIT_ASKPASS`,
+  `KIRA_ASKPASS_SOCK`, `KIRA_ASKPASS_TOKEN` and `KIRA_ASKPASS_OPID` — layered on top of, never
+  in place of, the base env every other write already gets.
 
 ### 4.4 The commands
 
@@ -1347,19 +1392,30 @@ over queried state, so it is unit-testable without a repository.
 
 ### 7.1 Fetch
 
-`git fetch --prune --prune-tags <remote|--all>`. Progress parsed from stderr's counting
-output. Prune is on by default with a setting to disable. Post-fetch the UI shows an
+`git fetch --progress --prune [--prune-tags] <remote|--all>`. `--progress` is required, not
+cosmetic: the child is never attached to a tty, and without it git suppresses the very
+counting/compressing lines the progress parser depends on. `--prune` is on by default (a
+setting can disable it); `--prune-tags` is a **separate** switch, off by default even when
+`--prune` is on (P8/D49) — it deletes a *local* tag with no remote counterpart, fetch offers
+no undo for that (§7.12), and an unpushed tag is user work outranking the shorter command
+line (§1.1). Progress parsed from stderr's counting output. Post-fetch the UI shows an
 ahead/behind delta per branch from `%(upstream:track)`.
 
 **Automatic background fetch: implemented, `kiraVersion.fetch.autoInterval` defaults to `0`
 (off).** Setting it to a positive number of minutes enables a periodic fetch. When enabled:
-the timer only runs while the window is focused and the panel visible, it never runs while
-another operation holds the write queue, a failure disables the timer for the rest of the
-session rather than retrying into a rate limit or a repeated auth prompt, and — because
-`GIT_TERMINAL_PROMPT=0` is always set (§4.3) — a credential-less remote fails fast instead of
-hanging. Auto-fetch and force-push safety interact: a background fetch advances the
-remote-tracking ref, which is exactly why §7.4 always passes an explicitly observed lease sha
-rather than relying on bare `--force-with-lease`.
+the first tick waits a full interval before ever firing (enabling it does not fetch
+immediately); every subsequent tick runs only while the window is focused **and** the panel
+visible, never while another operation (including a previous auto-fetch or a user-initiated
+remote op) holds the repo busy — a tick found busy is skipped, not queued, and is retried on
+the next poll rather than pushing the session's "due" time forward; a failure disables the
+timer for the rest of the session rather than retrying into a rate limit or a repeated auth
+prompt; and — because `GIT_TERMINAL_PROMPT=0` is always set (§4.3) — a credential-less remote
+fails fast instead of hanging. It is entirely **silent**: no progress UI, no error toast — a
+background operation the user did not ask for this instant does not get to interrupt them,
+only to quietly keep the ahead/behind numbers current or quietly stop trying. Auto-fetch and
+force-push safety interact: a background fetch advances the remote-tracking ref, which is
+exactly why §7.4's force-push path re-reads and compares the remote tip immediately before
+spawning, on top of git's own lease.
 
 ### 7.2 Push
 
@@ -1376,37 +1432,93 @@ action.
 git fetch <remote>
 git merge --ff-only <upstream>     # or: git merge <upstream>  |  git rebase <upstream>
 ```
-The strategy (ff-only / merge / rebase) is a setting defaulting to **ff-only**, with the UI
-offering the other two when ff-only is not possible and telling the user why. Rationale: the
-user's `pull.rebase` config makes plain `git pull` do different things on different machines,
-and a graph tool that surprises you about which one it did is worse than useless. We read
-`pull.rebase`/`pull.ff` and default our offer to match the user's config, but we always show
-which one we are about to run.
+The resolved strategy (ff-only / merge / rebase) and **where it came from** are always shown
+to the user before the merge/rebase phase runs — never only after the fact — resolved by a
+six-step, first-match-wins ladder:
+
+1. An explicit override for this one invocation (the UI's own strategy picker) —
+   `PullStrategySource: "explicit"`.
+2. `kiraVersion.pull.strategy`, this tool's own setting, unless it is left at its own
+   `"auto"` default — `"setting"`.
+3. `branch.<name>.rebase`, this branch's own git config (`true`/`interactive`/`merges` →
+   rebase, `false` → merge, anything else falls through) — `"branchConfig"`.
+4. `pull.rebase`, the user's global git config, mapped the same way — `"pullConfig"`.
+5. `pull.ff=only`, the user's global git config — `"pullConfig"`.
+6. kira-version's own fallback, **ff-only** — `"default"`.
+
+All three config keys come from one `git config --null --get-regexp
+'^(branch\.<branch>\.rebase|pull\.rebase|pull\.ff)$'` spawn, not one process per candidate.
+Rationale for defaulting to ff-only rather than mirroring `git pull`'s own default: the
+user's `pull.rebase` config already makes plain `git pull` do different things on different
+machines, and a graph tool that surprises you about which one it did is worse than useless —
+reading the user's config into the ladder (steps 3-5) means their existing preference is
+still honoured, just always shown rather than silently applied.
 
 Pre-flight: dirty working tree + a non-ff pull is a hazard → offer autostash (implemented as
-our own stash/pop, so the pop is under our conflict handling, not `--autostash`'s).
+our own stash/pop, so the pop is under our conflict handling, not `--autostash`'s). P8 ships
+`PullPreflight.routes` as an always-empty seam for this — the autostash routes themselves are
+P9's to design and populate, not P8's.
 
 ### 7.4 Force push
 
-Default and preferred form:
+Default and preferred form (**P8/D48, correcting this section's earlier command line**):
 ```
-git push --force-with-lease=<refname>:<sha-we-last-observed> --force-if-includes <remote> <ref>
+git push --force-with-lease --force-if-includes <remote> <ref>
 ```
-`--force-with-lease` without an explicit expected sha is unsafe in a tool that fetches in the
-background (a background fetch updates the remote-tracking ref and the lease then protects
-nothing), so we **always** pass the explicit sha we last displayed to the user.
-`--force-if-includes` (Git ≥ 2.30) additionally guarantees the local ref actually incorporates
-that remote state.
+Bare `--force-with-lease` — no explicit `<refname>:<expected-sha>` — plus `--force-if-includes`
+(Git ≥ 2.30), rather than the explicit-expected-sha form this section used to specify. A
+probed fact drove the correction: an explicit `--force-with-lease=<ref>:<sha>` satisfies the
+lease by itself and makes `--force-if-includes` inert, identical to omitting it — so the
+explicit-sha form this section previously called for was silently giving up exactly the
+guarantee `--force-if-includes` exists to provide. The two flags guard two different hazards
+instead: bare `--force-with-lease` catches "the remote moved and we never fetched it"
+(`LeaseViolation`); `--force-if-includes` catches "we fetched the remote's move but never
+integrated it" (`RemoteRefUpdated`) — a case an explicit expected sha cannot see at all, since
+from git's point of view the sha still matches.
 
-Plain `--force` is available only behind a second, explicit confirmation that names the
-commits that will become unreachable on the remote. For branches matching
+This does reopen the original hazard the explicit-sha form was written to close: a background
+auto-fetch, running between the confirmation dialog opening and the push actually spawning,
+can silently update the remote-tracking ref to the very value that would let git's own lease
+through — and the user, still looking at the dialog's now-stale remote tip, would never find
+out. Two mitigations close the residual gap: auto-fetch (§7.1) is suppressed for a repo while
+its own force-push confirmation dialog is open, and `RepoService.runRemoteOp` independently
+re-reads the remote-tracking ref immediately before spawning and compares it against the tip
+the confirmation dialog showed — a mismatch fails with `LeaseViolation` before any push
+happens at all, even in the (now rare) case git's own bare lease would not itself have caught
+it.
+
+Plain `--force` is available only behind a second, differently-worded, explicit confirmation
+that names the commits that will become unreachable on the remote — never the default, and
+never reachable without first seeing the lease-based option. For branches matching
 `kiraVersion.protectedBranches` (default `main`, `master`, `release/*`) it requires a **typed
-confirmation** — the user types the branch name — rather than being blocked outright. A hard
-refusal would only send someone to the terminal, where there is no lease check at all; we
-would lose the safety we were trying to add. Friction, not prohibition.
+confirmation** — the user types the branch name, checked server-side against a pure `core`
+glob matcher (`*` not crossing `/`) that returns the matched pattern so the dialog can name it
+— rather than being blocked outright. A hard refusal would only send someone to the terminal,
+where there is no lease check at all; we would lose the safety we were trying to add.
+Friction, not prohibition. **Exactly two operations are gated this way: force-push (lease or
+plain) and remote-branch deletion — never a plain, fast-forward push** (P8/D52); gating an
+ordinary push to `main` would make the confirmation reflexive, and therefore worthless. The
+server-side check is re-run on every attempt regardless of what a pre-flight already said — a
+pre-flight is advice, never a lock, and the typed confirmation token from the UI is never
+trusted on its own.
 
 Confirmation dialog states: remote, ref, the sha being overwritten, the commit count being
 dropped, and whether the lease is intact.
+
+**Auth, and the four independent guarantees that no force-push (or any other remote op) can
+ever hang waiting for credentials (P8/D53).** This section's own credential path is a broker
+that interposes `GIT_ASKPASS` with a shim talking to it over a unix socket, used only when the
+user has not already configured their own `core.askPass`/`GIT_ASKPASS` (never overridden,
+§4.1/§4.3). No single mechanism is trusted alone; four are, independently: `GIT_TERMINAL_PROMPT=0`
+(§4.3, always set); `detached: true`/`setsid()` (§4.3), leaving the spawned git with no
+controlling terminal to prompt against even if something tried; the broker itself exiting
+non-zero on a dismissed prompt or its own bounded timeout (default 120s, never the real one in
+a test — see `docs/plans/P8.md`'s own Findings), which git treats exactly like probe 8's
+`terminal prompts disabled`/`Authentication failed for` shapes — classified `AuthFailed`,
+never a hang; and the same per-op cancel every other remote op gets. Windows ships a `.bat`
+shim in place of the `sh` one; this path is shipped without CI coverage on Windows specifically
+(no CI exists for this project at all — §8/D28 — so this is a manual-verification gap named
+honestly rather than a claim of parity).
 
 ### 7.5 Branching and checkout (smart)
 
@@ -1659,6 +1771,13 @@ Scope and honesty about its limits, both stated in the UI:
   (7.7), and the undo affordance repeats it rather than implying a rescue it cannot perform.
 - Operations that are not reversible this way (push, force-push, fetch) never offer undo. We
   never present an undo we cannot honour.
+- **Remote operations (fetch, push, pull, force-push, delete-remote-branch — P8) neither set
+  nor clear the undo slot, in either direction.** "Performing another operation clears the
+  undo slot" (above) means a *local*, undo-slot-eligible operation; an explicit fetch/push the
+  user asked for, and especially a silent background auto-fetch (§7.1) the user did not, is
+  not "another operation" in the sense that bullet means, and clearing a still-valid undo
+  affordance out from under the user because a background timer happened to tick would be a
+  surprise, not a safety measure (P8/D51).
 - The captured recovery sha is shown alongside the button, so the user can recover manually
   even after the slot is cleared.
 
@@ -1897,7 +2016,7 @@ Phases are sequential; each ends at a checkpoint.
 | **P5** | Commit detail | Right pane: metadata, message/trailers/signature, parents, file tree with statuses and counts, **click-a-file-opens-its-diff** via the in-app unified diff view, **a line-mapped "Go to file" action (D14a) that opens the live file or falls back to the historical virtual blob**, copy actions. | Detail populated ≤80 ms; diff opens from tree click and follows keyboard selection; tree correct for renames, merges (parent selector), binary/LFS files; "Go to file" lands on the mapped line in the live file when the path exists in the current checkout, and in the virtual historical blob at that same mapped line when it doesn't (deleted, renamed, or belonging to a commit that isn't an ancestor of what's checked out). |
 | **P6** | Refs & checkout | Branch list and **tag list with full tag manipulation (§7.9)**, create branch, switch branch, detached checkout, delete/rename, **revert (7.10)**, **linked-worktree detection (D12)**, the **undo slot (7.12) seeded by branch and tag deletion**, the **in-progress/conflicted-state banner with VS Code merge-editor delegation, continue and abort (7.11)**, and the full checkout pre-flight engine (§7.5). | Pre-flight classification unit-tested exhaustively; integration tests cover clean-carry, blocked-by-tracked, blocked-by-untracked, in-progress-op; tag create/delete/push incl. annotated and remote-delete asymmetry; revert incl. merge-parent selection; an induced conflicting revert reaches the banner, gates other operations, and both continues and aborts cleanly; undo restores a deleted branch and a deleted annotated tag. |
 | **P7** | Branch review | The sidebar webview view and its own activity-bar container (§2.1), **Review branch changes** on the branch-picker and ref-badge context menus, the base resolver (upstream → detected default branch → ask, never a silent guess) with the header base picker and `review.resolveBase` (§3.5), the `<base>..<branch>` range-scoped walk over P2's existing streaming machinery, and a commit list whose rows expand into **P5's file tree** and whose files open **P5's unified diff, "Open in editor" and line-mapped "Go to file" (D14a)** unchanged (§6.8). | Review opens from both context menus and the palette, first commits painted ≤300 ms on a 200-commit range; base resolves to the tracking branch when it names a different branch, to the detected default branch when it does not, and to the ask-state when neither exists; the override re-runs the comparison in place without reopening the view; a fully-merged branch reports "nothing to review" naming both refs rather than an empty list; every row expands to the same tree P5 renders (renames, merge parent selector, binary/LFS) and every file opens the same diff, with "Go to file" landing on the mapped line in the virtual blob for a branch that is not checked out; hiding the view drops the session and reopening re-resolves and re-walks (no rehydration path, §5.4); Playwright interaction + visual coverage at sidebar widths across all four theme kinds. |
-| **P8** | Remote ops | Fetch (incl. **opt-in background auto-fetch, default off**), push, decomposed pull with strategy selection, force-push with lease + `--force-if-includes`, protected branches, askpass path, progress + typed auth errors. | Integration tests against a local bare remote incl. non-ff rejection, lease violation, hook rejection; no operation can hang on a prompt. |
+| **P8** | Remote ops | Fetch (incl. **opt-in background auto-fetch, default off**), push, decomposed pull with strategy selection, force-push with lease + `--force-if-includes`, protected branches, askpass path, progress + typed auth errors. | Met: integration tests against a local bare remote (and, for the auth/timing scenarios, a real `git http-backend` HTTP fixture) cover non-fast-forward rejection, a true lease violation, a `--force-if-includes` violation on a fetched-but-not-integrated remote move, hook rejection with the hook's own stderr preserved onto the result, two independent no-hang paths (a declined credential prompt and the broker's own timeout firing), cancelling a fetch mid-transfer with no orphaned `git` process and refs left consistent, a refused cancel mid-push, all three protected-branch outcomes (typed-confirmation match, mismatch, and plain push left ungated), the auto-fetch scheduler's focused/hidden/busy-skip/disable-after-failure guardrails, all three pull strategies incl. ff-only's diverged refusal, and `--prune-tags` off by default. No operation can hang on a prompt. Full checklist in `docs/plans/P8.md`'s own Findings. |
 | **P9** | Stash | Stash create (incl. `-u`, message, pathspec), list, show, apply/pop/drop/branch, stashes rendered in the graph, and the pop-prediction engine via `merge-tree` (§7.6) wired into checkout resolution. | Prediction verified against actually-executed pops across clean and conflicting cases; a dropped stash is recoverable through the undo slot. |
 | **P10** | Reset | Soft/mixed/hard with per-mode consequence copy, pre-flight counts, typed confirmation for hard-with-dirty, reflog-backed undo completing the undo slot (7.12). **Also picks up cherry-pick (single commit, §7.13)** — named as a v1 operation with no phase since P6 shipped without it; not designed yet, but reuses P6's sequencer state reader, conflict banner and `OpResult` shape rather than inventing a second mechanism. | Integration tests assert repository state per mode; undo restores; guarded during in-progress operations. Cherry-pick: same conflict-banner/continue/abort path proven for revert, exercised for cherry-pick too. |
 | **P11** | Search | Input with case/whole-word/regex toggles, commit/refs(branches+tags)/both scope, hybrid client-side + git-backed matching, next/prev navigation, live regex validation, abort-on-supersede. | Semantics table fully covered by tests (each toggle × scope); ≤120 ms budget met; malformed regex never throws. |
@@ -1971,6 +2090,13 @@ deliberately deferred rather than left undecided.**
 | D45 | FlatBuffers' scope and shape | **`graph.stream`'s `PackedCommitChunk` only — the 13 fields that carry the bytes, not the whole stream-chunk envelope.** The envelope's seven scalars (`repoId`, `seq`, `from`, `to`, `source`, `remaining`, `exhausted`) cost ~100 bytes and would put a second copy of `source`'s union and `repoId` in the schema for no measurable gain — they cross as plain JSON, unchanged. One `.fbs` (`packages/ipc/schema/graphChunk.fbs`), hand-written `toWire`/`fromWire` adapters (not a hand-built `Builder` layout with no schema at all — that would delete the toolchain problem but also the one durable thing this phase buys), generated code committed rather than regenerated on every build. `commit.fileDiff` and the other ~45 contract types are explicitly left alone, on the measurement (D33): converting them would make the app measurably slower, and no instruction asked for that. |
 | D46 | Versioning FlatBuffers alongside `CONTRACT_VERSION` | **`CONTRACT_VERSION` remains the sole compatibility authority; FlatBuffers' own append-only/never-renumber rules are source hygiene, not a second version number.** A schema field is added at the end and never renumbered or reused — enforced by `check:schema` failing loudly on a rename, reorder or deletion — but this is a lint on the `.fbs` source, not a wire-visible negotiation. The `"KVGC"` `file_identifier` is an integrity tag (this buffer really is a `PackedCommitChunk`, not a stray foreign FlatBuffer) and is **not** a version field: there is no dual-read path and no per-table version byte. A build mismatch is still caught the same way every other contract change is caught — `CONTRACT_VERSION` (8, after this phase) fails loudly at the existing boundary (§3.5). |
 | D47 | Toolchain provenance | **`flatc` is fetched on demand into gitignored `.flatc/`, digest-verified, never vendored — and pinned to the exact same version as the `flatbuffers` npm runtime, `25.9.23`.** Committing platform binaries to get an offline `bun run gen:schema` buys nothing: `gen:schema` is not on any lane's critical path, the *generated code* is, and that is committed. `bun install` and `bun run check` stay network-free and flatc-free either way (`check:schema` compares a digest against the committed generated file rather than regenerating it) — the actual requirement. Matching `flatc` to the runtime version exactly eliminates generator/runtime skew as a class of bug, at the cost of forgoing the SLSA attestation a later tag would carry; the digest pin covers integrity. No `THIRD-PARTY` notices file was produced this phase for the new `flatbuffers`/`flatc` dependency (both Apache-2.0, named in §8.6) — deferred to P13 (Ship), which already owns marketplace/licensing documentation as a phase deliverable. |
+| D48 | Force-push flags | **Bare `--force-with-lease` + `--force-if-includes`, correcting §7.4.** A probed fact: an explicit `--force-with-lease=<ref>:<sha>` satisfies the lease directly and renders `--force-if-includes` inert — identical outcome to omitting it. The two guard different hazards (never-fetched vs fetched-but-not-integrated), and §7.4's own rationale for the explicit sha — a background fetch silently satisfying the lease — is exactly what `--force-if-includes` was invented to close. Mitigations for the residual hazard: auto-fetch is suppressed while a force-push confirmation is open, and the remote tip is re-read and compared immediately before spawning. |
+| D49 | `--prune-tags` off by default | **`--prune` on, `--prune-tags` off, both explicit options.** `--prune-tags` deletes local-only tags (probed), fetch offers no undo (§7.12), and an unpushed tag is user work — §1.1 outranks §7.1's literal command line. |
+| D50 | Which writes may be killed | **A network fetch may be killed after starting; every other write may not.** §4.3's rule protects against stranded `index.lock`, half-written refs and partial sequencer state, none of which a fetch has: it writes collectable objects and moves no visible ref until it completes. A push is not killable because its remote outcome after a kill is unknowable. |
+| D51 | Remote ops get their own request key | **`remote.run`, not a fifth arm of `op.run`.** `runOp` sets the undo slot unconditionally, so routing a background auto-fetch through it would silently destroy the user's undo slot; remote ops additionally need an id for progress correlation before the response exists, an explicit cancel whose post-state is not dropped, and a result shape carrying ref updates and the pull strategy actually used. One key for five kinds keeps `REQUEST_KEYS` legible. Remote ops never touch the undo slot in either direction. |
+| D52 | What protected branches gate | **Force-push (lease and plain) and remote-branch deletion; never plain push.** D19 settled the character (typed confirmation, friction not prohibition) but not the scope. Gating ordinary fast-forward pushes to `main` would make the confirmation reflexive and worthless. Matching is a pure `core` function with `*`-not-crossing-`/` globs, returning the matched pattern so the dialog can name it; enforcement is re-checked host-side because a pre-flight is advice, not a lock. |
+| D53 | The askpass path, and why it cannot hang | **A broker + `GIT_ASKPASS` shim over a unix socket, with four independent no-hang guarantees**: `GIT_TERMINAL_PROMPT=0`; `detached`/`setsid` leaving the child with no controlling terminal; the broker exiting non-zero on timeout or dismissal (probed: git does not retry, it dies with `terminal prompts disabled`); and op-level cancel. A user's own `core.askPass`/`GIT_ASKPASS` is never overridden (§4.1). Windows ships a `.bat` shim without CI coverage. |
+| D54 | One new port, and the three §3.3 predicted that P8 does not add | **`CredentialPrompt` only.** Not `Secrets` — we store no credential, ever; git's own helpers do that better and interposing would hold a user's secret in our process for no gain. Not `Notifications` — progress renders in-webview in the toolbar, per P6's in-webview-dialogs precedent, which keeps it harness-testable and screenshottable. Not `GitHubAuth` — P8 is host-agnostic git plumbing, not a forge integration. |
 
 ### 11.3 Behaviour and safety
 

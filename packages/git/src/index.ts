@@ -1,3 +1,10 @@
+export type { AskpassBrokerOptions, AskpassSession } from "./askpass.ts";
+export {
+  AskpassBroker,
+  DEFAULT_ASKPASS_TIMEOUT_MS,
+  deriveMasked,
+  shouldInterposeAskpass,
+} from "./askpass.ts";
 export type { GitCapabilities, RepoCapabilities } from "./capabilities.ts";
 export { CapabilitiesCache, capabilitiesForVersion } from "./capabilities.ts";
 export type { CatFileResult, CatFileSessionOptions } from "./catFile.ts";
@@ -34,6 +41,45 @@ export type { LogSession, LogSessionOptions, PageOutcome, ReadPageOptions } from
 export { openLogSession } from "./logSession.ts";
 export { FileWatchError, NodeFileWatcher } from "./nodeFileWatcher.ts";
 export { NodeProcessRunner, ProcessSpawnError } from "./nodeProcessRunner.ts";
+export {
+  branchConfigRegexpArgs,
+  branchCreateAndSwitchArgs,
+  branchCreateArgs,
+  branchDeleteArgs,
+  branchRenameArgs,
+  branchRevParseArgs,
+} from "./ops/branch.ts";
+export {
+  rewrittenPathsArgs,
+  switchArgs,
+  switchCreateTrackingArgs,
+  switchDetachArgs,
+} from "./ops/checkout.ts";
+export { abortArgs, continueArgs, readInProgressStateFiles } from "./ops/conflict.ts";
+export { fetchArgs, parseRefUpdates } from "./ops/fetch.ts";
+export {
+  ffOnlyWouldDiverge,
+  mergeArgs,
+  mergeFfOnlyArgs,
+  parsePullConfig,
+  pullConfigArgs,
+  rebaseArgs,
+} from "./ops/pull.ts";
+export {
+  deleteRemoteBranchArgs,
+  forcePushLeaseArgs,
+  forcePushPlainArgs,
+  pushArgs,
+} from "./ops/push.ts";
+export { revertArgs } from "./ops/revert.ts";
+export {
+  tagCreateArgs,
+  tagDeleteArgs,
+  tagDeleteRemoteArgs,
+  tagPushArgs,
+  undoAnnotatedTagArgs,
+  undoLightweightTagArgs,
+} from "./ops/tag.ts";
 export type { ParsedFileDiffBody } from "./parse/diff.ts";
 export {
   fileDiffArgs,
@@ -61,30 +107,6 @@ export {
 } from "./parse/log.ts";
 export { mergeTreeArgs, parseMergeTreeOutput } from "./parse/mergeTree.ts";
 export {
-  branchConfigRegexpArgs,
-  branchCreateAndSwitchArgs,
-  branchCreateArgs,
-  branchDeleteArgs,
-  branchRenameArgs,
-  branchRevParseArgs,
-} from "./ops/branch.ts";
-export {
-  rewrittenPathsArgs,
-  switchArgs,
-  switchCreateTrackingArgs,
-  switchDetachArgs,
-} from "./ops/checkout.ts";
-export { abortArgs, continueArgs, readInProgressStateFiles } from "./ops/conflict.ts";
-export { revertArgs } from "./ops/revert.ts";
-export {
-  tagCreateArgs,
-  tagDeleteArgs,
-  tagDeleteRemoteArgs,
-  tagPushArgs,
-  undoAnnotatedTagArgs,
-  undoLightweightTagArgs,
-} from "./ops/tag.ts";
-export {
   parseRefRecord,
   REFS_FORMAT,
   REFS_RECORD_DELIMITER,
@@ -93,6 +115,8 @@ export {
 } from "./parse/refs.ts";
 export { parseStashRecord, STASH_FORMAT, stashListArgs } from "./parse/stash.ts";
 export { parseStatus, statusArgs } from "./parse/status.ts";
+export type { ParsedProgress } from "./progress.ts";
+export { createProgressParser } from "./progress.ts";
 export type { CommitDetailOptions, LogQueryOptions, RefsSnapshot } from "./queries.ts";
 export {
   commitDetail,
@@ -112,6 +136,7 @@ export type {
   BlobResult,
   GitStatus,
   GraphChunkPayload,
+  RemoteOpProgress,
   RepoOpenOutcome,
   RepoServiceDeps,
 } from "./repoService.ts";
@@ -121,6 +146,7 @@ export {
   DIFF_CACHE_MAX_BYTES,
   HIDDEN_EVICT_MS,
   MAX_PATCH_BYTES,
+  PROGRESS_THROTTLE_MS,
   RepoService,
 } from "./repoService.ts";
 export type { RepoHandlersDeps, RepoServicePort } from "./rpcHandlers.ts";

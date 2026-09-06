@@ -52,6 +52,9 @@ function toSettingsSnapshot(settings: Settings): SettingsSnapshot {
     "kiraVersion.graph.scope": settings["kiraVersion.graph.scope"],
     "kiraVersion.log.level": settings["kiraVersion.log.level"],
     "kiraVersion.review.baseCandidates": settings["kiraVersion.review.baseCandidates"],
+    "kiraVersion.fetch.autoInterval": settings["kiraVersion.fetch.autoInterval"],
+    "kiraVersion.pull.strategy": settings["kiraVersion.pull.strategy"],
+    "kiraVersion.protectedBranches": settings["kiraVersion.protectedBranches"],
   };
 }
 
@@ -82,7 +85,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     runner: new NodeProcessRunner(),
     fileWatcher: new NodeFileWatcher(logger.child("fileWatcher")),
     logger,
-    settings: currentSettings,
+    settings: () => currentSettings,
     configuredGitCandidates: configuredGitCandidates(currentSettings),
   });
   service = repoService;

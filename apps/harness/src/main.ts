@@ -12,6 +12,7 @@ import {
   createMockBridge,
   type HarnessEditorAction,
   type RecordedOp,
+  type RecordedRemoteOp,
   type RecordedReviewOpen,
   type RecordedUndo,
 } from "./mockBridge.ts";
@@ -37,6 +38,9 @@ declare global {
       /** P6 W19: the most recent `undo.run` call the mock bridge recorded — see
        *  `mockBridge.ts`'s own `RecordedUndo` doc comment. */
       readonly lastUndo: RecordedUndo | undefined;
+      /** P8 W21: the most recent `remote.run` call the mock bridge recorded — see
+       *  `mockBridge.ts`'s own `RecordedRemoteOp` doc comment. */
+      readonly lastRemoteOp: RecordedRemoteOp | undefined;
       /** P6 W19: see `mockBridge.ts`'s own `MockHandlers.resolveOneConflictedPath` doc comment. */
       resolveOneConflictedPath(): boolean;
       /** P7 W15: pushes `review.target` at the mock bridge — see `mockBridge.ts`'s own
@@ -194,6 +198,9 @@ window.__kiraHarness = {
   },
   get lastUndo(): RecordedUndo | undefined {
     return transport.getLastUndo();
+  },
+  get lastRemoteOp(): RecordedRemoteOp | undefined {
+    return transport.getLastRemoteOp();
   },
   resolveOneConflictedPath(): boolean {
     return transport.resolveOneConflictedPath();

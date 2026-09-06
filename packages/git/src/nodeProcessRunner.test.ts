@@ -101,4 +101,44 @@ describe("NodeProcessRunner", () => {
     expect(err.length).toBeLessThan(1024 * 1024 + 100);
     expect(Buffer.from(err).toString("utf8")).toContain("truncated");
   });
+
+  test("onStderr tees every chunk, and stderr still resolves with the full buffer", async () => {
+    const seen: string[] = [];
+    const proc = runner.spawn("/bin/bash", {
+      argv: ["-c", "printf 'one\\ntwo\\n' 1>&2"],
+      cwd: "/",
+      env: baseEnv,
+      onStderr: (chunk) => seen.push(Buffer.from(chunk).toString("utf8")),
+    });
+    await collect(proc.stdout);
+    const err = await proc.stderr;
+    expect(seen.join("")).toBe("one\ntwo\n");
+    expect(Buffer.from(err).toString("utf8")).toBe("one\ntwo\n");
+  });
+
+  test("a throwing onStderr does not break the spawn — stderr and exit still resolve", async () => {
+    const proc = runner.spawn("/bin/bash", {
+      argv: ["-c", "printf 'boom\\n' 1>&2"],
+      cwd: "/",
+      env: baseEnv,
+      onStderr: () => {
+        throw new Error("progress parser exploded");
+      },
+    });
+    await collect(proc.stdout);
+    const err = await proc.stderr;
+    expect(Buffer.from(err).toString("utf8")).toBe("boom\n");
+    expect((await proc.exit).code).toBe(0);
+  });
+
+  test("without onStderr, behavior is byte-for-byte unaffected (no callback path at all)", async () => {
+    const proc = runner.spawn("/bin/bash", {
+      argv: ["-c", "printf 'plain\\n' 1>&2"],
+      cwd: "/",
+      env: baseEnv,
+    });
+    await collect(proc.stdout);
+    const err = await proc.stderr;
+    expect(Buffer.from(err).toString("utf8")).toBe("plain\n");
+  });
 });

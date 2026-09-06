@@ -1,7 +1,7 @@
+import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { copyFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
 import { locateGit } from "../../packages/git/src/discovery.ts";
 import { openGitDriver } from "../../packages/git/src/driver.ts";
 import { NodeProcessRunner } from "../../packages/git/src/nodeProcessRunner.ts";
@@ -99,7 +99,7 @@ describe("log", () => {
 
 describe("refs", () => {
   test("reports upstream and ahead/behind for a branch with a remote", async () => {
-    const { dir } = withRemote({ localOnlyCommits: 1 });
+    const { dir } = await withRemote({ localOnlyCommits: 1 });
     const driver = await driverFor(dir);
     const records = await refs(driver);
     const main = records.find((r) => r.refname === "refs/heads/main");
@@ -128,7 +128,7 @@ describe("refs", () => {
 
 describe("refsSnapshot — P6/W8's two-spawn scoped fetch", () => {
   test("splits heads from remote-tracking branches by kind, both from the heads+remotes spawn", async () => {
-    const { dir } = withRemote({ localOnlyCommits: 1 });
+    const { dir } = await withRemote({ localOnlyCommits: 1 });
     const driver = await driverFor(dir);
     const snapshot = await refsSnapshot(driver);
     expect(snapshot.branches.some((r) => r.shortName === "main")).toBe(true);

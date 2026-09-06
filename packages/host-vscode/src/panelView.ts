@@ -40,6 +40,7 @@ export class KiraGraphViewProvider implements vscode.WebviewViewProvider {
   readonly #deps: KiraGraphViewProviderDeps;
   #server: RpcServer | undefined;
   #changeSubscription: Disposable | undefined;
+  #progressSubscription: Disposable | undefined;
 
   constructor(deps: KiraGraphViewProviderDeps) {
     this.#deps = deps;
@@ -73,11 +74,26 @@ export class KiraGraphViewProvider implements vscode.WebviewViewProvider {
     const server = createRpcServer(channel, handlers);
     this.#server = server;
     this.#changeSubscription = service.onChanged((event) => server.emit("repo.changed", event));
+    // P8 W16: the one view that runs remote ops at all (`reviewView.ts` deliberately does not
+    // subscribe — D41's precedent, that view renders no operation UI) gets `remote.progress`
+    // fanned out the same way `repo.changed` already is above.
+    this.#progressSubscription = service.onOpProgress((event) =>
+      server.emit("remote.progress", {
+        repoId: event.repoId,
+        phase: event.phase,
+        percent: event.percent,
+        done: event.done,
+        total: event.total,
+        remote: event.remote,
+      }),
+    );
 
     webviewView.onDidChangeVisibility(() => service.setUiVisible(webviewView.visible));
     webviewView.onDidDispose(() => {
       this.#changeSubscription?.dispose();
       this.#changeSubscription = undefined;
+      this.#progressSubscription?.dispose();
+      this.#progressSubscription = undefined;
       server.dispose();
       if (this.#server === server) this.#server = undefined;
     });

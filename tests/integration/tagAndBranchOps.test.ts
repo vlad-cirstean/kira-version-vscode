@@ -41,7 +41,7 @@ async function openService(dir: string, runner: ProcessRunner = new NodeProcessR
     runner,
     fileWatcher: new NodeFileWatcher(),
     logger: new FakeLogger(),
-    settings: settingsWithPageSize(10),
+    settings: () => settingsWithPageSize(10),
     configuredGitCandidates: [],
   });
   const opened = await service.open(dir);
@@ -98,7 +98,7 @@ describe("Tag operations against real git (P6 W21)", () => {
   });
 
   test("push then remote-delete against a local bare remote: the fetch asymmetry §7.9 now states", async () => {
-    const repo = withRemote();
+    const repo = await withRemote();
     const env = baseEnv(repo.dir);
     execFileSync("git", ["tag", "v1"], { cwd: repo.dir, env }); // lightweight, on local HEAD
 

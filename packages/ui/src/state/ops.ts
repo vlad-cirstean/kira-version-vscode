@@ -3,6 +3,14 @@ import type {
   CheckoutPreflight,
   OpRequest,
   OpResult,
+  PullPreflight,
+  PullStrategy,
+  PullStrategySource,
+  PushPreflight,
+  RemoteOpKind,
+  RemoteOpParams,
+  RemoteOpResult,
+  RemoteProgress,
   RevertPreflight,
   StatusSummary,
   UndoSlotSnapshot,
@@ -15,6 +23,35 @@ import {
   composeRevertAnnouncement,
 } from "./liveAnnouncements.ts";
 import type { RefsState } from "./refs.ts";
+
+/** The route a confirmed `ForcePushDialog.vue` takes. `plain: true` selects §7.4's second,
+ *  differently-worded confirmation (plain `--force`); `plain: false` is the default
+ *  `--force-with-lease --force-if-includes` path (D48). `confirmToken` is the typed branch name,
+ *  present only when `PushPreflight.protectedBy` was non-null — re-verified host-side (D52), so a
+ *  wrong value here surfaces as an ordinary `ProtectedBranch` failure, not a client-side check. */
+export interface ForcePushRoute {
+  readonly plain: boolean;
+  readonly confirmToken: string | undefined;
+}
+
+/** `ForcePushDialog.vue`'s own pending state: the preflight it renders from, plus which remote
+ *  and branch it was opened for (both already known by the caller, but the dialog needs them
+ *  again to build the eventual `RemoteOpParams`). */
+export interface PendingForcePush {
+  readonly remote: string;
+  readonly branch: string;
+  readonly preflight: PushPreflight;
+}
+
+/** The resolved pull strategy and its provenance, shown by the toolbar's pull-strategy picker
+ *  before (and after) a pull runs (§7.3: "must not discover [a rebase] by watching their history
+ *  get rewritten"). Set the moment it is known — from a preflight round trip, or immediately for
+ *  an explicit override the user already picked — and left in place once the op finishes so it
+ *  stays visible as a record of what just ran. */
+export interface PullStrategyInfo {
+  readonly strategy: PullStrategy;
+  readonly source: PullStrategySource;
+}
 
 /** The route a confirmed `blockedByTracked` checkout takes — `discardLocalChanges: false` for
  *  every other verdict, since `runCheckout` only ever opens the dialog for `"blocked"` (§7.5:
@@ -60,12 +97,36 @@ export class OpsState {
   readonly pendingCheckout: ShallowRef<CheckoutPreflight | undefined> = shallowRef(undefined);
   readonly pendingRevert: ShallowRef<RevertPreflight | undefined> = shallowRef(undefined);
 
+  // -------------------------------------------------------------------------------------
+  // P8 W17: remote ops. Deliberately a sibling to the four steps above, not folded into
+  // `#runSimple` — `docs/plans/P8.md`'s own W17 doc comment: cancellation and progress are
+  // genuinely different concerns, and merging them would make the local path pay for the
+  // remote path's complexity. `#applyRemoteResult` below (not `#applyResult`) is the other half
+  // of that split: `RemoteOpResult` carries no `undo` field at all, by construction (D51, OQ6 —
+  // no remote operation ever touches the undo slot in either direction).
+  // -------------------------------------------------------------------------------------
+
+  /** Which `RemoteOpKind` is currently running against this repo, or `undefined` — the toolbar's
+   *  progress affordance and its cancel button both key off this, not `busy` (which is also true
+   *  for local ops the toolbar renders no progress bar for). */
+  readonly activeRemoteOp: ShallowRef<RemoteOpKind | undefined> = shallowRef(undefined);
+  /** Latest throttled `remote.progress` for the op named by `activeRemoteOp` — `undefined` before
+   *  the first chunk arrives (a trivially small fetch/push may emit none at all; the toolbar must
+   *  not read that as a stall, matching probe 6). Cleared when the op finishes. */
+  readonly remoteProgress: ShallowRef<RemoteProgress | undefined> = shallowRef(undefined);
+  readonly pendingForcePush: ShallowRef<PendingForcePush | undefined> = shallowRef(undefined);
+  /** Set the moment a strategy is known (preflight response, or an explicit override) and left
+   *  in place after the pull finishes — see `PullStrategyInfo`'s own doc comment. */
+  readonly pullStrategy: ShallowRef<PullStrategyInfo | undefined> = shallowRef(undefined);
+
   readonly #bridge: BridgeClient;
   readonly #refs: RefsState;
   #repoId: string | undefined;
   #resolveCheckout: ((route: CheckoutRoute | null) => void) | undefined;
   #resolveRevert: ((route: RevertRoute | null) => void) | undefined;
+  #resolveForcePush: ((route: ForcePushRoute | null) => void) | undefined;
   readonly #unsubscribe: () => void;
+  readonly #unsubscribeProgress: () => void;
 
   constructor(bridge: BridgeClient, refs: RefsState) {
     this.#bridge = bridge;
@@ -77,10 +138,17 @@ export class OpsState {
       if (this.#repoId !== event.repoId) return;
       void this.refreshStatus();
     });
+    this.#unsubscribeProgress = bridge.on("remote.progress", (event) => {
+      if (this.#repoId !== event.repoId) return;
+      this.remoteProgress.value = event;
+    });
   }
 
   setRepoId(repoId: string | undefined): void {
     this.#repoId = repoId;
+    this.activeRemoteOp.value = undefined;
+    this.remoteProgress.value = undefined;
+    this.pullStrategy.value = undefined;
     if (repoId === undefined) {
       this.statusSummary.value = undefined;
       this.undoSlot.value = null;
@@ -336,6 +404,231 @@ export class OpsState {
     }
   }
 
+  // -------------------------------------------------------------------------------------
+  // remote ops (P8 W17)
+  // -------------------------------------------------------------------------------------
+
+  /** `PullStrategyPicker.vue`'s own read: what the ladder in §7.3 would resolve to *right now*,
+   *  with no override — a read, not an operation (mirrors `openReview`'s own doc comment above),
+   *  so the popover can show "follow your configuration (would run: rebase)" before the user
+   *  commits to an override. */
+  async previewPullStrategy(branch: string): Promise<PullPreflight | undefined> {
+    const repoId = this.#repoId;
+    if (repoId === undefined) return undefined;
+    return this.#bridge.request("remote.pullPreflight", { repoId, branch });
+  }
+
+  /** §7.1: `--prune` on, `--prune-tags` off, both by default (D49 — an unpushed tag is user
+   *  work and fetch offers no undo). Neither is exposed as a toolbar option at P8; a future
+   *  phase can surface them without changing this method's shape. */
+  async runFetch(remote: string): Promise<void> {
+    await this.#runRemote(
+      {
+        kind: "fetch",
+        remote,
+        branch: undefined,
+        setUpstream: false,
+        prune: true,
+        pruneTags: false,
+        strategy: undefined,
+        expectedRemoteTip: undefined,
+        plainForce: undefined,
+        confirmToken: undefined,
+      },
+      (result) => (result.ok ? `Fetched ${remote}` : undefined),
+      "Fetch",
+    );
+  }
+
+  /**
+   * §7.3: the resolved strategy and its provenance are shown before the operation runs, not
+   * after. When the caller has not already picked one (the pull-strategy picker's own override),
+   * `remote.pullPreflight` resolves it first and `pullStrategy` is set from that response before
+   * `remote.run` is ever called — so what the toolbar displays is exactly what is about to run,
+   * not a guess. `explicitStrategy` short-circuits the preflight round trip entirely: the user's
+   * own choice is authoritative (ladder step 1) and the source is "explicit" by construction.
+   */
+  async runPull(remote: string, branch: string, explicitStrategy?: PullStrategy): Promise<void> {
+    const repoId = this.#repoId;
+    if (repoId === undefined || this.busy.value) return;
+    let strategy: PullStrategy;
+    let source: PullStrategySource;
+    if (explicitStrategy !== undefined) {
+      strategy = explicitStrategy;
+      source = "explicit";
+    } else {
+      const preflight: PullPreflight = await this.#bridge.request("remote.pullPreflight", {
+        repoId,
+        branch,
+      });
+      if (this.#repoId !== repoId) return;
+      strategy = preflight.strategy;
+      source = preflight.source;
+    }
+    this.pullStrategy.value = { strategy, source };
+    await this.#runRemote(
+      {
+        kind: "pull",
+        remote,
+        branch,
+        setUpstream: false,
+        prune: false,
+        pruneTags: false,
+        strategy,
+        expectedRemoteTip: undefined,
+        plainForce: undefined,
+        confirmToken: undefined,
+      },
+      (result) => (result.ok ? `Pulled ${remote}/${branch} (${strategy})` : undefined),
+      "Pull",
+    );
+  }
+
+  /** Plain push is never gated (D52) — no confirm step here, only the upstream question a
+   *  preflight already answers: §7.2's "offered, not silent" for `--set-upstream`. */
+  async runPush(remote: string, branch: string): Promise<void> {
+    const repoId = this.#repoId;
+    if (repoId === undefined || this.busy.value) return;
+    const preflight: PushPreflight = await this.#bridge.request("remote.pushPreflight", {
+      repoId,
+      branch,
+      remote,
+    });
+    if (this.#repoId !== repoId) return;
+    await this.#runRemote(
+      {
+        kind: "push",
+        remote,
+        branch,
+        setUpstream: preflight.wouldSetUpstream,
+        prune: false,
+        pruneTags: false,
+        strategy: undefined,
+        expectedRemoteTip: undefined,
+        plainForce: undefined,
+        confirmToken: undefined,
+      },
+      (result) => (result.ok ? `Pushed ${branch} to ${remote}` : undefined),
+      "Push",
+    );
+  }
+
+  /**
+   * `ForcePushDialog.vue`'s own entry point: a preflight round trip (so the dialog can show the
+   * remote tip it is about to overwrite and the matched protected pattern, if any), then the
+   * dialog's own confirm/cancel promise, mirroring `#confirmCheckout`/`#confirmRevert` above.
+   * `expectedRemoteTip` is the preflight's `remoteTip` — re-read and compared host-side
+   * immediately before spawning (D48's residual-hazard mitigation), so a change between here and
+   * the actual spawn fails with `LeaseViolation` rather than silently overwriting more than the
+   * dialog showed.
+   */
+  async runForcePush(remote: string, branch: string): Promise<void> {
+    const repoId = this.#repoId;
+    if (repoId === undefined || this.busy.value) return;
+    const preflight: PushPreflight = await this.#bridge.request("remote.pushPreflight", {
+      repoId,
+      branch,
+      remote,
+    });
+    if (this.#repoId !== repoId) return;
+    const route = await this.#confirmForcePush({ remote, branch, preflight });
+    if (route === null) {
+      this.announcement.value = "Force push cancelled.";
+      return;
+    }
+    await this.#runRemote(
+      {
+        kind: "forcePush",
+        remote,
+        branch,
+        setUpstream: false,
+        prune: false,
+        pruneTags: false,
+        strategy: undefined,
+        expectedRemoteTip: preflight.remoteTip,
+        plainForce: route.plain,
+        confirmToken: route.confirmToken,
+      },
+      (result) => (result.ok ? `Force-pushed ${branch} to ${remote}` : undefined),
+      "Force push",
+    );
+  }
+
+  #confirmForcePush(pending: PendingForcePush): Promise<ForcePushRoute | null> {
+    this.pendingForcePush.value = pending;
+    return new Promise((resolve) => {
+      this.#resolveForcePush = resolve;
+    });
+  }
+
+  /** `ForcePushDialog.vue`'s Cancel/confirm buttons call this — `null` for Cancel, matching
+   *  `resolveCheckoutDialog`/`resolveRevertDialog`'s own convention. */
+  resolveForcePushDialog(route: ForcePushRoute | null): void {
+    this.pendingForcePush.value = undefined;
+    const resolve = this.#resolveForcePush;
+    this.#resolveForcePush = undefined;
+    resolve?.(route);
+  }
+
+  /** `remote.cancel` — always safe to call: `false` (never an error) when there was nothing to
+   *  cancel, including when the toolbar's cancel button is clicked against a push or a pull
+   *  already past its fetch phase (D50; W19's "cancel is refused mid-push"). Does not throw and
+   *  does not touch `busy`/`activeRemoteOp` itself — the in-flight `#runRemote` call unwinds
+   *  those the moment `remote.run` actually settles, whether that is `Cancelled` or, for an
+   *  unkillable op, its ordinary result. */
+  async cancelRemote(): Promise<boolean> {
+    const repoId = this.#repoId;
+    if (repoId === undefined) return false;
+    const { cancelled } = await this.#bridge.request("remote.cancel", { repoId });
+    return cancelled;
+  }
+
+  async #runRemote(
+    op: Omit<RemoteOpParams, "repoId">,
+    announceOk: (result: RemoteOpResult) => string | undefined,
+    actionLabel: string,
+  ): Promise<RemoteOpResult | undefined> {
+    const repoId = this.#repoId;
+    if (repoId === undefined || this.busy.value) return undefined;
+    this.busy.value = true;
+    this.activeRemoteOp.value = op.kind;
+    this.remoteProgress.value = undefined;
+    try {
+      const result = await this.#bridge.request("remote.run", { repoId, ...op });
+      if (this.#repoId !== repoId) return result;
+      this.#applyRemoteResult(result);
+      this.announcement.value = result.ok
+        ? (announceOk(result) ?? `${actionLabel} succeeded`)
+        : composeOpFailureAnnouncement(actionLabel, result.error);
+      return result;
+    } finally {
+      this.busy.value = false;
+      this.activeRemoteOp.value = undefined;
+      this.remoteProgress.value = undefined;
+    }
+  }
+
+  /** The remote-op half of `#applyResult`: reconciles `head`/`inProgress` exactly the same way
+   *  (so a conflicting pull lands in P6's existing in-progress banner, unchanged), but — unlike
+   *  `#applyResult` — never touches `undoSlot` in either direction. `RemoteOpResult` carries no
+   *  `undo` field at all, by construction (D51); this method's whole reason to exist separately
+   *  is that OQ6's answer must be structurally impossible to get wrong, not merely remembered. */
+  #applyRemoteResult(result: RemoteOpResult): void {
+    this.#refs.applyHead(result.head);
+    const current = this.statusSummary.value;
+    this.statusSummary.value = current
+      ? { ...current, head: result.head, inProgress: result.inProgress }
+      : {
+          head: result.head,
+          upstream: undefined,
+          counts: { staged: 0, unstaged: 0, untracked: 0, unmerged: 0 },
+          isClean: true,
+          dirtyPaths: [],
+          dirtyTruncated: false,
+          inProgress: result.inProgress,
+        };
+  }
+
   async #runSimple(
     op: OpRequest,
     announceOk: (ok: true) => string | undefined,
@@ -379,5 +672,6 @@ export class OpsState {
 
   dispose(): void {
     this.#unsubscribe();
+    this.#unsubscribeProgress();
   }
 }

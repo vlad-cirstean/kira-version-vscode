@@ -8,6 +8,11 @@
  * Bytes rather than strings is deliberate: paths and blob content are frequently not valid
  * UTF-8, and decoding here — before any parser sees the data — would corrupt it irreversibly.
  * Decoding happens once per field, in the parser that knows what the field means.
+ *
+ * P8/W1: the port has exactly one streaming affordance, `onStderr` below — not a second read
+ * path. `stderr` still resolves with the complete bounded buffer every existing caller
+ * (`classifyGitError`) depends on; `onStderr` is a tee on the same bytes, for progress
+ * reporting's benefit, called before each chunk is appended to that buffer.
  */
 export interface SpawnRequest {
   /** git's own argv, without the executable path. */
@@ -17,6 +22,13 @@ export interface SpawnRequest {
   readonly env: Readonly<Record<string, string>>;
   readonly stdin?: Uint8Array | AsyncIterable<Uint8Array>;
   readonly signal?: AbortSignal;
+  /** Called with each stderr chunk as it arrives, before it is appended to the buffer that
+   *  `stderr` resolves with. Progress reporting (§7.1's `--progress` framing) needs to see
+   *  chunks before exit; `classifyGitError` still needs the whole buffer at exit. Both, from
+   *  one read — not two read paths that can disagree. Never called after `exit` resolves.
+   *  Exceptions thrown by the callback are logged and swallowed: a progress-rendering bug must
+   *  not fail a push. */
+  readonly onStderr?: (chunk: Uint8Array) => void;
 }
 
 export interface ProcessExit {

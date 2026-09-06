@@ -18,6 +18,17 @@ import type {
 import { locateGit, type ResolvedGit } from "./discovery.ts";
 import type { CatFileSession } from "./driver.ts";
 
+function concatUint8(chunks: readonly Uint8Array[]): Uint8Array {
+  const total = chunks.reduce((sum, c) => sum + c.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.length;
+  }
+  return out;
+}
+
 export class FakeProcess implements SpawnedProcess {
   readonly stdout: AsyncIterable<Uint8Array>;
   readonly stderr: Promise<Uint8Array>;
@@ -28,6 +39,8 @@ export class FakeProcess implements SpawnedProcess {
   #stdoutChunks: Uint8Array[] = [];
   #stdoutEnded = false;
   #stdoutWaiters: Array<() => void> = [];
+  #stderrChunks: Uint8Array[] = [];
+  #onStderr: ((chunk: Uint8Array) => void) | undefined;
   #resolveStderr!: (bytes: Uint8Array) => void;
   #resolveExit!: (exit: ProcessExit) => void;
   #rejectExit!: (err: unknown) => void;
@@ -37,7 +50,8 @@ export class FakeProcess implements SpawnedProcess {
     return this.#settled;
   }
 
-  constructor() {
+  constructor(onStderr?: (chunk: Uint8Array) => void) {
+    this.#onStderr = onStderr;
     this.stderr = new Promise((resolve) => {
       this.#resolveStderr = resolve;
     });
@@ -46,6 +60,19 @@ export class FakeProcess implements SpawnedProcess {
       this.#rejectExit = reject;
     });
     this.stdout = this.#iterateStdout();
+  }
+
+  /** Mirrors `NodeProcessRunner`'s tee: `onStderr` sees this chunk immediately, before it is
+   *  appended to the buffer `stderr` eventually resolves with — for progress-parser tests that
+   *  need to assert on incremental delivery rather than the final joined blob. */
+  emitStderr(chunk: Uint8Array): void {
+    try {
+      this.#onStderr?.(chunk);
+    } catch {
+      // Same swallow-and-log contract as the real runner: a throwing parser must not affect
+      // the fake's own bookkeeping.
+    }
+    this.#stderrChunks.push(chunk);
   }
 
   async *#iterateStdout(): AsyncGenerator<Uint8Array> {
@@ -77,11 +104,15 @@ export class FakeProcess implements SpawnedProcess {
     for (const waiter of waiters) waiter();
   }
 
+  /** `stderrText`, if given, is one final chunk — teed through `onStderr` exactly like every
+   *  chunk `emitStderr` delivered before it — then everything accumulated is joined for the
+   *  `stderr` promise, matching the real runner's "tee, then buffer" order. */
   finish(code: number, stderrText = ""): void {
     if (this.#settled) return;
     this.#settled = true;
     this.endStdout();
-    this.#resolveStderr(new TextEncoder().encode(stderrText));
+    if (stderrText.length > 0) this.emitStderr(new TextEncoder().encode(stderrText));
+    this.#resolveStderr(concatUint8(this.#stderrChunks));
     this.#resolveExit({ code, signal: null });
   }
 
@@ -89,7 +120,7 @@ export class FakeProcess implements SpawnedProcess {
     if (this.#settled) return;
     this.#settled = true;
     this.endStdout();
-    this.#resolveStderr(new Uint8Array());
+    this.#resolveStderr(concatUint8(this.#stderrChunks));
     this.#rejectExit(err);
   }
 
@@ -103,7 +134,7 @@ export class FakeProcess implements SpawnedProcess {
     if (!this.#settled) {
       this.#settled = true;
       this.endStdout();
-      this.#resolveStderr(new Uint8Array());
+      this.#resolveStderr(concatUint8(this.#stderrChunks));
       this.#resolveExit({ code: null, signal });
     }
   }
@@ -115,7 +146,7 @@ export class FakeProcessRunner implements ProcessRunner {
 
   spawn(executable: string, request: SpawnRequest): SpawnedProcess {
     this.calls.push({ executable, request });
-    const proc = new FakeProcess();
+    const proc = new FakeProcess(request.onStderr);
     this.processes.push(proc);
     // Mirrors NodeProcessRunner's contract: a ProcessRunner honors request.signal itself.
     if (request.signal) {

@@ -1,5 +1,5 @@
-import { execFileSync } from "node:child_process";
 import { describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { locateGit } from "../../packages/git/src/discovery.ts";
 import { openGitDriver } from "../../packages/git/src/driver.ts";
 import { NodeProcessRunner } from "../../packages/git/src/nodeProcessRunner.ts";

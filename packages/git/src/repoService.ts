@@ -18,6 +18,7 @@ import type {
   CheckoutPreflight,
   CommitDetail,
   CommitStore,
+  CredentialPrompt,
   DiffHunk,
   Disposable,
   FileDiff,
@@ -31,8 +32,14 @@ import type {
   OpResult,
   PackedCommitChunk,
   ProcessRunner,
+  PullConfigValues,
+  PullPreflight,
+  PushPreflight,
   RefKind,
   RefRecord,
+  RefUpdate,
+  RemoteOpRequest,
+  RemoteOpResult,
   RepoIdentity,
   RevertPrediction,
   RevertPreflight,
@@ -44,23 +51,28 @@ import type {
 } from "@kira-version/core";
 import {
   assertDefined,
+  buildPullPreflight,
   CommitStore as CommitStoreImpl,
   classifyCheckout,
   classifyInProgress,
+  classifyPush,
   classifyRevert,
   describeInProgress,
   dirtyPathsFrom,
+  matchProtectedBranch,
   resolveBase,
+  resolvePullStrategy,
   summarizeStatus,
   UNDO_POLICY,
   UndoSlot,
 } from "@kira-version/core";
+import { AskpassBroker, type AskpassSession, shouldInterposeAskpass } from "./askpass.ts";
 import { DEFAULT_MAX_BLOB_BYTES, openCatFileSession } from "./catFile.ts";
 import type { GitResolution, GitVersion, ResolvedGit } from "./discovery.ts";
 import { locateGit, resolveRepoIdentity } from "./discovery.ts";
-import type { GitDriver, GitRead } from "./driver.ts";
+import type { GitDriver, GitRead, GitWriteResult } from "./driver.ts";
 import { openGitDriver } from "./driver.ts";
-import { GitError } from "./errors.ts";
+import { GitCancelled, GitError } from "./errors.ts";
 import type { LogSession } from "./logSession.ts";
 import { openLogSession } from "./logSession.ts";
 import {
@@ -78,6 +90,21 @@ import {
   switchDetachArgs,
 } from "./ops/checkout.ts";
 import { abortArgs, continueArgs, readInProgressStateFiles } from "./ops/conflict.ts";
+import { fetchArgs, parseRefUpdates } from "./ops/fetch.ts";
+import {
+  ffOnlyWouldDiverge,
+  mergeArgs,
+  mergeFfOnlyArgs,
+  parsePullConfig,
+  pullConfigArgs,
+  rebaseArgs,
+} from "./ops/pull.ts";
+import {
+  deleteRemoteBranchArgs,
+  forcePushLeaseArgs,
+  forcePushPlainArgs,
+  pushArgs,
+} from "./ops/push.ts";
 import { revertArgs } from "./ops/revert.ts";
 import {
   tagCreateArgs,
@@ -95,6 +122,8 @@ import {
   worktreeDiffArgs,
 } from "./parse/diff.ts";
 import { parseRefRecord, REFS_FORMAT, REFS_RECORD_DELIMITER } from "./parse/refs.ts";
+import type { ParsedProgress } from "./progress.ts";
+import { createProgressParser } from "./progress.ts";
 import type { RefsSnapshot } from "./queries.ts";
 import {
   commitDetail,
@@ -138,6 +167,17 @@ export interface GraphChunkPayload {
   readonly remaining: number;
   readonly exhausted: boolean;
   readonly commits: PackedCommitChunk;
+}
+
+// ---------------------------------------------------------------------------------------
+// P8 — Remote ops' local wire-shaped types (see the module doc comment for why local, not ipc's).
+// ---------------------------------------------------------------------------------------
+
+/** `GitDriver.writeStreaming`'s `onStderr` tee, fanned out to every `onOpProgress` subscriber —
+ *  `ParsedProgress` (`progress.ts`) plus the `repoId` a driver-level event has no way to know on
+ *  its own. ipc's own `RemoteProgress` (`contract.ts`) adds nothing beyond that same pair. */
+export interface RemoteOpProgress extends ParsedProgress {
+  readonly repoId: string;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -485,8 +525,23 @@ export interface RepoServiceDeps {
   readonly runner: ProcessRunner;
   readonly fileWatcher: FileWatcher;
   readonly logger: Logger;
-  readonly settings: Settings;
+  /** P8/W15: a thunk, not a frozen snapshot — matches `RepoHandlersDeps.settings`'s own shape so
+   *  `extension.ts` can pass the exact same closure to both. Every read site calls it fresh
+   *  (`this.#deps.settings()["kiraVersion.X"]`) rather than caching a value at construction time;
+   *  the one caller that actually depends on this is the auto-fetch scheduler (`#autoFetchTick`),
+   *  whose whole "re-arms on settings change" behaviour (§ W15 item 3) falls out for free by
+   *  simply re-reading `kiraVersion.fetch.autoInterval` on every poll rather than needing a
+   *  separate settings-changed push into this service — before this, `Settings` was frozen at
+   *  `create()` time, so changing `kiraVersion.fetch.autoInterval` from `0` without a window
+   *  reload would never have taken effect at all. */
+  readonly settings: () => Settings;
   readonly configuredGitCandidates: readonly string[];
+  /** P8/W14: optional so the many existing call sites that already build `RepoServiceDeps` need
+   *  not all learn about it at once. Absent means a remote op that needs a credential never
+   *  interposes the askpass broker — git's own `GIT_TERMINAL_PROMPT=0` (`driver.ts`'s
+   *  `buildGitEnv`, §4.3) still guarantees no hang either way; it just fails with `AuthFailed`
+   *  instead of ever having anywhere to route a prompt. */
+  readonly credentialPrompt?: CredentialPrompt;
 }
 
 /** How many rows one `streamGraph` chunk carries, whether replayed from cache or freshly read
@@ -499,6 +554,30 @@ export const CHUNK_ROWS = 500;
  *  file's `#evict` for what eviction actually discards. */
 export const HIDDEN_EVICT_MS = 5 * 60 * 1000;
 
+/** P8/OQ10: how often a remote op's progress may fan out to `onOpProgress` subscribers, at most —
+ *  see `#createProgressEmitter`. */
+export const PROGRESS_THROTTLE_MS = 100;
+
+/**
+ * P8/W15: the auto-fetch scheduler's own poll cadence — how often it re-evaluates every open
+ * session against the live `kiraVersion.fetch.autoInterval` setting and the current
+ * focused/visible flags, real minutes converted via `AUTO_FETCH_MS_PER_MINUTE` below. A polling
+ * design, not a single `setTimeout` slept for the full configured interval and re-armed on
+ * demand, is the deliberate choice here: `RepoServiceDeps.settings` is a pull-based thunk with no
+ * push notification when it changes, so a sleep-and-re-arm design would need a *new* "settings
+ * changed" method on this service that every host remembers to call; a cheap, frequent poll gets
+ * "re-arms on settings change" (and on focus/visibility change — see `setHostFocused`/
+ * `setUiVisible`) for free, correctly, from every host, with nothing further to wire. The poll
+ * itself is nearly free (a settings read plus a `Date.now()` comparison per open session), so
+ * running it for the life of the service — even while auto-fetch is off, the common case — rather
+ * than starting and stopping it costs nothing worth optimising for.
+ */
+export const AUTO_FETCH_POLL_MS = 30_000;
+
+/** P8/W15: `kiraVersion.fetch.autoInterval`'s unit (OQ3) is minutes; this is what a test overrides
+ *  to make "1 minute" a handful of real milliseconds rather than an actual 60,000. */
+export const AUTO_FETCH_MS_PER_MINUTE = 60_000;
+
 interface RepoServiceOptions {
   /** Testability hook for `HIDDEN_EVICT_MS` — the plan's given `RepoServiceDeps` has no other
    *  way to exercise real eviction timing without a 5-minute test. Additive, defaults to the
@@ -510,6 +589,17 @@ interface RepoServiceOptions {
   /** Testability hook for `DETAIL_CACHE_MAX_ENTRIES` (W3) — same reasoning as
    *  `diffCacheMaxBytes` above. Additive, defaults to the real constant. */
   readonly detailCacheMaxEntries?: number;
+  /** Testability hook for `AUTO_FETCH_POLL_MS` (W15) — lets a test observe several polls without
+   *  a real 30-second wait. Additive, defaults to the real constant. */
+  readonly autoFetchPollMs?: number;
+  /** Testability hook for `AUTO_FETCH_MS_PER_MINUTE` (W15) — lets a test express
+   *  `kiraVersion.fetch.autoInterval: 1` as a few real milliseconds instead of a real minute.
+   *  Additive, defaults to the real constant. */
+  readonly autoFetchMsPerMinute?: number;
+  /** Testability hook for `DEFAULT_ASKPASS_TIMEOUT_MS` (W13/W19) — lets a test that never answers
+   *  a credential prompt observe the broker's own timeout-to-`AuthFailed` path inside a normal
+   *  test timeout, rather than the real 120s. Additive, defaults to the real constant. */
+  readonly askpassTimeoutMs?: number;
 }
 
 interface RepoSession {
@@ -552,6 +642,24 @@ interface RepoSession {
   refsCache: RefsResult | undefined;
   /** P6/W8 (§7.12): one undo record per session, replacing itself on every op the executor runs. */
   readonly undo: UndoSlot;
+  /** P8/W14: the one remote op this session may have in flight — a second concurrent one on the
+   *  same repo is rejected with `OperationInProgress` rather than queued (OQ7). `undefined` when
+   *  none is running. `killable` starts `true` for `fetch`/`pull` and `false` for everything else
+   *  (D50's cancellability table), and `#runPull` flips it to `false` itself once its own fetch
+   *  phase hands off to the non-killable merge/rebase phase — `cancelRemoteOp` consults it so a
+   *  cancel past that point is reported as refused rather than silently doing nothing. */
+  activeRemoteOp:
+    | { readonly opId: string; readonly controller: AbortController; killable: boolean }
+    | undefined;
+  /** P8/W15: when this session last ran (or was last due to run, if it was skipped for being
+   *  busy) a silent auto-fetch — initialized to session-open time so "the first tick waits a full
+   *  interval" (plan text) holds even for a repo opened seconds before the scheduler's next poll,
+   *  not just after this session's first successful fetch. */
+  autoFetchLastAt: number;
+  /** P8/W15: latched `true` the first time this session's own silent auto-fetch fails (§7.1:
+   *  "disables itself for the session"), never cleared short of closing and re-opening the repo —
+   *  a toolbar can render this subtly (D-none: no exit criterion names the exact affordance). */
+  autoFetchDisabled: boolean;
   /** P7 W4 — Branch review's own, deliberately ephemeral second walk. `undefined` when no review
    *  is open for this repo. Never a `RepoSession`: it has no driver, watcher, caches or undo slot
    *  of its own — see `docs/plans/P7.md`'s "the streaming machinery is a singleton" for why this
@@ -602,6 +710,26 @@ export class RepoService {
   readonly #changeListeners = new Set<
     (e: { repoId: string; kind: "refsChanged" | "worktreeChanged" }) => void
   >();
+  /** P8/W14. */
+  readonly #progressListeners = new Set<(e: RemoteOpProgress) => void>();
+  /** P8/W14: one broker for the whole service (its own doc comment: "either lifetime is fine"),
+   *  started lazily on first use so a `RepoService` that never touches a remote op never pays for
+   *  the temp dir + unix socket `AskpassBroker.start()` sets up. `#askpassSessionPromise` — not a
+   *  plain resolved value — so two remote ops (different repos) racing to be first still share
+   *  one `start()` call rather than each kicking off their own. */
+  #askpassBroker: AskpassBroker | undefined;
+  #askpassSessionPromise: Promise<AskpassSession> | undefined;
+  /** P8/W15: §7.1's auto-fetch guardrail — no port for either of these (module doc: "the host
+   *  pushing a fact in, the same direction `setUiVisible` already goes"). Both default `true`: a
+   *  service is normally constructed only once its host already knows its own focus/visibility,
+   *  and every existing test defaults `kiraVersion.fetch.autoInterval` to `0` (off) regardless, so
+   *  a permissive default here changes nothing for a caller that never touches either setter. */
+  #hostFocused = true;
+  #uiVisible = true;
+  readonly #autoFetchPollMs: number;
+  readonly #autoFetchMsPerMinute: number;
+  readonly #autoFetchTimer: ReturnType<typeof setInterval>;
+  readonly #askpassTimeoutMs: number | undefined;
 
   readonly git: GitStatus;
 
@@ -611,6 +739,9 @@ export class RepoService {
     evictMs: number,
     diffCacheMaxBytes: number,
     detailCacheMaxEntries: number,
+    autoFetchPollMs: number,
+    autoFetchMsPerMinute: number,
+    askpassTimeoutMs: number | undefined,
   ) {
     this.#deps = deps;
     this.#resolution = resolution;
@@ -619,6 +750,15 @@ export class RepoService {
     this.#detailCacheMaxEntries = detailCacheMaxEntries;
     this.#logger = deps.logger.child("repoService");
     this.git = toGitStatus(resolution);
+    this.#autoFetchPollMs = autoFetchPollMs;
+    this.#autoFetchMsPerMinute = autoFetchMsPerMinute;
+    this.#askpassTimeoutMs = askpassTimeoutMs;
+    // `unref()`: a pending poll must never be the reason a process (the harness under bun, a test
+    // runner) stays alive — every other timer in this file (`evictTimer`) is a plain `setTimeout`
+    // an explicit `close()`/test teardown clears; this one lives for the service's whole lifetime
+    // instead, so it unrefs itself rather than asking every caller to remember `dispose()`.
+    this.#autoFetchTimer = setInterval(() => this.#autoFetchTick(), this.#autoFetchPollMs);
+    this.#autoFetchTimer.unref?.();
   }
 
   static async create(deps: RepoServiceDeps, opts: RepoServiceOptions = {}): Promise<RepoService> {
@@ -632,6 +772,9 @@ export class RepoService {
       opts.evictMs ?? HIDDEN_EVICT_MS,
       opts.diffCacheMaxBytes ?? DIFF_CACHE_MAX_BYTES,
       opts.detailCacheMaxEntries ?? DETAIL_CACHE_MAX_ENTRIES,
+      opts.autoFetchPollMs ?? AUTO_FETCH_POLL_MS,
+      opts.autoFetchMsPerMinute ?? AUTO_FETCH_MS_PER_MINUTE,
+      opts.askpassTimeoutMs,
     );
   }
 
@@ -851,6 +994,7 @@ export class RepoService {
   }
 
   setUiVisible(visible: boolean): void {
+    this.#uiVisible = visible;
     for (const session of this.#sessions.values()) {
       if (visible) {
         this.#clearEvictTimer(session);
@@ -862,8 +1006,21 @@ export class RepoService {
     }
   }
 
+  /** P8/W15: `extension.ts` wires `window.onDidChangeWindowState`; the harness wires
+   *  `document.visibilityState`'s own focus-adjacent signal. No new port (module doc) — this is
+   *  the host pushing a fact in, exactly like `setUiVisible` already does. The auto-fetch
+   *  scheduler's next poll (at most `AUTO_FETCH_POLL_MS` away) picks this up on its own; nothing
+   *  further needs telling. */
+  setHostFocused(focused: boolean): void {
+    this.#hostFocused = focused;
+  }
+
   dispose(): void {
+    clearInterval(this.#autoFetchTimer);
     for (const repoId of [...this.#sessions.keys()]) this.close(repoId);
+    // Best-effort, same as `AskpassSession.dispose()`'s own contract: if `start()` never
+    // resolved (no remote op ever ran), there is nothing to dispose in the first place.
+    this.#askpassSessionPromise?.then((session) => session.dispose()).catch(() => {});
   }
 
   // ---------------------------------------------------------------------------------------
@@ -1365,6 +1522,134 @@ export class RepoService {
     return { ok: error === undefined, error, undo: null, head: session.head, inProgress };
   }
 
+  // ---------------------------------------------------------------------------------------
+  // P8/W14 — remote ops: fetch, push, pull, force-push, delete-remote-branch. See
+  // `docs/plans/P8.md`'s "The hard parts" §1-§5 and W7-W14 for the design this implements.
+  // ---------------------------------------------------------------------------------------
+
+  /** §7.3's pull pre-flight: resolves the strategy (the same ladder `#runPull` re-runs after its
+   *  own fetch — the git config it reads from cannot change merely by fetching) and reuses
+   *  `#statusAndInProgress`'s existing `status()` read for ahead/behind/upstream/dirty rather than
+   *  a second spawn (module doc / W14's own notes on reusing `StatusBranchInfo`). */
+  async preflightPull(repoId: string, branch: string): Promise<PullPreflight> {
+    const session = this.#requireSession(repoId);
+    const [{ statusResult, inProgress }, gitConfig] = await Promise.all([
+      this.#statusAndInProgress(session),
+      this.#readPullConfig(session, branch),
+    ]);
+    const settingStrategy = this.#deps.settings()["kiraVersion.pull.strategy"];
+    const { strategy, source } = resolvePullStrategy({ settingStrategy, gitConfig });
+    return buildPullPreflight({
+      strategy,
+      source,
+      upstream: statusResult.branch.upstream ?? null,
+      ahead: statusResult.branch.ahead ?? 0,
+      behind: statusResult.branch.behind ?? 0,
+      dirty: !summarizeStatus(statusResult, inProgress).isClean,
+    });
+  }
+
+  /** §7.4's push pre-flight. `branch` is assumed to be HEAD's current branch — `status --branch`
+   *  (`#statusAndInProgress`) is the one spawn this reuses for ahead/behind/upstream, and it only
+   *  ever reports those for whichever branch HEAD is on; pushing anything else is out of scope
+   *  for P8's toolbar (§3.5), which only ever offers push for the checked-out branch. */
+  async preflightPush(repoId: string, branch: string, remote: string): Promise<PushPreflight> {
+    const session = this.#requireSession(repoId);
+    const [{ statusResult }, remoteTip] = await Promise.all([
+      this.#statusAndInProgress(session),
+      this.#readRemoteTrackingTip(session, remote, branch),
+    ]);
+    return classifyPush({
+      branch,
+      upstream: statusResult.branch.upstream ?? null,
+      ahead: statusResult.branch.ahead ?? 0,
+      behind: statusResult.branch.behind ?? 0,
+      remoteTip,
+      protectedBranches: this.#deps.settings()["kiraVersion.protectedBranches"],
+    });
+  }
+
+  /**
+   * `remote.run`'s executor. **Deliberately not routed through `runOp`**: `runOp`'s executor
+   * unconditionally calls `session.undo.set(...)` on every path (`#prepareOp`'s early-error branch
+   * clears it; the normal path sets a record or clears it per `UNDO_POLICY`) — folding a remote op
+   * into that would force a choice between polluting the undo slot for an operation §7.12 says
+   * never touches it in either direction (OQ6 — confirmed; see `RemoteOpResult`'s own doc comment)
+   * or growing `runOp` a special case that defeats its own simplicity. Progress correlation,
+   * killability, and the concurrency guard below are D51's three further reasons for a wholly
+   * separate path.
+   *
+   * `opId` is generated UI-side (so `remote.progress` can be correlated before this resolves) and
+   * threaded through to the askpass broker's `withOp` — never generated here.
+   */
+  async runRemoteOp(
+    repoId: string,
+    opId: string,
+    request: RemoteOpRequest,
+  ): Promise<RemoteOpResult> {
+    const session = this.#requireSession(repoId);
+
+    // OQ7: reject a second concurrent remote op on this repo outright rather than queue it.
+    if (session.activeRemoteOp !== undefined) {
+      return this.#remoteOpFailure(
+        session,
+        "OperationInProgress",
+        "Another remote operation is already running for this repository.",
+      );
+    }
+
+    // D52: protected-branch enforcement gates force-push (both flavors) and remote-branch
+    // deletion only — re-checked here because a pre-flight is advice, not a lock, and
+    // `confirmToken` from the wire is never trusted on its own.
+    if (
+      (request.kind === "forcePush" || request.kind === "deleteRemoteBranch") &&
+      request.branch !== undefined
+    ) {
+      const match = matchProtectedBranch(
+        request.branch,
+        this.#deps.settings()["kiraVersion.protectedBranches"],
+      );
+      if (match !== null && request.confirmToken !== request.branch) {
+        return this.#remoteOpFailure(
+          session,
+          "ProtectedBranch",
+          `"${request.branch}" is protected by the pattern "${match.pattern}" — type the branch name to confirm.`,
+        );
+      }
+    }
+
+    const controller = new AbortController();
+    // D50's cancellability table: fetch and pull's own fetch phase are killable; everything else
+    // — including pull's later merge/rebase phase, which `#runPull` flips this to `false` itself
+    // once the fetch phase hands off — is not.
+    const killable = request.kind === "fetch" || request.kind === "pull";
+    session.activeRemoteOp = { opId, controller, killable };
+    try {
+      return await this.#executeRemoteOp(session, opId, request, controller);
+    } finally {
+      session.activeRemoteOp = undefined;
+    }
+  }
+
+  /** `remote.cancel`. `false` — never an error — when there is nothing to cancel: no remote op is
+   *  running for `repoId`, or the running one is past its killable phase (D50) and an abort here
+   *  would be a silent no-op per `StreamingWriteOptions`' own contract; reporting that honestly
+   *  (rather than claiming success) is exactly W19's "cancel is refused mid-push" criterion. */
+  cancelRemoteOp(repoId: string): boolean {
+    const session = this.#sessions.get(repoId);
+    const active = session?.activeRemoteOp;
+    if (active === undefined || !active.killable) return false;
+    active.controller.abort();
+    return true;
+  }
+
+  /** P8/W14/W16: `panelView.ts` subscribes to fan `remote.progress` out to its own channel;
+   *  `reviewView.ts` deliberately does not (D41's precedent: that view renders no operation UI). */
+  onOpProgress(fn: (e: RemoteOpProgress) => void): Disposable {
+    this.#progressListeners.add(fn);
+    return { dispose: () => this.#progressListeners.delete(fn) };
+  }
+
   /** Step 1+2 of `runOp`'s executor: builds the argv list (one entry, except `branchCreate` with
    *  an explicit `track` that differs from plain DWIM-on-`startPoint`, which is create-and-switch
    *  plus one `--set-upstream-to`) and — for exactly the two op kinds `UNDO_POLICY` marks
@@ -1540,6 +1825,505 @@ export class RepoService {
   }
 
   // ---------------------------------------------------------------------------------------
+  // P8/W14 — remote ops' own internals.
+  // ---------------------------------------------------------------------------------------
+
+  /** `runRemoteOp`'s per-kind dispatch, once the concurrency guard and the protected-branch gate
+   *  have both already passed. `pull` is decomposed into its own two-phase method; the other four
+   *  kinds share one spawn-then-parse-ref-updates shape. */
+  async #executeRemoteOp(
+    session: RepoSession,
+    opId: string,
+    request: RemoteOpRequest,
+    controller: AbortController,
+  ): Promise<RemoteOpResult> {
+    const emit = this.#createProgressEmitter(session.repoId);
+
+    if (request.kind === "pull") {
+      return this.#runPull(session, opId, request, controller, emit);
+    }
+
+    if (request.kind === "forcePush") {
+      const branch = assertDefined(request.branch, "forcePush requires a branch");
+      // D48's residual-hazard mitigation: re-read the remote-tracking tip immediately before
+      // spawning and compare against what the confirmation dialog actually showed the user
+      // (`RemoteOpRequest.expectedRemoteTip`'s own doc comment) — independent of, and stricter
+      // than, whatever git's own bare `--force-with-lease --force-if-includes` would itself
+      // catch, since a background auto-fetch can silently satisfy that lease in between.
+      const currentTip = await this.#readRemoteTrackingTip(session, request.remote, branch);
+      const expected = request.expectedRemoteTip ?? null;
+      if (currentTip !== expected) {
+        return this.#remoteOpFailure(
+          session,
+          "LeaseViolation",
+          "The remote moved since you confirmed this force-push — refusing to overwrite it. Fetch and try again.",
+        );
+      }
+    }
+
+    const { argv, killable } = this.#buildSimpleRemoteArgv(request);
+    let result: GitWriteResult;
+    try {
+      result = await this.#writeRemote(session, opId, argv, {
+        killable,
+        signal: controller.signal,
+        onStderr: emit,
+      });
+    } catch (err) {
+      return this.#remoteOpFailureFromThrown(session, err);
+    }
+
+    const updates = parseRefUpdates(
+      new TextDecoder("utf-8", { fatal: false }).decode(result.stderr),
+    );
+    const inProgress = await this.#currentInProgress(session);
+    return { ok: true, error: undefined, updates, head: session.head, inProgress };
+  }
+
+  /** Builds the one-spawn argv for every `RemoteOpKind` except `pull` (`#runPull`'s own method) —
+   *  `forcePush`'s own lease-vs-plain choice included. Never called for `pull`; the `pull` arm
+   *  exists only so the switch stays exhaustive over `RemoteOpKind`. */
+  #buildSimpleRemoteArgv(request: RemoteOpRequest): {
+    readonly argv: readonly string[];
+    readonly killable: boolean;
+  } {
+    switch (request.kind) {
+      case "fetch":
+        return {
+          argv: fetchArgs({
+            remote: request.remote,
+            prune: request.prune,
+            pruneTags: request.pruneTags,
+          }),
+          killable: true,
+        };
+      case "push": {
+        const branch = assertDefined(request.branch, "push requires a branch");
+        return {
+          argv: pushArgs({ remote: request.remote, branch, setUpstream: request.setUpstream }),
+          killable: false,
+        };
+      }
+      case "forcePush": {
+        const branch = assertDefined(request.branch, "forcePush requires a branch");
+        return {
+          argv:
+            request.plainForce === true
+              ? forcePushPlainArgs({ remote: request.remote, branch })
+              : forcePushLeaseArgs({ remote: request.remote, branch }),
+          killable: false,
+        };
+      }
+      case "deleteRemoteBranch": {
+        const branch = assertDefined(request.branch, "deleteRemoteBranch requires a branch");
+        return {
+          argv: deleteRemoteBranchArgs({ remote: request.remote, branch }),
+          killable: false,
+        };
+      }
+      case "pull":
+        throw new Error(
+          "unreachable: pull is dispatched to #runPull, never #buildSimpleRemoteArgv",
+        );
+    }
+  }
+
+  /**
+   * §7.3/§9's decomposed pull: fetch (killable) then, unless the branch is already up to date,
+   * exactly one of `git merge --ff-only` / `git merge --no-edit` / `git rebase` against the
+   * already-fetched upstream ref — never `FETCH_HEAD` (the strategy is resolved fresh, post-fetch,
+   * against the branch's real ahead/behind, not a stale pre-fetch guess). The ff-only guard fails
+   * with `NonFastForward` before ever spawning a merge — the whole point of decomposing pull is
+   * that the user then chooses, rather than either silently doing nothing or git refusing with its
+   * own wording.
+   */
+  async #runPull(
+    session: RepoSession,
+    opId: string,
+    request: RemoteOpRequest,
+    controller: AbortController,
+    emit: (chunk: Uint8Array) => void,
+  ): Promise<RemoteOpResult> {
+    const branch = assertDefined(request.branch, "pull requires a branch");
+
+    let fetchResult: GitWriteResult;
+    try {
+      fetchResult = await this.#writeRemote(
+        session,
+        opId,
+        fetchArgs({ remote: request.remote, prune: request.prune, pruneTags: request.pruneTags }),
+        { killable: true, signal: controller.signal, onStderr: emit },
+      );
+    } catch (err) {
+      return this.#remoteOpFailureFromThrown(session, err);
+    }
+    const updates = parseRefUpdates(
+      new TextDecoder("utf-8", { fatal: false }).decode(fetchResult.stderr),
+    );
+
+    // The fetch's own killable window is over — §4.3's "never killed" rule is back in force from
+    // here (D50: pull's merge/rebase phase is not killable). `cancelRemoteOp` consults this flag,
+    // not just `activeRemoteOp`'s mere existence, to report a cancel past this point as refused.
+    if (session.activeRemoteOp !== undefined) session.activeRemoteOp.killable = false;
+
+    const [{ statusResult, inProgress: preInProgress }, gitConfig] = await Promise.all([
+      this.#statusAndInProgress(session),
+      this.#readPullConfig(session, branch),
+    ]);
+    const settingStrategy = this.#deps.settings()["kiraVersion.pull.strategy"];
+    const { strategy } = resolvePullStrategy({
+      // `exactOptionalPropertyTypes`: `explicit` is an optional property (absent, not
+      // `undefined`), so the key itself must be omitted rather than set to `undefined`.
+      ...(request.strategy !== undefined ? { explicit: request.strategy } : {}),
+      settingStrategy,
+      gitConfig,
+    });
+
+    const ahead = statusResult.branch.ahead ?? 0;
+    const behind = statusResult.branch.behind ?? 0;
+    const upstream = statusResult.branch.upstream;
+
+    if (upstream === undefined) {
+      return {
+        ok: false,
+        error: {
+          kind: "RemoteRefMissing",
+          message: "This branch has no upstream to pull from.",
+          remoteMessage: undefined,
+        },
+        updates,
+        head: session.head,
+        inProgress: preInProgress,
+      };
+    }
+
+    if (strategy === "ff-only" && ffOnlyWouldDiverge(ahead, behind)) {
+      return {
+        ok: false,
+        error: {
+          kind: "NonFastForward",
+          message:
+            "Fast-forward only: your branch has diverged from its upstream. Choose merge or rebase instead.",
+          remoteMessage: undefined,
+        },
+        updates,
+        head: session.head,
+        inProgress: preInProgress,
+      };
+    }
+
+    if (behind === 0) {
+      // Already up to date — the fetch alone was the whole pull; no merge/rebase spawn at all.
+      return { ok: true, error: undefined, updates, head: session.head, inProgress: preInProgress };
+    }
+
+    const integrationArgv =
+      strategy === "ff-only"
+        ? mergeFfOnlyArgs(upstream)
+        : strategy === "merge"
+          ? mergeArgs(upstream)
+          : rebaseArgs(upstream);
+
+    try {
+      await this.#writeRemote(session, opId, integrationArgv, {
+        killable: false,
+        signal: controller.signal,
+        onStderr: emit,
+      });
+    } catch (err) {
+      if (err instanceof GitCancelled) {
+        return this.#remoteOpFailure(session, "Cancelled", "The operation was cancelled.", updates);
+      }
+      if (err instanceof GitError) {
+        const inProgress = await this.#currentInProgress(session);
+        // A real merge/rebase conflict's own "CONFLICT (" text lands on stdout, not stderr
+        // (errors.ts's own documented gap: classifyGitError only ever sees stderr), so it falls
+        // back to `Unknown` here rather than matching `Conflict`'s pattern — but the sequencer
+        // state files left behind (`MERGE_HEAD` / `rebase-merge`) are unambiguous, so an
+        // in-progress operation after a failed integration IS the conflict regardless of what
+        // classifyGitError made of stderr alone (mirrors P6's own sequencer-state precedent for
+        // revert/cherry-pick's conflicts, `classifyInProgress`).
+        const kind = inProgress !== null ? "Conflict" : err.kind;
+        return {
+          ok: false,
+          error: {
+            kind,
+            message: err.stderr.trim() || err.message,
+            remoteMessage: err.remoteMessage,
+          },
+          updates,
+          head: session.head,
+          inProgress,
+        };
+      }
+      throw err;
+    }
+
+    const inProgress = await this.#currentInProgress(session);
+    return { ok: true, error: undefined, updates, head: session.head, inProgress };
+  }
+
+  /** A `RemoteOpResult` failure that never spawned anything — the concurrency guard, the
+   *  protected-branch gate, and the force-push lease re-check all fail this way, before any git
+   *  process runs. Always reads `inProgress` fresh (no write happened to invalidate anything, but
+   *  a caller polling a failed `remote.run` still deserves an accurate answer, exactly like
+   *  `runOp`'s own early-error path). */
+  async #remoteOpFailure(
+    session: RepoSession,
+    kind: OpErrorKind,
+    message: string,
+    updates: readonly RefUpdate[] = [],
+  ): Promise<RemoteOpResult> {
+    const inProgress = await this.#currentInProgress(session);
+    return {
+      ok: false,
+      error: { kind, message, remoteMessage: undefined },
+      updates,
+      head: session.head,
+      inProgress,
+    };
+  }
+
+  /** Maps a `writeStreaming` rejection to a `RemoteOpResult` — `GitCancelled` becomes `Cancelled`
+   *  (a remote op resolves on cancellation, per W19's exit criterion 7, rather than rejecting the
+   *  way a plain `read()`'s cancellation does everywhere else) and `GitError` becomes its own
+   *  `kind`/`message`/`remoteMessage` verbatim. Anything else (`GitSpawnFailed` included) keeps
+   *  propagating, same as `runOp`'s own catch. */
+  async #remoteOpFailureFromThrown(
+    session: RepoSession,
+    err: unknown,
+    updates: readonly RefUpdate[] = [],
+  ): Promise<RemoteOpResult> {
+    if (err instanceof GitCancelled) {
+      return this.#remoteOpFailure(session, "Cancelled", "The operation was cancelled.", updates);
+    }
+    if (err instanceof GitError) {
+      const inProgress = await this.#currentInProgress(session);
+      return {
+        ok: false,
+        error: {
+          kind: err.kind,
+          message: err.stderr.trim() || err.message,
+          remoteMessage: err.remoteMessage,
+        },
+        updates,
+        head: session.head,
+        inProgress,
+      };
+    }
+    throw err;
+  }
+
+  /** The one place a remote op's argv actually spawns: wraps `driver.writeStreaming` in the
+   *  askpass broker's `withOp` when — and only when — this repo should have one interposed at all
+   *  (`#maybeAskpassEnv`'s gate). When it should not (no `credentialPrompt` configured, or the
+   *  user already has their own `core.askPass`/`GIT_ASKPASS`, §4.1), this is a bare passthrough. */
+  async #writeRemote(
+    session: RepoSession,
+    opId: string,
+    argv: readonly string[],
+    opts: {
+      readonly killable: boolean;
+      readonly signal: AbortSignal;
+      readonly onStderr: (chunk: Uint8Array) => void;
+    },
+  ): Promise<GitWriteResult> {
+    const askpassEnv = await this.#maybeAskpassEnv(session);
+    if (askpassEnv === undefined) {
+      return session.driver.writeStreaming(argv, opts);
+    }
+    const broker = assertDefined(
+      this.#askpassBroker,
+      "askpass broker must be started once #maybeAskpassEnv returns an env",
+    );
+    const credentialPrompt = assertDefined(
+      this.#deps.credentialPrompt,
+      "credentialPrompt must be configured once #maybeAskpassEnv returns an env",
+    );
+    return broker.withOp(opId, credentialPrompt, (opEnv) =>
+      session.driver.writeStreaming(argv, { ...opts, env: { ...askpassEnv, ...opEnv } }),
+    );
+  }
+
+  /** `RepoService`'s own gate (§4.1's config-fidelity rule): `undefined` — never interpose — when
+   *  no `credentialPrompt` was configured at all, or when `shouldInterposeAskpass` says the user
+   *  already has their own `core.askPass`/`GIT_ASKPASS`. Starts the broker lazily on first actual
+   *  need. */
+  async #maybeAskpassEnv(
+    session: RepoSession,
+  ): Promise<Readonly<Record<string, string>> | undefined> {
+    if (this.#deps.credentialPrompt === undefined) return undefined;
+    const coreAskPass = await this.#coreAskPass(session);
+    const inheritedGitAskpass = process.env.GIT_ASKPASS;
+    if (!shouldInterposeAskpass({ coreAskPass, inheritedGitAskpass })) return undefined;
+    const session_ = await this.#ensureAskpassSession();
+    return session_.env;
+  }
+
+  async #ensureAskpassSession(): Promise<AskpassSession> {
+    if (this.#askpassSessionPromise === undefined) {
+      const broker = new AskpassBroker(
+        this.#askpassTimeoutMs !== undefined ? { timeoutMs: this.#askpassTimeoutMs } : {},
+      );
+      this.#askpassBroker = broker;
+      this.#askpassSessionPromise = broker.start();
+    }
+    return this.#askpassSessionPromise;
+  }
+
+  async #coreAskPass(session: RepoSession): Promise<string | undefined> {
+    try {
+      const bytes = await collectOneShotBytes(
+        session.driver.read(["config", "--get", "core.askPass"]),
+      );
+      const value = new TextDecoder().decode(bytes).trim();
+      return value.length > 0 ? value : undefined;
+    } catch {
+      // `config --get` on an unset key exits 1 with empty output — not configured, not an error.
+      return undefined;
+    }
+  }
+
+  /** `git config --null --get-regexp`'s three pull-relevant keys, tolerating "none of them are
+   *  set" (exit 1, empty output) exactly like `#captureBranchDeleteUndo`'s own config read. */
+  async #readPullConfig(session: RepoSession, branch: string): Promise<PullConfigValues> {
+    try {
+      const bytes = await collectOneShotBytes(session.driver.read(pullConfigArgs(branch)));
+      return parsePullConfig(new TextDecoder().decode(bytes));
+    } catch {
+      return {};
+    }
+  }
+
+  /** The remote-tracking ref's actual tip — `PushPreflight.remoteTip` (read here) and D48's
+   *  force-push re-read-and-compare mitigation (read again here, immediately before spawning)
+   *  both go through this one method so the two reads can never drift in how they treat a ref
+   *  that does not exist yet. `null`, not a throw: `rev-parse --verify -q` exits non-zero with no
+   *  output for a remote-tracking ref that has never been fetched — "nothing to overwrite" is the
+   *  honest reading of that, not a failure. */
+  async #readRemoteTrackingTip(
+    session: RepoSession,
+    remote: string,
+    branch: string,
+  ): Promise<string | null> {
+    try {
+      const bytes = await collectOneShotBytes(
+        session.driver.read(["rev-parse", "--verify", "-q", `refs/remotes/${remote}/${branch}`]),
+      );
+      const sha = new TextDecoder().decode(bytes).trim();
+      return sha.length > 0 ? sha : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** `GitDriver.writeStreaming`'s `onStderr` tee for one remote op: `progress.ts`'s pure decoder,
+   *  fanned out to every `onOpProgress` subscriber, throttled to `PROGRESS_THROTTLE_MS` (OQ10) —
+   *  a real fetch can emit dozens of percent-ticks a second and every webview repaint they'd drive
+   *  is wasted once the toolbar can't visibly keep up anyway. The very first update for an op
+   *  always gets through (`lastEmit` starts at `0`), so a fast, small operation's one-and-only
+   *  update is never the one throttling drops. */
+  #createProgressEmitter(repoId: string): (chunk: Uint8Array) => void {
+    let lastEmit = 0;
+    return createProgressParser((progress) => {
+      const now = Date.now();
+      if (now - lastEmit < PROGRESS_THROTTLE_MS) return;
+      lastEmit = now;
+      for (const listener of this.#progressListeners) {
+        listener({ repoId, ...progress });
+      }
+    });
+  }
+
+  // ---------------------------------------------------------------------------------------
+  // P8/W15 — the auto-fetch scheduler. One poll timer for the whole service (constructor); each
+  // tick re-reads live settings/focus/visibility (module doc on `RepoServiceDeps.settings` and on
+  // `AUTO_FETCH_POLL_MS`) and, independently per open session, decides whether that session's own
+  // silent `fetch --prune` is due.
+  // ---------------------------------------------------------------------------------------
+
+  /** Every `#autoFetchPollMs`. Cheap on every session that is not due (a subtraction and a
+   *  comparison) — see `AUTO_FETCH_POLL_MS`'s doc comment for why this runs unconditionally
+   *  rather than starting and stopping itself around the settings/focus/visibility gate below. */
+  #autoFetchTick(): void {
+    if (this.#sessions.size === 0) return;
+    const settings = this.#deps.settings();
+    const intervalMinutes = settings["kiraVersion.fetch.autoInterval"];
+    if (intervalMinutes <= 0 || !this.#hostFocused || !this.#uiVisible) return;
+    const intervalMs = intervalMinutes * this.#autoFetchMsPerMinute;
+    const now = Date.now();
+    for (const session of this.#sessions.values()) {
+      if (session.autoFetchDisabled) continue;
+      if (now - session.autoFetchLastAt < intervalMs) continue;
+      // Busy or already mid-remote-op: skip this poll, not queue behind it — the next poll (at
+      // most `AUTO_FETCH_POLL_MS` later) re-checks, exactly like a session that was merely not
+      // due yet. `autoFetchLastAt` is deliberately left untouched on a skip, so a session that is
+      // busy every single poll for a while still runs the moment it frees up, rather than that
+      // silently pushing its "due" time forward without ever actually fetching.
+      if (session.driver.busy || session.activeRemoteOp !== undefined) continue;
+      void this.#runSilentAutoFetch(session);
+    }
+  }
+
+  /** Fire-and-forget from `#autoFetchTick`'s own perspective (never awaited there — one slow
+   *  fetch on one session must not delay the poll's decision for every other open session), but
+   *  self-contained: claims `activeRemoteOp` for the duration (so a concurrent user-initiated
+   *  `runRemoteOp`/second poll correctly sees this repo as busy — the exact same field, the exact
+   *  same mutual exclusion, reused rather than inventing a parallel flag) and always resolves. */
+  async #runSilentAutoFetch(session: RepoSession): Promise<void> {
+    const remote = await this.#remoteForAutoFetch(session);
+    if (remote === undefined) {
+      // No upstream to fetch against — not a failure (§7.1 only disables on a real git failure),
+      // just nothing to do yet. Wait another full interval before asking again.
+      session.autoFetchLastAt = Date.now();
+      return;
+    }
+    const controller = new AbortController();
+    session.activeRemoteOp = { opId: "auto-fetch", controller, killable: true };
+    try {
+      // Deliberately `session.driver.writeStreaming` directly, not `#writeRemote`: an unattended
+      // background fetch that popped an interactive credential prompt would be a surprise, not a
+      // convenience, and `GIT_TERMINAL_PROMPT=0` (`driver.ts`) already guarantees this fails
+      // cleanly with `AuthFailed` rather than hanging when a credential is genuinely needed — at
+      // which point disabling for the session (below) is exactly the right outcome anyway. Progress
+      // is deliberately not wired either (§7.1: "no progress events") — `onStderr` is a no-op.
+      await session.driver.writeStreaming(fetchArgs({ remote, prune: true, pruneTags: false }), {
+        killable: true,
+        signal: controller.signal,
+        onStderr: () => {},
+      });
+      session.autoFetchLastAt = Date.now();
+    } catch (err) {
+      session.autoFetchLastAt = Date.now();
+      session.autoFetchDisabled = true;
+      this.#logger.log("warn", "auto-fetch failed; disabling for this session", {
+        repoId: session.repoId,
+        remote,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      session.activeRemoteOp = undefined;
+    }
+  }
+
+  /** §7.1's "the current remote" for a background fetch nothing prompted: P8 has no remote
+   *  management (scope boundary) and assumes one remote in the common case, so the least
+   *  surprising choice with no UI input at all is the current branch's own configured upstream
+   *  (`status --branch`'s `upstream`, e.g. `"origin/main"`) — the remote this branch already has a
+   *  relationship with — rather than guessing at "origin" or the first remote alphabetically.
+   *  `undefined` when HEAD has no upstream (a fresh branch, a detached HEAD): there is nothing a
+   *  silent background fetch could safely target, so that tick is skipped, not treated as a
+   *  failure (`#runSilentAutoFetch`'s own doc comment). */
+  async #remoteForAutoFetch(session: RepoSession): Promise<string | undefined> {
+    const { statusResult } = await this.#statusAndInProgress(session);
+    const upstream = statusResult.branch.upstream;
+    if (upstream === undefined) return undefined;
+    const slash = upstream.indexOf("/");
+    if (slash <= 0) return undefined;
+    return upstream.slice(0, slash);
+  }
+
+  // ---------------------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------------------
 
@@ -1569,6 +2353,9 @@ export class RepoService {
       undo: new UndoSlot(),
       reviewWalk: undefined,
       lastReviewResolution: undefined,
+      activeRemoteOp: undefined,
+      autoFetchLastAt: Date.now(),
+      autoFetchDisabled: false,
     };
 
     session.subscriptions.push(watcher.onSignal((signal) => this.#handleSignal(session, signal)));
@@ -1583,8 +2370,8 @@ export class RepoService {
 
   #openLogSession(identity: RepoIdentity): LogSession {
     return openLogSession(this.#git(), this.#deps.runner, identity.root, {
-      walk: { kind: "scope", scope: this.#deps.settings["kiraVersion.graph.scope"] },
-      pageSize: this.#deps.settings["kiraVersion.graph.pageSize"],
+      walk: { kind: "scope", scope: this.#deps.settings()["kiraVersion.graph.scope"] },
+      pageSize: this.#deps.settings()["kiraVersion.graph.pageSize"],
     });
   }
 
@@ -1702,7 +2489,7 @@ export class RepoService {
 
     const logSession = openLogSession(this.#git(), this.#deps.runner, session.identity.root, {
       walk: { kind: "range", base: range.base, branch: range.branch },
-      pageSize: this.#deps.settings["kiraVersion.graph.pageSize"],
+      pageSize: this.#deps.settings()["kiraVersion.graph.pageSize"],
       ...(precomputedTotal !== undefined ? { precomputedTotal } : {}),
     });
 
@@ -1764,7 +2551,7 @@ export class RepoService {
     readonly reason: BaseResolutionReason;
     readonly candidates: readonly BaseCandidate[];
   }> {
-    const baseCandidatesSetting = this.#deps.settings["kiraVersion.review.baseCandidates"];
+    const baseCandidatesSetting = this.#deps.settings()["kiraVersion.review.baseCandidates"];
     const probe = resolveBase({
       branch: branchRef,
       branches: refsResult.branches,

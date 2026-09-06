@@ -40,6 +40,10 @@ export interface SettingsSnapshot {
   readonly "kiraVersion.log.level": "off" | "error" | "warn" | "info" | "debug";
   /** P7 W7/D43: Branch review's own candidate base branches (§6.8). */
   readonly "kiraVersion.review.baseCandidates": readonly string[];
+  /** P8 W4/W5: minutes between automatic background fetches, 0 = off. */
+  readonly "kiraVersion.fetch.autoInterval": number;
+  readonly "kiraVersion.pull.strategy": "auto" | "ff-only" | "merge" | "rebase";
+  readonly "kiraVersion.protectedBranches": readonly string[];
 }
 
 export interface RepoSummary {
@@ -314,6 +318,118 @@ export interface RevertPreflight {
   readonly blockers: readonly ("dirtyWorktree" | "inProgressOperation" | "mainlineRequired")[];
 }
 
+// ---------------------------------------------------------------------------------------
+// P8 — remote-op vocabulary, and pull/push pre-flight (§7.3/§7.4). Structural copies of
+// `@kira-version/core`'s own (B3 — core and ipc both depend on nothing, so neither imports the
+// other); `tests/unit/ipc/wireConformance.test.ts` keeps the two in step.
+// ---------------------------------------------------------------------------------------
+
+export type PullStrategy = "ff-only" | "merge" | "rebase";
+
+/** Where a resolved pull strategy came from, so the UI can say so before running it (§7.3). */
+export type PullStrategySource =
+  | "explicit" // the user picked it for this invocation
+  | "setting" // kiraVersion.pull.strategy
+  | "branchConfig" // branch.<name>.rebase
+  | "pullConfig" // pull.rebase / pull.ff
+  | "default"; // kira-version's own ff-only fallback
+
+/** Which remote operation `remote.run` is being asked to perform. One key, five kinds — see
+ *  `docs/plans/P8.md`'s D51 for why this is not a fifth arm of `op.run`'s union. */
+export type RemoteOpKind = "fetch" | "push" | "pull" | "forcePush" | "deleteRemoteBranch";
+
+/** One ref an operation moved, for the UI's "what happened" summary. */
+export interface RefUpdate {
+  readonly ref: string;
+  readonly from: string | null; // null = created
+  readonly to: string | null; // null = deleted
+  readonly forced: boolean;
+}
+
+/** P9's autostash seam, empty at P8 — mirrors `CheckoutPreflight.routes`'s own precedent. */
+export type PullRoute = "stashAndCarry";
+
+export type PullBlocker = "dirtyNonFastForward";
+
+export interface PullPreflight {
+  readonly strategy: PullStrategy;
+  readonly source: PullStrategySource;
+  readonly upstream: string | null;
+  readonly ahead: number;
+  readonly behind: number;
+  readonly dirty: boolean;
+  /** Empty at P8 — see `PullRoute`'s own doc comment. */
+  readonly routes: readonly PullRoute[];
+  readonly blockers: readonly PullBlocker[];
+}
+
+export interface PushPreflight {
+  readonly upstream: string | null;
+  readonly wouldSetUpstream: boolean;
+  readonly ahead: number;
+  readonly behind: number;
+  /** The remote-tracking sha the lease will be checked against — read here and shown in the
+   *  dialog, so "you are about to overwrite <sha>" is a fact, not a guess. `null` when the
+   *  remote-tracking ref does not exist yet (nothing to overwrite). */
+  readonly remoteTip: string | null;
+  /** The matched protected pattern, or `null` — never a bare boolean (D52). */
+  readonly protectedBy: string | null;
+  readonly fastForward: boolean;
+}
+
+/** `remote.run`'s params — one request key for all five `RemoteOpKind`s (D51). `confirmToken`
+ *  is present only for a protected-branch force-push/delete: the typed branch name, checked
+ *  server-side against `kiraVersion.protectedBranches` (D52) — never trusted from the UI alone. */
+export interface RemoteOpParams {
+  readonly repoId: string;
+  readonly kind: RemoteOpKind;
+  readonly remote: string;
+  readonly branch: string | undefined;
+  readonly setUpstream: boolean;
+  readonly prune: boolean;
+  readonly pruneTags: boolean;
+  readonly strategy: PullStrategy | undefined;
+  /** `forcePush` only: the PushPreflight.remoteTip value the confirmation dialog showed the
+   *  user, or null when the dialog showed "nothing to overwrite". The server re-reads the
+   *  remote-tracking ref immediately before spawning and compares against this value, failing
+   *  with LeaseViolation on a mismatch even when git's own bare --force-with-lease
+   *  --force-if-includes would not itself object (D48's residual-hazard mitigation: a
+   *  background auto-fetch can silently satisfy git's own lease between dialog-open and spawn,
+   *  without the user — still looking at the dialog's now-stale remoteTip — ever finding out).
+   *  undefined for every other kind. */
+  readonly expectedRemoteTip: string | null | undefined;
+  /** forcePush only: true selects plain --force; false/undefined selects the default
+   *  lease-based --force-with-lease --force-if-includes (D48). undefined for every other kind. */
+  readonly plainForce: boolean | undefined;
+  readonly confirmToken: string | undefined;
+}
+
+export interface RemoteOpResult {
+  readonly ok: boolean;
+  readonly error:
+    | {
+        readonly kind: OpErrorKind;
+        readonly message: string;
+        /** HookRejected only: the hook's own remote:-prefixed output, prefix stripped. undefined
+         *  for every other kind, and for a HookRejected with no such lines. */
+        readonly remoteMessage: string | undefined;
+      }
+    | undefined;
+  readonly updates: readonly RefUpdate[];
+  readonly head: HeadState;
+  readonly inProgress: InProgressOperation | null;
+}
+
+/** `remote.progress`'s event payload — one op's live stderr, parsed (`git/src/progress.ts`). */
+export interface RemoteProgress {
+  readonly repoId: string;
+  readonly phase: string;
+  readonly percent: number | undefined;
+  readonly done: number | undefined;
+  readonly total: number | undefined;
+  readonly remote: boolean;
+}
+
 export type OpRequest =
   | {
       readonly kind: "checkout";
@@ -367,6 +483,24 @@ export type OpErrorKind =
   | "OperationInProgress"
   | "RemoteRefMissing"
   | "HookRejected"
+  /** P8: `git`'s own `(stale info)` — the bare `--force-with-lease` lease was violated because
+   *  the remote moved and we never fetched it. Probe 1, rows 1-2. */
+  | "LeaseViolation"
+  /** P8: `git`'s own `(remote ref updated since checkout)` — `--force-if-includes` caught a
+   *  remote move we DID fetch but have not integrated. Probe 1, row 3. Kept distinct from
+   *  `LeaseViolation`: the remedies differ (fetch-and-look vs. you-already-saw-this). */
+  | "RemoteRefUpdated"
+  /** P8: a transport-level failure (`Could not resolve host`, `Connection refused/timed out`) —
+   *  never git's own decision, always the network. */
+  | "NetworkFailed"
+  /** P8: the remote itself does not exist (`Repository not found`, "does not appear to be a
+   *  git repository"). */
+  | "RemoteNotFound"
+  /** P8: neither git says this nor could it — the confirmation token `remote.run` requires for
+   *  a protected-branch force-push/delete was absent or did not match (D52). */
+  | "ProtectedBranch"
+  /** P8: a remote op was cancelled mid-flight (D50) — never a git-reported failure either. */
+  | "Cancelled"
   | "Unknown";
 
 export interface UndoSlotSnapshot {
@@ -654,6 +788,32 @@ export type Contract = {
       params: { repoId: string; path: string };
       result: Record<string, never>;
     };
+    "remote.pullPreflight": {
+      params: { repoId: string; branch: string };
+      result: PullPreflight;
+    };
+    "remote.pushPreflight": {
+      params: { repoId: string; branch: string; remote: string };
+      result: PushPreflight;
+    };
+    /** One key for all five `RemoteOpKind`s (D51) — never routed through `op.run`: a remote op
+     *  is killable/streaming/progress-reporting and reuses the write queue's `busy` flag, none of
+     *  which `op.run`'s local, synchronous ops need (§4.3, §7.1). */
+    "remote.run": {
+      params: RemoteOpParams;
+      result: RemoteOpResult;
+    };
+    /** No-op if the named op already finished or was never running (OQ7: reject a second
+     *  concurrent op with `OperationInProgress` rather than queue it — this cancels the one
+     *  that's already in flight, it does not enqueue a second). */
+    "remote.cancel": {
+      params: { repoId: string };
+      /** false when there was nothing to cancel (already finished, never running, or the op is
+       *  past its killable phase — push/forcePush/deleteRemoteBranch/pull's merge-rebase phase,
+       *  D50) — never an error: a cancel racing a just-finished op is an ordinary outcome, not a
+       *  fault. */
+      result: { readonly cancelled: boolean };
+    };
   };
   events: {
     "repo.changed": { repoId: string; kind: "refsChanged" | "worktreeChanged" };
@@ -661,6 +821,8 @@ export type Contract = {
     /** Host -> the review webview only: "review this branch instead". Never emitted to the
      *  panel's own server — the two views hold separate `RpcServer`s over separate channels. */
     "review.target": { repoId: string; branch: string };
+    /** Throttled to 100ms (OQ10) — live progress for whichever `remote.run` is in flight. */
+    "remote.progress": RemoteProgress;
   };
   streams: {
     "graph.stream": {

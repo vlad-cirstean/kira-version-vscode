@@ -20,6 +20,7 @@ import CommitGrid from "./components/CommitGrid.vue";
 import ConflictBanner from "./components/ConflictBanner.vue";
 import BranchDialog from "./components/dialogs/BranchDialog.vue";
 import CheckoutDialog from "./components/dialogs/CheckoutDialog.vue";
+import ForcePushDialog from "./components/dialogs/ForcePushDialog.vue";
 import RenameRefDialog from "./components/dialogs/RenameRefDialog.vue";
 import RevertDialog from "./components/dialogs/RevertDialog.vue";
 import TagDialog from "./components/dialogs/TagDialog.vue";
@@ -842,6 +843,7 @@ onBeforeUnmount(() => {
         />
         <CheckoutDialog :ops="opsState" />
         <RevertDialog :ops="opsState" />
+        <ForcePushDialog :ops="opsState" />
       </template>
     </template>
   </div>

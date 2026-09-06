@@ -290,3 +290,201 @@ describe("openGitDriver — invalidation", () => {
     await first;
   });
 });
+
+describe("openGitDriver — busy", () => {
+  test("false when idle, true while queued/in-flight, false again once settled", async () => {
+    const runner = new FakeProcessRunner();
+    const git = await fakeResolvedGit();
+    const driver = openGitDriver(git, runner, "/repo", noopCatFile);
+
+    expect(driver.busy).toBe(false);
+
+    const a = driver.write(["tag", "a"]);
+    const b = driver.write(["tag", "b"]); // queued behind `a`
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(driver.busy).toBe(true); // a in flight, b queued
+
+    runner.processes.at(-1)?.finish(0);
+    await a;
+    expect(driver.busy).toBe(true); // b now in flight
+
+    await flushUntil(() => runner.processes.length >= 2);
+    runner.processes.at(-1)?.finish(0);
+    await b;
+    expect(driver.busy).toBe(false);
+  });
+});
+
+describe("openGitDriver — writeStreaming", () => {
+  test("tees stderr chunks to onStderr as they arrive, ahead of the resolved result", async () => {
+    const runner = new FakeProcessRunner();
+    const git = await fakeResolvedGit();
+    const driver = openGitDriver(git, runner, "/repo", noopCatFile);
+
+    const seen: string[] = [];
+    const resultPromise = driver.writeStreaming(["fetch", "origin"], {
+      killable: true,
+      onStderr: (chunk) => seen.push(new TextDecoder().decode(chunk)),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    const proc = runner.processes.at(-1);
+    expect(proc).toBeDefined();
+
+    proc?.emitStderr(new TextEncoder().encode("remote: Counting objects: 50% (5/10)\r"));
+    proc?.emitStderr(new TextEncoder().encode("remote: Counting objects: 100% (10/10), done.\n"));
+    proc?.finish(0);
+
+    const result = await resultPromise;
+    expect(seen).toEqual([
+      "remote: Counting objects: 50% (5/10)\r",
+      "remote: Counting objects: 100% (10/10), done.\n",
+    ]);
+    // The tee never displaces the bounded stderr buffer write() itself depends on.
+    expect(new TextDecoder().decode(result.stderr)).toBe(
+      "remote: Counting objects: 50% (5/10)\rremote: Counting objects: 100% (10/10), done.\n",
+    );
+  });
+
+  test("killable: true — an abort after start kills the process and rejects GitCancelled", async () => {
+    const runner = new FakeProcessRunner();
+    const git = await fakeResolvedGit();
+    const driver = openGitDriver(git, runner, "/repo", noopCatFile);
+
+    const controller = new AbortController();
+    const resultPromise = driver.writeStreaming(["fetch", "origin"], {
+      killable: true,
+      signal: controller.signal,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    const proc = runner.processes.at(-1);
+    expect(proc).toBeDefined();
+
+    controller.abort();
+    expect(proc?.killedWith).toContain("SIGTERM");
+    await expect(resultPromise).rejects.toBeInstanceOf(GitCancelled);
+  });
+
+  test("a killed killable write still bumps generation and fires onInvalidated — D50", async () => {
+    const runner = new FakeProcessRunner();
+    const git = await fakeResolvedGit();
+    const driver = openGitDriver(git, runner, "/repo", noopCatFile);
+
+    let fired = 0;
+    driver.onInvalidated(() => {
+      fired++;
+    });
+
+    const controller = new AbortController();
+    const resultPromise = driver.writeStreaming(["fetch", "origin"], {
+      killable: true,
+      signal: controller.signal,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    controller.abort();
+    await expect(resultPromise).rejects.toBeInstanceOf(GitCancelled);
+
+    expect(driver.generation).toBe(1);
+    expect(fired).toBe(1);
+  });
+
+  test("killable: false — an abort after start is a no-op; the write still completes", async () => {
+    const runner = new FakeProcessRunner();
+    const git = await fakeResolvedGit();
+    const driver = openGitDriver(git, runner, "/repo", noopCatFile);
+
+    const controller = new AbortController();
+    const resultPromise = driver.writeStreaming(["push", "origin", "main:main"], {
+      killable: false,
+      signal: controller.signal,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    const proc = runner.processes.at(-1);
+
+    controller.abort();
+    expect(proc?.killedWith).toEqual([]); // never killed — push has an unknowable remote outcome
+    proc?.finish(0);
+
+    const result = await resultPromise;
+    expect(result.stdout).toBeInstanceOf(Uint8Array);
+  });
+
+  test("an abort on a still-queued streaming write removes it and rejects with GitCancelled", async () => {
+    const runner = new FakeProcessRunner();
+    const git = await fakeResolvedGit();
+    const driver = openGitDriver(git, runner, "/repo", noopCatFile);
+
+    const controller = new AbortController();
+    const firstWrite = driver.write(["tag", "first"]);
+    const queuedFetch = driver.writeStreaming(["fetch", "origin"], {
+      killable: true,
+      signal: controller.signal,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    controller.abort();
+    await expect(queuedFetch).rejects.toBeInstanceOf(GitCancelled);
+
+    runner.processes.at(-1)?.finish(0);
+    await firstWrite;
+    expect(runner.processes).toHaveLength(1); // the cancelled fetch never spawned at all
+  });
+
+  test("shares the same queue as write() — serializes behind a plain write ahead of it", async () => {
+    const runner = new FakeProcessRunner();
+    const git = await fakeResolvedGit();
+    const driver = openGitDriver(git, runner, "/repo", noopCatFile);
+
+    const plain = driver.write(["tag", "v1"]);
+    const streaming = driver.writeStreaming(["fetch", "origin"], { killable: true });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(runner.processes).toHaveLength(1); // only the plain write has spawned so far
+    runner.processes[0]?.finish(0);
+    await plain;
+
+    await flushUntil(() => runner.processes.length >= 2);
+    runner.processes[1]?.finish(0);
+    await streaming;
+  });
+
+  test("a non-zero exit rejects with a classified GitError, not GitCancelled", async () => {
+    const runner = new FakeProcessRunner();
+    const git = await fakeResolvedGit();
+    const driver = openGitDriver(git, runner, "/repo", noopCatFile);
+
+    const resultPromise = driver.writeStreaming(["push", "origin", "main:main"], {
+      killable: false,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    runner.processes.at(-1)?.finish(1, "! [rejected]        main -> main (non-fast-forward)\n");
+
+    await expect(resultPromise).rejects.toBeInstanceOf(GitError);
+  });
+
+  test("opts.env is merged over buildGitEnv()'s own hygiene, not a replacement", async () => {
+    const runner = new FakeProcessRunner();
+    const git = await fakeResolvedGit();
+    const driver = openGitDriver(git, runner, "/repo", noopCatFile);
+
+    const resultPromise = driver.writeStreaming(["fetch", "origin"], {
+      killable: true,
+      env: { GIT_ASKPASS: "/tmp/askpass-shim.sh" },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    const call = runner.calls.at(-1);
+    expect(call?.request.env.GIT_ASKPASS).toBe("/tmp/askpass-shim.sh");
+    expect(call?.request.env.GIT_TERMINAL_PROMPT).toBe("0"); // buildGitEnv()'s own hygiene survives
+
+    runner.processes.at(-1)?.finish(0);
+    await resultPromise;
+  });
+});
