@@ -36,11 +36,14 @@ export interface BadgeSpec {
   readonly isCurrentBranch: boolean;
   readonly dashed: boolean;
   /** `docs/plans/P7.md` W14: set only for `branch`/`remoteBranch` — the two kinds
-   *  `CommitGrid.vue`'s ref-badge hit-test and `App.vue`'s ref context menu care about. A
-   *  tag/stash/HEAD badge has no review action and no rename/delete-from-the-graph menu, so it
-   *  carries neither field — the hit-test's own `[data-ref-kind]` selector is exactly this
-   *  distinction, made a DOM query rather than a second decoration check. */
-  readonly refKind: "branch" | "remoteBranch" | undefined;
+   *  `CommitGrid.vue`'s ref-badge hit-test and `App.vue`'s ref context menu care about. A tag/HEAD
+   *  badge has no review action and no rename/delete-from-the-graph menu, so it carries neither
+   *  field — the hit-test's own `[data-ref-kind]` selector is exactly this distinction, made a DOM
+   *  query rather than a second decoration check. `docs/plans/P9.md` W14 adds `"stash"`: a stash
+   *  badge's own menu (`buildStashMenu`) needs the same hit-test seam, `refName` carrying
+   *  `stash@{N}` rather than a ref name proper (there is no ref for anything but the top entry —
+   *  see `parseDecorationToken`'s own doc comment). */
+  readonly refKind: "branch" | "remoteBranch" | "stash" | undefined;
   readonly refName: string | undefined;
 }
 
@@ -83,15 +86,18 @@ export function badgeSpecFor(ref: DecorationRef): BadgeSpec {
         refName: undefined,
       };
     case "stash":
+      // P9 W14: `stash@{N}` — same text a `StashEntry`'s own `index` renders everywhere else
+      // (`StashList.vue`, `StashDialog.vue`) — not the bare "stash" P4 shipped, which could not
+      // say *which* stash a badge on a non-`stash@{0}` row (P9 W12's own graph walk) belonged to.
       return {
         shape: "square",
         icon: BADGE_ICONS.stash,
         colorClass: "kv-badge-stash",
-        text: "stash",
+        text: `stash@{${ref.index}}`,
         isCurrentBranch: false,
         dashed: true,
-        refKind: undefined,
-        refName: undefined,
+        refKind: "stash",
+        refName: `stash@{${ref.index}}`,
       };
     case "head":
       // Detached HEAD: §6.2's table describes the filled dot as a modifier on the *branch*

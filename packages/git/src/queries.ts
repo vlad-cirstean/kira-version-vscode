@@ -34,7 +34,9 @@ import { logArgs, parseLogRecord, revSetArgs, showMetadataArgs } from "./parse/l
 import { mergeTreeArgs, parseMergeTreeOutput } from "./parse/mergeTree.ts";
 import { parseRefRecord, REFS_RECORD_DELIMITER, refsArgs } from "./parse/refs.ts";
 import {
+  parseBaseSubjects,
   parseStashList,
+  stashBaseSubjectsArgs,
   stashListArgs,
   stashShowNameStatusArgs,
   stashShowNumstatArgs,
@@ -182,7 +184,21 @@ export async function stashList(driver: GitDriver): Promise<StashEntry[]> {
   const records: Uint8Array[] = [];
   for await (const record of read.records(0x00)) records.push(record);
   await read.done;
-  return parseStashList(records);
+
+  // `StashEntry.baseSubject` (P9 W14): a second, tiny batch spawn over every entry's DISTINCT
+  // `baseSha` — `stash list`'s own format string can only name the stash commit's own subject,
+  // never a parent's. Parsed once with an empty map first purely to learn which base shas exist
+  // (a cheap, in-memory re-parse of the same small records array — never a second git spawn);
+  // skipped entirely when there are none, since `git log` with no revision at all defaults to
+  // walking from `HEAD`, exactly the wrong answer for zero stashes.
+  const distinctBaseShas = [...new Set(parseStashList(records, new Map()).map((e) => e.baseSha))];
+  const baseSubjects =
+    distinctBaseShas.length > 0
+      ? parseBaseSubjects(
+          splitZ(await collectOneShot(driver.read(stashBaseSubjectsArgs(distinctBaseShas)))),
+        )
+      : new Map<string, string>();
+  return parseStashList(records, baseSubjects);
 }
 
 /** The stash's own file list for the detail pane (§4.4/§7.6): two `stash show` invocations

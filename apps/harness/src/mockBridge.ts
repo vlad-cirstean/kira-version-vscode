@@ -677,10 +677,18 @@ function applyOp(
         (branch !== null
           ? `WIP on ${branch}: ${baseSha.slice(0, 7)} stash`
           : `WIP on (no branch): ${baseSha.slice(0, 7)} stash`);
+      // `baseSubject` (P9 W14): looked up against the fixture's own `Scenario.commits` by sha —
+      // the honest source, since a real repo's stash base really is one of those commits. Falls
+      // back to an empty string only when `headSha` fabricated a sha not present in `commits`
+      // (an unborn/detached-with-no-fixture-commit edge this mock does not otherwise exercise
+      // for `stashPush`), matching `parseBaseSubjects`' own "missing lookup ⇒ empty string, not a
+      // thrown error" posture in the real driver.
+      const baseSubject = session.commits.find((c) => c.sha === baseSha)?.subject ?? "";
       const entry: StashEntry = {
         index: 0,
         sha,
         baseSha,
+        baseSubject,
         indexSha,
         untrackedSha,
         message,

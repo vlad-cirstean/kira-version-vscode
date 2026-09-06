@@ -42,13 +42,18 @@ describe("badgeSpecFor", () => {
     expect(spec.text).toBe("v1.0.0");
   });
 
-  test("a stash is a dashed square on the stash token, labelled 'stash'", () => {
+  test("a stash is a dashed square on the stash token, labelled 'stash@{N}' (P9 W14: real stack position, not the bare word)", () => {
     const spec = badgeSpecFor({ kind: "stash", index: 0 });
     expect(spec.shape).toBe("square");
     expect(spec.dashed).toBe(true);
     expect(spec.colorClass).toBe("kv-badge-stash");
-    expect(spec.text).toBe("stash");
+    expect(spec.text).toBe("stash@{0}");
     expect(spec.isCurrentBranch).toBe(false);
+  });
+
+  test("a stash badge names its own index — a deeper stack entry gets its own position, not always 0 (P9 W14)", () => {
+    const spec = badgeSpecFor({ kind: "stash", index: 3 });
+    expect(spec.text).toBe("stash@{3}");
   });
 
   test("detached HEAD (no branch alongside it) renders as a local-branch-shaped 'HEAD' badge with the dot", () => {
@@ -59,11 +64,16 @@ describe("badgeSpecFor", () => {
     expect(spec.isCurrentBranch).toBe(true);
   });
 
-  test("docs/plans/P7.md W14: only branch/remoteBranch carry refKind/refName — tag/stash/HEAD carry neither", () => {
+  test("docs/plans/P7.md W14: only branch/remoteBranch carry refKind/refName — tag/HEAD carry neither", () => {
     expect(badgeSpecFor({ kind: "tag", name: "v1.0.0" }).refKind).toBeUndefined();
     expect(badgeSpecFor({ kind: "tag", name: "v1.0.0" }).refName).toBeUndefined();
-    expect(badgeSpecFor({ kind: "stash", index: 0 }).refKind).toBeUndefined();
     expect(badgeSpecFor({ kind: "head" }).refKind).toBeUndefined();
+  });
+
+  test("P9 W14: stash now DOES carry refKind/refName too — CommitGrid's context-menu hit-test needs to tell a stash badge apart from a tag one", () => {
+    const spec = badgeSpecFor({ kind: "stash", index: 2 });
+    expect(spec.refKind).toBe("stash");
+    expect(spec.refName).toBe("stash@{2}");
   });
 });
 
@@ -104,7 +114,7 @@ describe("planBadges", () => {
     expect(plan.visible.map((spec) => spec.text)).toEqual(["main", "origin/main", "origin/dev"]);
     expect(plan.overflow).not.toBeNull();
     expect(plan.overflow?.count).toBe(3);
-    expect(plan.overflow?.title).toBe("main, origin/main, origin/dev, v1.0.0, v1.0.1, stash");
+    expect(plan.overflow?.title).toBe("main, origin/main, origin/dev, v1.0.0, v1.0.1, stash@{0}");
   });
 
   test("exactly four decorations still collapses the fourth into +1", () => {

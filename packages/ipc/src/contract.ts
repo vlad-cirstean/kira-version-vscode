@@ -331,6 +331,9 @@ export interface StashEntry {
   readonly index: number;
   readonly sha: string;
   readonly baseSha: string;
+  /** `baseSha`'s own commit subject — see `@kira-version/core`'s own `StashEntry.baseSubject`
+   *  doc comment (P9 W14). */
+  readonly baseSubject: string;
   readonly indexSha: string;
   readonly untrackedSha: string | undefined;
   readonly message: string;

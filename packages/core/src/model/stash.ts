@@ -1,7 +1,9 @@
 /**
  * One entry of `git stash list` (§4.4/§7.6). Widened at P9 from P1's narrow shape — no file
  * count, no base-commit subject, no index/untracked parent shas, no "was created with `-u`"
- * flag — none of which §7.6's list row or pop-prediction engine can do without.
+ * flag — none of which §7.6's list row or pop-prediction engine can do without. (`baseSubject`
+ * was the one field this widening initially missed — added at W14, when `StashList.vue` turned
+ * out to need it and no field carried it; see that field's own doc comment.)
  */
 export interface StashEntry {
   /** The N in `stash@{N}` at the moment of the read. Positional and unstable — never an
@@ -16,6 +18,14 @@ export interface StashEntry {
    *  (P9 probe 2: omitting `--merge-base=<stash^>` makes a genuinely conflicting pop report
    *  clean). */
   readonly baseSha: string;
+  /** `baseSha`'s own commit subject — `git stash list`'s own format string has no way to name a
+   *  PARENT commit's subject (only the stash commit's own `%gs`), so `queries.ts`'s `stashList`
+   *  fetches it with one extra, tiny batch spawn (`log --no-walk`) over every entry's distinct
+   *  `baseSha`, keyed back onto each entry here. `StashList.vue`'s "base commit short sha +
+   *  subject" row (§3.1) is the one reader; empty string if a batch spawn somehow omitted a sha
+   *  (should not happen — every `baseSha` is a real, reachable commit — but a stash list
+   *  should never fail to render over a lookup gap that is not itself worth surfacing). */
+  readonly baseSubject: string;
   /** Parent 2 — the index tree commit. Held so the graph's helper-commit filter (P9 probe 7)
    *  can drop it by sha; not otherwise consumed. */
   readonly indexSha: string;

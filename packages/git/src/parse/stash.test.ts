@@ -20,7 +20,7 @@ async function loadRecords(name: string): Promise<Uint8Array[]> {
 describe("parseStashList", () => {
   test("round-trips a stack with a WIP entry, a `-u` entry, a pathspec entry and a colon/punctuation message", async () => {
     const records = await loadRecords("list.bin");
-    const entries = parseStashList(records);
+    const entries = parseStashList(records, new Map());
 
     expect(entries).toHaveLength(4);
     expect(entries.map((e) => e.index)).toEqual([0, 1, 2, 3]);
@@ -60,10 +60,28 @@ describe("parseStashList", () => {
 
   test("an empty stack parses to zero entries, not an error", async () => {
     const records = await loadRecords("empty.bin");
-    expect(parseStashList(records)).toEqual([]);
+    expect(parseStashList(records, new Map())).toEqual([]);
   });
 
   test("parseStashList([]) is the empty stack too", () => {
-    expect(parseStashList([])).toEqual([]);
+    expect(parseStashList([], new Map())).toEqual([]);
+  });
+
+  test("baseSubject is joined in from the map by baseSha, empty string when the map has no entry for it", async () => {
+    const records = await loadRecords("list.bin");
+    const withoutSubjects = parseStashList(records, new Map());
+    const sharedBaseSha = withoutSubjects[0]?.baseSha ?? "";
+    expect(withoutSubjects[0]?.baseSubject).toBe("");
+
+    // This fixture's four entries all share the SAME base commit (all four stashes were pushed
+    // against `main` without an intervening commit) — a real, join-by-sha-not-by-position case,
+    // so every entry picks up the one map value.
+    for (const entry of withoutSubjects) expect(entry.baseSha).toBe(sharedBaseSha);
+    const joined = parseStashList(records, new Map([[sharedBaseSha, "fix: an earlier commit"]]));
+    for (const entry of joined) expect(entry.baseSubject).toBe("fix: an earlier commit");
+
+    // A base sha the map has no entry for at all falls back to "", never throwing or `undefined`.
+    const missing = parseStashList(records, new Map([["deadbeef", "unrelated"]]));
+    expect(missing[0]?.baseSubject).toBe("");
   });
 });

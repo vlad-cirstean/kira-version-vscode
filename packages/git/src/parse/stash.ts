@@ -59,6 +59,35 @@ export function stashUntrackedPathsArgs(untrackedSha: string): string[] {
   return ["ls-tree", "-r", "--name-only", "-z", untrackedSha];
 }
 
+/** `StashEntry.baseSubject` (P9 W14): `stash list`'s own format string can name the stash
+ *  commit's own subject (`%gs`) but has no way to name a PARENT's — so this is a second, tiny
+ *  batch spawn over every entry's DISTINCT `baseSha`, never one spawn per entry. `--no-walk`
+ *  keeps it to exactly those commits (`log`'s default behaviour is to walk history from them);
+ *  an empty `shas` MUST NOT be passed to a real spawn (`git log` with no revision at all walks
+ *  from `HEAD`, exactly the wrong answer) — callers check that first. */
+export function stashBaseSubjectsArgs(shas: readonly string[]): string[] {
+  return ["log", "--no-walk", "-z", "--format=%H%x1f%s", ...shas];
+}
+
+const BASE_SUBJECT_FIELD_COUNT = 2;
+
+/** `stashBaseSubjectsArgs`'s own parser — keyed by sha since `--no-walk`'s output order matches
+ *  input order but a caller re-zipping by position would silently desync the moment a duplicate
+ *  or unresolvable sha slipped in; a map keyed by the sha itself cannot. */
+export function parseBaseSubjects(records: readonly Uint8Array[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const record of records) {
+    if (record.length === 0) continue;
+    const [sha, subject] = splitLimitedFields(
+      record,
+      FIELD_DELIMITER,
+      BASE_SUBJECT_FIELD_COUNT,
+    ).map((field) => decoder.decode(field));
+    if (sha !== undefined && sha.length > 0) map.set(sha, subject ?? "");
+  }
+  return map;
+}
+
 const decoder = new TextDecoder("utf-8", { fatal: false });
 
 const STASH_INDEX = /^stash@\{(\d+)\}$/;
@@ -112,8 +141,17 @@ function parseHeader(record: Uint8Array): {
  * Returns entries oldest-parsed-first in whatever order git emitted them (`stash@{0}` first, per
  * `stash list`'s own ordering) — callers that need index order can rely on `%gd` alone; array
  * position is never used for `index` (a future filtered read must not silently desynchronise it).
+ *
+ * `baseSubjects` is `stashBaseSubjectsArgs`'s own parsed result, keyed by `baseSha` — a separate
+ * spawn (`queries.ts`'s `stashList` runs both and joins them), never looked up per entry here.
+ * Pass an empty map to get every entry back with `baseSubject: ""` when the caller has no need
+ * for it yet (`queries.ts` itself does exactly this once, to first learn the distinct `baseSha`
+ * set the real batch spawn needs).
  */
-export function parseStashList(records: readonly Uint8Array[]): StashEntry[] {
+export function parseStashList(
+  records: readonly Uint8Array[],
+  baseSubjects: ReadonlyMap<string, string>,
+): StashEntry[] {
   const entries: StashEntry[] = [];
   let current: ReturnType<typeof parseHeader> | undefined;
   let fileCount = 0;
@@ -124,6 +162,7 @@ export function parseStashList(records: readonly Uint8Array[]): StashEntry[] {
       index: current.index,
       sha: current.sha,
       baseSha: current.baseSha,
+      baseSubject: baseSubjects.get(current.baseSha) ?? "",
       indexSha: current.indexSha,
       untrackedSha: current.untrackedSha,
       message: current.message,

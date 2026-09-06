@@ -75,6 +75,12 @@ const emit = defineEmits<{
     e: "refContextMenu",
     detail: { kind: "branch" | "remoteBranch"; name: string; x: number; y: number },
   ): void;
+  /** `docs/plans/P9.md` W14: the stash counterpart of `refContextMenu` — a right-click landed on
+   *  a stash badge (`refBadges.ts`'s `refKind: "stash"`). Reported as a plain row index rather
+   *  than a parsed `stash@{N}`/sha pair: the row IS the stash commit (its own decoration already
+   *  carries the exact index, and its `sha` field the exact sha), so `App.vue` reads both back
+   *  from the store instead of this component re-deriving them from badge text. */
+  (e: "stashContextMenu", detail: { row: number; x: number; y: number }): void;
 }>();
 
 const MIN_COLUMN_WIDTH = 40;
@@ -264,6 +270,10 @@ function handleContextMenu(event: MouseEvent): void {
       emit("refContextMenu", { kind: refKind, name: refName, x: event.clientX, y: event.clientY });
       return;
     }
+  }
+  if (refKind === "stash") {
+    emit("stashContextMenu", { row: cell.row, x: event.clientX, y: event.clientY });
+    return;
   }
 
   emit("contextMenu", { row: cell.row, x: event.clientX, y: event.clientY });

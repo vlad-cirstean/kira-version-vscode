@@ -10,7 +10,7 @@
  * or failure — is composed here too, per that phase's own rule that a destructive action which
  * silently does nothing is the same failure mode §6.4 already named for the clipboard.
  */
-import type { CheckoutPreflight, OpErrorKind } from "@kira-version/ipc";
+import type { CheckoutPreflight, OpErrorKind, OpResult, StashEntry } from "@kira-version/ipc";
 
 const COUNT_FORMATTER = new Intl.NumberFormat();
 
@@ -104,4 +104,73 @@ export function composeOpFailureAnnouncement(
 ): string {
   if (!error) return `${action} failed.`;
   return `${action} failed — ${OP_ERROR_TEXT[error.kind]}.`;
+}
+
+/** `docs/plans/P9.md` W13: git's own `No local changes to save` no-op (probe 10) exits 0 with no
+ *  error, so a plain "succeeded" announcement would be the silent-no-op failure mode §6.4 already
+ *  named for the clipboard — `pushed` is `ops.ts`'s own before/after stash-count comparison,
+ *  the only way to tell the two outcomes apart. */
+export function composeStashPushAnnouncement(pushed: boolean): string {
+  return pushed ? "Changes stashed" : "Nothing to stash — the working tree matched HEAD";
+}
+
+/** §7.6's concrete answer to hard part 1: non-null only when an executed pop/apply disagreed with
+ *  the prediction the user was shown (a race between pre-flight and write, or a gap pre-flight
+ *  could not see — never a false positive, since `composeStashAnnouncement` never compares at all
+ *  when the prediction itself was `"unknown"`). `stashKept` is a fact for every failure mode P9
+ *  probed (conflict, untracked collision, local-overwrite refusal) — the stash always survives —
+ *  except a genuinely CLEAN `pop` (as opposed to `apply`), which removes it exactly as intended
+ *  even when that clean outcome is itself the surprise (`predicted: "conflicts"`). */
+export interface StashPredictionMismatch {
+  readonly predicted: "clean" | "conflicts";
+  readonly actual: "clean" | "conflicts" | "refused";
+  readonly stashKept: boolean;
+}
+
+const STASH_DROP_UNDO_LABEL_PREFIX = "Dropped stash@{";
+
+/** `docs/plans/P9.md` W15: undoing a dropped stash does not restore it to its old stack position
+ *  — probe 9 found it always lands back at `stash@{0}` — so the generic "Undone: `<label>`" text
+ *  would read as if `stash@{2}` (say) came back exactly as it was, which a user watching for that
+ *  position would take as a sign the undo failed. Detected from the slot's own `label` rather
+ *  than a dedicated field: `UndoSlotSnapshot` carries no "kind" to switch on, and
+ *  `RepoService`'s stash-drop undo capture is the only call site that ever begins a label this
+ *  way (mirrored exactly in the harness's own mock bridge). */
+export function composeUndoAnnouncement(label: string): string {
+  return label.startsWith(STASH_DROP_UNDO_LABEL_PREFIX)
+    ? "Restored as stash@{0}"
+    : `Undone: ${label}`;
+}
+
+/** §7.6's own worked example, given a voice: *"This pop conflicted, though the pre-flight
+ *  predicted a clean apply — the tree changed in between. Your stash was kept."* A `mismatch`
+ *  takes priority over the plain success/failure text — it is the more specific, more surprising
+ *  fact, and staying silent about it (rendering only the generic failure text `StashConflict`
+ *  already has in `OP_ERROR_TEXT`) is exactly the "silently rendering the outcome" §7.6 rules
+ *  out. With no mismatch, this reads exactly like `composeOpFailureAnnouncement`'s own output for
+ *  a failure, or a short "Applied"/"Popped" sentence for a plain, agreeing success. */
+export function composeStashAnnouncement(
+  verb: "apply" | "pop",
+  entry: StashEntry,
+  result: OpResult,
+  mismatch: StashPredictionMismatch | null,
+): string {
+  const label = `stash@{${entry.index}}`;
+  const actionLabel = verb === "apply" ? "Stash apply" : "Stash pop";
+  if (mismatch) {
+    const predictedText = mismatch.predicted === "clean" ? "a clean apply" : "conflicts";
+    const actualText =
+      mismatch.actual === "clean"
+        ? "applied cleanly"
+        : mismatch.actual === "conflicts"
+          ? "conflicted"
+          : "was refused";
+    const keptText = mismatch.stashKept ? " Your stash was kept." : "";
+    return (
+      `This ${verb} ${actualText}, though the pre-flight predicted ${predictedText} — the tree ` +
+      `changed in between.${keptText}`
+    );
+  }
+  if (!result.ok) return composeOpFailureAnnouncement(actionLabel, result.error);
+  return verb === "apply" ? `Applied ${label}` : `Popped ${label}`;
 }

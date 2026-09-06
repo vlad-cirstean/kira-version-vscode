@@ -8,6 +8,7 @@ const STASH: StashEntry = {
   index: 0,
   sha: "s".repeat(40),
   baseSha: "b".repeat(40),
+  baseSubject: "base commit subject",
   indexSha: "i".repeat(40),
   untrackedSha: undefined,
   message: "On main: s",

@@ -148,6 +148,7 @@ describe("ipc codec", () => {
           index: 0,
           sha: "a".repeat(40),
           baseSha: "b".repeat(40),
+          baseSubject: "base subject",
           indexSha: "c".repeat(40),
           untrackedSha: undefined,
           message: "WIP on main: abc1234 subject",

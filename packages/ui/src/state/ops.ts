@@ -1,6 +1,9 @@
 import { canRunOp } from "@kira-version/core";
 import type {
   CheckoutPreflight,
+  HeadState,
+  InProgressOperation,
+  OpErrorKind,
   OpRequest,
   OpResult,
   PullPreflight,
@@ -12,6 +15,9 @@ import type {
   RemoteOpResult,
   RemoteProgress,
   RevertPreflight,
+  StashBranchPreflight,
+  StashEntry,
+  StashPopPreflight,
   StatusSummary,
   UndoSlotSnapshot,
 } from "@kira-version/ipc";
@@ -21,8 +27,42 @@ import {
   composeCheckoutAnnouncement,
   composeOpFailureAnnouncement,
   composeRevertAnnouncement,
+  composeStashAnnouncement,
+  composeStashPushAnnouncement,
+  composeUndoAnnouncement,
+  type StashPredictionMismatch,
 } from "./liveAnnouncements.ts";
 import type { RefsState } from "./refs.ts";
+
+export type { StashPredictionMismatch } from "./liveAnnouncements.ts";
+
+/** `StashPopPreflight.prediction`'s own inline shape, named here since `@kira-version/ipc` has no
+ *  standalone export for it (it is a structural copy of core's `MergeOutcomePrediction`, inlined
+ *  at each of its two call sites rather than given its own top-level name — §7.10/§7.6 both do
+ *  this). */
+type StashPrediction = StashPopPreflight["prediction"];
+
+/** `StashDialog.vue`'s own pending state for the shared apply/pop confirmation (OQ7: one dialog,
+ *  the verb and one sentence differing) — opened only when `preflight.stashPop`'s verdict is not
+ *  `"clean"` (mirrors `RevertDialog`'s own threshold). There is no route data beyond
+ *  proceed/cancel: `restoreIndex` is chosen by the caller before the preflight round trip even
+ *  starts (`runStashApply`/`runStashPop`'s own parameter), since it is a user preference the
+ *  merge-tree prediction never depends on, not a hazard the dialog discovers. */
+export interface PendingStashPop {
+  readonly verb: "apply" | "pop";
+  readonly preflight: StashPopPreflight;
+}
+
+/** The common subset of `OpResult` and `RemoteOpResult` the `stashAndCarry` route (§7.5/§7.3,
+ *  OQ10) actually reads — `checkout` and `pull` return different result shapes (`undo` vs.
+ *  `updates`), but both carry exactly this much, which is all `#stashAndCarry` needs from
+ *  whichever one its caller ran. */
+interface CarryMiddleResult {
+  readonly ok: boolean;
+  readonly error: { readonly kind: OpErrorKind; readonly message: string } | undefined;
+  readonly head: HeadState;
+  readonly inProgress: InProgressOperation | null;
+}
 
 /** The route a confirmed `ForcePushDialog.vue` takes. `plain: true` selects §7.4's second,
  *  differently-worded confirmation (plain `--force`); `plain: false` is the default
@@ -96,6 +136,9 @@ export class OpsState {
 
   readonly pendingCheckout: ShallowRef<CheckoutPreflight | undefined> = shallowRef(undefined);
   readonly pendingRevert: ShallowRef<RevertPreflight | undefined> = shallowRef(undefined);
+  /** P9 W13: the shared apply/pop confirmation's own pending state — see `PendingStashPop`'s own
+   *  doc comment on why one field, not two, covers both verbs (OQ7). */
+  readonly pendingStashPop: ShallowRef<PendingStashPop | undefined> = shallowRef(undefined);
 
   // -------------------------------------------------------------------------------------
   // P8 W17: remote ops. Deliberately a sibling to the four steps above, not folded into
@@ -125,6 +168,7 @@ export class OpsState {
   #resolveCheckout: ((route: CheckoutRoute | null) => void) | undefined;
   #resolveRevert: ((route: RevertRoute | null) => void) | undefined;
   #resolveForcePush: ((route: ForcePushRoute | null) => void) | undefined;
+  #resolveStashPop: ((proceed: boolean) => void) | undefined;
   readonly #unsubscribe: () => void;
   readonly #unsubscribeProgress: () => void;
 
@@ -302,6 +346,316 @@ export class OpsState {
   }
 
   // -------------------------------------------------------------------------------------
+  // stash (`docs/plans/P9.md` W13, §7.6)
+  // -------------------------------------------------------------------------------------
+
+  /** `StashDialog.vue`'s create mode IS the confirm step (no pre-flight endpoint exists for
+   *  `stashPush` — there is nothing to classify before the fact), so this runs directly. The one
+   *  thing it still cannot take on faith is git's own `No local changes to save` no-op (probe
+   *  10): that spawn exits 0 with no error, so a stash-count comparison before/after is the only
+   *  way to tell "stashed" from "there was nothing to stash" apart — reporting the latter as a
+   *  plain success would be exactly the silent-no-op failure mode §6.4 already named. */
+  async runStashPush(input: {
+    readonly message: string | undefined;
+    readonly includeUntracked: boolean;
+    readonly keepIndex: boolean;
+    readonly paths: readonly string[];
+  }): Promise<OpResult> {
+    const repoId = this.#repoId;
+    if (repoId === undefined) throw new Error("ops: no repo open");
+    if (this.busy.value) throw new Error("ops: another operation is already running");
+    this.busy.value = true;
+    try {
+      const before = await this.#bridge.request("stash.list", { repoId });
+      const result = await this.#bridge.request("op.run", {
+        repoId,
+        op: { kind: "stashPush", ...input },
+      });
+      this.#applyResult(result);
+      let pushed = true;
+      if (result.ok) {
+        const after = await this.#bridge.request("stash.list", { repoId });
+        pushed = after.entries.length > before.entries.length;
+      }
+      this.announcement.value = result.ok
+        ? composeStashPushAnnouncement(pushed)
+        : composeOpFailureAnnouncement("Stash", result.error);
+      return result;
+    } finally {
+      this.busy.value = false;
+    }
+  }
+
+  /** `apply` — the stash survives regardless of outcome (probe 8: it accepts a raw sha, so this
+   *  needs no `stash@{index}` addressing or position re-verification at all). `restoreIndex` is a
+   *  plain caller preference (`StashList.vue`'s own row-menu choice), never discovered by the
+   *  pre-flight — the merge-tree prediction covers the worktree half only (§7.6). */
+  async runStashApply(entry: StashEntry, restoreIndex = false): Promise<OpResult | undefined> {
+    return this.#runStashPopLike("apply", entry, restoreIndex);
+  }
+
+  /** `pop` — REFUSES a raw sha (probe 8), so the executed op addresses `stash@{index}`; the
+   *  service re-verifies that position immediately before writing and the write removes the
+   *  entry on success. */
+  async runStashPop(entry: StashEntry, restoreIndex = false): Promise<OpResult | undefined> {
+    return this.#runStashPopLike("pop", entry, restoreIndex);
+  }
+
+  async #runStashPopLike(
+    verb: "apply" | "pop",
+    entry: StashEntry,
+    restoreIndex: boolean,
+  ): Promise<OpResult | undefined> {
+    const repoId = this.#repoId;
+    if (repoId === undefined || this.busy.value) return undefined;
+    this.busy.value = true;
+    try {
+      const preflight = await this.#bridge.request("preflight.stashPop", {
+        repoId,
+        sha: entry.sha,
+        index: entry.index,
+      });
+      if (preflight.verdict !== "clean") {
+        const proceed = await this.#confirmStashPop(verb, preflight);
+        if (!proceed) {
+          this.announcement.value = `Stash ${verb} cancelled.`;
+          return undefined;
+        }
+      }
+      const op: OpRequest =
+        verb === "apply"
+          ? { kind: "stashApply", sha: entry.sha, restoreIndex }
+          : { kind: "stashPop", sha: entry.sha, index: entry.index, restoreIndex };
+      const result = await this.#bridge.request("op.run", { repoId, op });
+      this.#applyResult(result);
+      const mismatch = this.#reconcileStashPop(verb, preflight.prediction, result);
+      this.announcement.value = composeStashAnnouncement(verb, entry, result, mismatch);
+      return result;
+    } finally {
+      this.busy.value = false;
+    }
+  }
+
+  #confirmStashPop(verb: "apply" | "pop", preflight: StashPopPreflight): Promise<boolean> {
+    this.pendingStashPop.value = { verb, preflight };
+    return new Promise((resolve) => {
+      this.#resolveStashPop = resolve;
+    });
+  }
+
+  /** `StashDialog.vue`'s shared apply/pop confirmation calls this — `false` for Cancel, matching
+   *  `resolveCheckoutDialog`/`resolveRevertDialog`'s own `null`-for-cancel convention as closely
+   *  as a boolean route can (there is no route data to withhold on cancel here, per
+   *  `PendingStashPop`'s own doc comment). */
+  resolveStashPopDialog(proceed: boolean): void {
+    this.pendingStashPop.value = undefined;
+    const resolve = this.#resolveStashPop;
+    this.#resolveStashPop = undefined;
+    resolve?.(proceed);
+  }
+
+  /** §7.6's concrete answer to hard part 1 (D... `docs/plans/P9.md`'s own worked example): only
+   *  ever non-null when reality disagreed with the prediction the user was shown. `unknown`
+   *  predictions are never compared against — there is nothing to disagree WITH when pre-flight
+   *  itself could not predict. `actual` is read from `result.ok`/`result.error.kind` — `runOp`'s
+   *  own read-back already turns a real conflicting pop into `StashConflict` (never a thrown
+   *  error), so no second git read is needed here. Every non-clean outcome keeps the stash
+   *  (probes 3-5); a genuinely clean `pop` is the one outcome that does not, `apply` never drops
+   *  it either way. */
+  #reconcileStashPop(
+    verb: "apply" | "pop",
+    predicted: StashPrediction,
+    result: OpResult,
+  ): StashPredictionMismatch | null {
+    if (predicted.kind === "unknown") return null;
+    const actual: "clean" | "conflicts" | "refused" = result.ok
+      ? "clean"
+      : result.error?.kind === "StashConflict"
+        ? "conflicts"
+        : "refused";
+    if (actual === predicted.kind) return null;
+    const stashKept = verb === "apply" || actual !== "clean";
+    return { predicted: predicted.kind, actual, stashKept };
+  }
+
+  async runStashDrop(entry: StashEntry): Promise<OpResult> {
+    return this.#runSimple(
+      { kind: "stashDrop", sha: entry.sha, index: entry.index },
+      (ok) => (ok ? `Dropped stash@{${entry.index}}: ${entry.message}` : undefined),
+      "Drop stash",
+    );
+  }
+
+  /** `StashDialog.vue`'s branch mode — the live preflight it re-renders as the user types a name,
+   *  mirroring `previewRevertMainline`'s own read-only-round-trip shape. Not gated by `busy`: a
+   *  read, like `previewPullStrategy`/`previewRevertMainline`, not an operation. */
+  async previewStashBranch(
+    entry: StashEntry,
+    name: string,
+  ): Promise<StashBranchPreflight | undefined> {
+    const repoId = this.#repoId;
+    if (repoId === undefined) return undefined;
+    return this.#bridge.request("preflight.stashBranch", { repoId, sha: entry.sha, branch: name });
+  }
+
+  /** `stash branch` gets no pop prediction (probe 11: clean by construction) but IS non-atomic on
+   *  a mid-way failure (OQ6) — `StashDialog.vue`'s own branch mode has already run the classifier
+   *  via `previewStashBranch` and is the confirm step, so this runs directly like `branchCreate`. */
+  async runStashBranch(entry: StashEntry, name: string): Promise<OpResult> {
+    return this.#runSimple(
+      { kind: "stashBranch", branch: name, sha: entry.sha, index: entry.index },
+      (ok) => (ok ? `Created branch ${name} from stash@{${entry.index}}` : undefined),
+      "Create branch from stash",
+    );
+  }
+
+  /**
+   * §7.5/§7.3's `stashAndCarry` route (OQ10: pull ships it in this same phase, W10) — shared
+   * between `runCheckoutStashAndCarry` and `runPullStashAndCarry` below, which differ only in
+   * `runMiddle` (the blocked operation itself) and its own success wording.
+   *
+   * **Push, then run, then pop only if predicted clean (OQ1).** The middle op ALWAYS runs once
+   * the stash push succeeds — carrying the user's changes across is the entire point of the
+   * route, and a predicted-conflict pop is a reason to leave the stash for the user to resolve
+   * by hand, never a reason to also withhold the checkout/pull they explicitly asked for. A
+   * predicted conflict (or a blocker) therefore ends the route with the stash intentionally
+   * still in the stack, not an error — the middle op's own success is what gets announced.
+   *
+   * **`targetSha` is omitted deliberately.** `preflight.stashPop`'s own contract documents this
+   * field as the `stashAndCarry` route's way to predict against a target the walk has not
+   * switched to yet — accurate for `checkout`, whose target is already a known revision before
+   * the middle op runs. `pull` has no such revision to offer: its target is whatever the fetch
+   * half of a single atomic `remote.run` resolves to, not something this class learns ahead of
+   * running it. Predicting AFTER `runMiddle` (the default `targetSha` ⇒ current HEAD, which by
+   * then already reflects whatever the middle op did) is correct for both — even for `checkout`,
+   * it is the ACTUAL resulting tree rather than a hypothetical one — so both routes share this one
+   * predict-after shape rather than checkout alone taking the more elaborate predict-before path
+   * the field's doc comment names. This is a deliberate, documented deviation from that comment's
+   * literal reading — see `docs/plans/P9.md`'s own Findings.
+   */
+  async #stashAndCarry(
+    runMiddle: () => Promise<CarryMiddleResult>,
+    actionLabel: string,
+    announceMiddleOk: () => string,
+  ): Promise<void> {
+    const repoId = this.#repoId;
+    if (repoId === undefined) return;
+    const pushResult = await this.#bridge.request("op.run", {
+      repoId,
+      op: {
+        kind: "stashPush",
+        message: undefined,
+        includeUntracked: false,
+        keepIndex: false,
+        paths: [],
+      },
+    });
+    this.#applyResult(pushResult);
+    if (!pushResult.ok) {
+      this.announcement.value = composeOpFailureAnnouncement("Stash", pushResult.error);
+      return;
+    }
+
+    const middle = await runMiddle();
+    this.#refs.applyHead(middle.head);
+    const current = this.statusSummary.value;
+    if (current)
+      this.statusSummary.value = { ...current, head: middle.head, inProgress: middle.inProgress };
+    if (!middle.ok) {
+      this.announcement.value = `${composeOpFailureAnnouncement(actionLabel, middle.error)} Your changes are stashed — see the stash list.`;
+      return;
+    }
+
+    const { entries } = await this.#bridge.request("stash.list", { repoId });
+    const top = entries[0];
+    if (top === undefined) {
+      // `stashPush` above was itself a no-op (probe 10) — the worktree really was clean, so
+      // there is nothing left to carry back.
+      this.announcement.value = announceMiddleOk();
+      return;
+    }
+
+    const preflight = await this.#bridge.request("preflight.stashPop", {
+      repoId,
+      sha: top.sha,
+      index: top.index,
+    });
+    if (preflight.verdict !== "clean") {
+      this.announcement.value = `${announceMiddleOk()} — your stashed changes were kept (popping back would conflict); pop stash@{${top.index}} manually when ready.`;
+      return;
+    }
+
+    const popResult = await this.#bridge.request("op.run", {
+      repoId,
+      op: { kind: "stashPop", sha: top.sha, index: top.index, restoreIndex: false },
+    });
+    this.#applyResult(popResult);
+    const mismatch = this.#reconcileStashPop("pop", preflight.prediction, popResult);
+    this.announcement.value = mismatch
+      ? composeStashAnnouncement("pop", top, popResult, mismatch)
+      : popResult.ok
+        ? announceMiddleOk()
+        : composeOpFailureAnnouncement("Stash pop", popResult.error);
+  }
+
+  /** `CheckoutDialog.vue`'s `"stashAndCarry"` route (§7.5) — `discardLocalChanges: false` for the
+   *  checkout half; the stash push is what actually cleared the tree. */
+  async runCheckoutStashAndCarry(target: string, mode: "switch" | "detach"): Promise<void> {
+    const repoId = this.#repoId;
+    if (repoId === undefined || this.busy.value) return;
+    this.busy.value = true;
+    try {
+      await this.#stashAndCarry(
+        () =>
+          this.#bridge.request("op.run", {
+            repoId,
+            op: { kind: "checkout", target, mode, discardLocalChanges: false },
+          }),
+        "Checkout",
+        () => `Checked out ${target}${mode === "detach" ? " (detached)" : ""}`,
+      );
+    } finally {
+      this.busy.value = false;
+    }
+  }
+
+  /** The pull-strategy picker's `"stashAndCarry"` route (§7.3, OQ10/W10) — mirrors
+   *  `runCheckoutStashAndCarry` exactly except for which middle op it runs and how it announces
+   *  success; `strategy` is whatever `runPull`'s own resolution ladder already picked. */
+  async runPullStashAndCarry(
+    remote: string,
+    branch: string,
+    strategy: PullStrategy,
+  ): Promise<void> {
+    const repoId = this.#repoId;
+    if (repoId === undefined || this.busy.value) return;
+    this.busy.value = true;
+    this.pullStrategy.value = { strategy, source: "explicit" };
+    try {
+      await this.#stashAndCarry(
+        () =>
+          this.#bridge.request("remote.run", {
+            repoId,
+            kind: "pull",
+            remote,
+            branch,
+            setUpstream: false,
+            prune: false,
+            pruneTags: false,
+            strategy,
+            expectedRemoteTip: undefined,
+            plainForce: undefined,
+            confirmToken: undefined,
+          }),
+        "Pull",
+        () => `Pulled ${remote}/${branch} (${strategy})`,
+      );
+    } finally {
+      this.busy.value = false;
+    }
+  }
+
+  // -------------------------------------------------------------------------------------
   // Branch/tag mutations and the in-progress op controls: none of these have a pre-flight
   // endpoint of their own (only checkout and revert do) — the dialog or menu confirmation that
   // collects their input has already run by the time one of these is called, so there is no
@@ -396,7 +750,7 @@ export class OpsState {
       const result = await this.#bridge.request("undo.run", { repoId, id: slot.id });
       this.#applyResult(result);
       this.announcement.value = result.ok
-        ? `Undone: ${slot.label}`
+        ? composeUndoAnnouncement(slot.label)
         : composeOpFailureAnnouncement("Undo", result.error);
       return result;
     } finally {
