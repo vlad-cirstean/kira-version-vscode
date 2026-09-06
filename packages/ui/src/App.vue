@@ -273,19 +273,15 @@ let revealController: AbortController | undefined;
 /** §7.8's "selecting a ref scrolls to and highlights the commit it points at" / "selecting a
  *  commit selects it in the graph" — both funnel through the same `GraphViewState.revealSha`
  *  (W13), since a tail-only commit hit and every ref hit alike may point at a sha outside the
- *  currently loaded window. An annotated tag's own commit is `peeledObjectId`, never `objectId`
- *  (§7.8: "for an annotated tag, the commit it dereferences to") — a lightweight tag or a branch
- *  carries no `peeledObjectId` at all, so `objectId` is what every other ref kind falls back to.
- *  Supersedes any reveal already in flight — the same cancel-and-restart shape this file already
- *  uses elsewhere (`handleRepoOpened`'s own `pendingSelectionSha` reset, `GraphViewState`'s own
- *  controller swaps): selecting a second search hit before the first one finished paging should
- *  abandon that first page-through, not race it. A `"notFound"`/`"cancelled"` outcome selects
- *  nothing — `revealSha`'s own doc comment covers why each is announced (or not) on its own. */
-async function handleSearchSelect(option: SearchOption): Promise<void> {
-  const sha =
-    option.kind === "ref"
-      ? (option.hit.ref.peeledObjectId ?? option.hit.ref.objectId)
-      : option.hit.sha;
+ *  currently loaded window. Supersedes any reveal already in flight — the same cancel-and-restart
+ *  shape this file already uses elsewhere (`handleRepoOpened`'s own `pendingSelectionSha` reset,
+ *  `GraphViewState`'s own controller swaps): revealing a second sha before the first one finished
+ *  paging should abandon that first page-through, not race it. A `"notFound"`/`"cancelled"`
+ *  outcome selects nothing — `revealSha`'s own doc comment covers why each is announced (or not)
+ *  on its own. Shared by both `handleSearchSelect` (a dropdown pick) and the `activeHit` watcher
+ *  below (`Enter`/`Shift+Enter` stepping through commit matches with no dropdown option
+ *  highlighted) — the two ways §7.8 lets a search hit become "the" selected commit. */
+async function revealAndSelectSha(sha: string): Promise<void> {
   revealController?.abort();
   const controller = new AbortController();
   revealController = controller;
@@ -296,6 +292,27 @@ async function handleSearchSelect(option: SearchOption): Promise<void> {
   selection.select(row);
   commitGridRef.value?.scrollToRow(row);
 }
+
+/** An annotated tag's own commit is `peeledObjectId`, never `objectId` (§7.8: "for an annotated
+ *  tag, the commit it dereferences to") — a lightweight tag or a branch carries no
+ *  `peeledObjectId` at all, so `objectId` is what every other ref kind falls back to. */
+async function handleSearchSelect(option: SearchOption): Promise<void> {
+  const sha =
+    option.kind === "ref"
+      ? (option.hit.ref.peeledObjectId ?? option.hit.ref.objectId)
+      : option.hit.sha;
+  await revealAndSelectSha(sha);
+}
+
+// `SearchState.next()`/`previous()` (`SearchBox.vue`'s `Enter`/`Shift+Enter`, judgment call 6)
+// only move `activeIndex` over `commitHits` — this watcher is the "consumer" `search.ts`'s own
+// class doc comment describes ("a consumer watches `activeHit` and drives the reveal-and-select
+// side effect"), reusing the exact same helper `handleSearchSelect` uses above. `undefined` means
+// either nothing has been stepped to yet (`activeIndex` still `-1`) or `next()`/`previous()` was
+// a no-op on an empty hit list — neither reveals anything.
+watch(searchState.activeHit, (hit) => {
+  if (hit !== undefined) void revealAndSelectSha(hit.sha);
+});
 
 function handleSearchFocusGrid(): void {
   commitGridRef.value?.focusGrid();

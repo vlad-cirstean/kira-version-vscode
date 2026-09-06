@@ -68,9 +68,15 @@ function toRefHit(ref: RefRow, fields: readonly SearchField[]): RefHit {
  * an already-loaded row is folded into that row's own entry rather than listed a second time),
  * then tail hits whose sha is not yet loaded, in the tail's own order — which sorts after every
  * loaded hit by construction (probe 11). `overlapCount` is exactly what `matchCount` needs to
- * subtract: the number of (capped) tail hits that turned out to already be loaded.
+ * subtract: the number of tail hits that were already *`loaded.hits` themselves* — not merely
+ * "this row happens to be paged into the store" (P11 W20's own bug: a body-only match on an
+ * already-loaded row is loaded but was never a loaded *hit*, since the client-side scan never
+ * reads `body` at all — counting it as overlap silently zeroed it out of `matchCount.n` even
+ * though it still, correctly, got a `CommitHit` entry below). Exported for `buildCommitHits.test.ts`
+ * — the merge is subtle enough (and was untested enough) to deserve direct, pure-function
+ * coverage rather than only the exercise a mounted `SearchState` gives it.
  */
-function buildCommitHits(
+export function buildCommitHits(
   rowOfSha: (sha: string) => number,
   shaAt: (row: number) => string,
   subjectAt: (row: number) => string,
@@ -91,10 +97,22 @@ function buildCommitHits(
     for (const hit of tail.hits) {
       const row = rowOfSha(hit.sha);
       if (row >= 0) {
-        overlapCount++;
+        // `overlapCount` is what `matchCount` subtracts from `loadedLen + tailTotal` to avoid
+        // double-counting — so it must count only a hit that was *already one of `loaded.hits`*
+        // (this row was in `byRow` before this loop touched it), not merely "this row happens to
+        // be paged into the store". A body-only match on an already-loaded row is the case that
+        // tells the two apart: the client-side scan never reads `body` (hard part 1), so such a
+        // row is loaded but was never a *loaded hit* — counting it as an overlap here silently
+        // discarded it from `matchCount.n` entirely (0 = 0 loaded + 1 tail − 1 wrongly-assumed
+        // overlap) even though it still (correctly) got a `CommitHit` entry below, an invisible
+        // hit the count itself denied existed.
         const existing = byRow.get(row);
-        if (existing) for (const f of hit.fields) existing.add(f);
-        else byRow.set(row, new Set(hit.fields));
+        if (existing) {
+          overlapCount++;
+          for (const f of hit.fields) existing.add(f);
+        } else {
+          byRow.set(row, new Set(hit.fields));
+        }
       } else {
         tailOnly.push({
           sha: hit.sha,
