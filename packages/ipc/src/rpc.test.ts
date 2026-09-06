@@ -137,6 +137,8 @@ function stubHandlers(
       "status.get": notImplemented,
       "preflight.checkout": notImplemented,
       "preflight.revert": notImplemented,
+      "preflight.reset": notImplemented,
+      "preflight.cherryPick": notImplemented,
       "op.run": notImplemented,
       "undo.peek": notImplemented,
       "undo.run": notImplemented,

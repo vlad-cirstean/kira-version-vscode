@@ -493,8 +493,7 @@ describe("classifyGitError", () => {
   });
 });
 
-  // P10/W7 — the four gaps `docs/plans/P10.md` probe 8 found, each a real captured message.
-
+describe("classifyGitError — P10/W7 pattern edits (reset, cherry-pick, mainline)", () => {
   test("NotFound — Could not parse object (probe 3: a reset target that does not resolve)", () => {
     const stderr = "fatal: Could not parse object 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef'.\n";
     expect(classifyGitError(["reset", "--hard", "deadbeef"], 128, stderr).kind).toBe("NotFound");

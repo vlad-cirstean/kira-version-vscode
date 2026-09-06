@@ -149,6 +149,7 @@ export {
   predictMerge,
   refs,
   refsSnapshot,
+  resolveCommit,
   revertMergeParents,
   stashList,
   stashShow,

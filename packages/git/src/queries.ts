@@ -299,6 +299,28 @@ export async function isAncestor(driver: GitDriver, a: string, b: string): Promi
   return true;
 }
 
+/** `docs/plans/P10.md` W8: a single commit's canonical sha and subject, or `null` when `ref`
+ *  cannot be resolved at all (probe 3's bad-target guard — `show -s` exits non-zero with real
+ *  stderr for an unresolvable target, cleanly distinguishable from `merge-base`'s "no common
+ *  ancestor" exit 1 above, which is a real *result*, not a resolution failure). Shared by
+ *  `preflightReset` (target existence + display subject) and `#prepareOp`'s `reset` case (the
+ *  same guard, re-run host-side immediately before the write, plus the canonical sha the typed
+ *  confirmation's short-sha token is checked against) — one query answers both, since a target
+ *  that resolves at all always resolves to exactly one commit and one subject. */
+export async function resolveCommit(
+  driver: GitDriver,
+  ref: string,
+): Promise<{ sha: string; subject: string } | null> {
+  try {
+    const bytes = stripTrailingNul(await collectOneShot(driver.read(showMetadataArgs(ref))));
+    const record = parseLogRecord(bytes);
+    return { sha: record.sha, subject: record.subject };
+  } catch (err) {
+    if (err instanceof GitError) return null;
+    throw err;
+  }
+}
+
 /** `docs/plans/P7.md` W2/§6.8: `git merge-base <a> <b>`, returning the sha or `null` when the two
  *  share no common ancestor — `merge-base` exits 1 with no output in that case (V4), which is
  *  cleanly distinguishable from a bad-ref error (exit 128, real stderr): only exit 1 is caught

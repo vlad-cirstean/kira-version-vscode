@@ -16,6 +16,7 @@ import type {
   BaseCandidate,
   BaseResolutionReason,
   CheckoutPreflight,
+  CherryPickPreflight,
   CommitDetail,
   CommitRecord,
   CommitStore,
@@ -29,6 +30,7 @@ import type {
   HeadState,
   InProgressOperation,
   Logger,
+  MergeOutcomePrediction,
   OpErrorKind,
   OpRequest,
   OpResult,
@@ -43,6 +45,8 @@ import type {
   RemoteOpRequest,
   RemoteOpResult,
   RepoIdentity,
+  ResetMode,
+  ResetPreflight,
   RevertPrediction,
   RevertPreflight,
   Settings,
@@ -61,9 +65,12 @@ import {
   buildPullPreflight,
   buildStashRowFilter,
   CommitStore as CommitStoreImpl,
+  canRunOp,
   classifyCheckout,
+  classifyCherryPick,
   classifyInProgress,
   classifyPush,
+  classifyReset,
   classifyRevert,
   classifyStashBranch,
   classifyStashPop,
@@ -99,7 +106,8 @@ import {
   switchCreateTrackingArgs,
   switchDetachArgs,
 } from "./ops/checkout.ts";
-import { abortArgs, continueArgs, readInProgressStateFiles } from "./ops/conflict.ts";
+import { abortArgs, continueArgs, readInProgressStateFiles, skipArgs } from "./ops/conflict.ts";
+import { cherryPickArgs } from "./ops/cherryPick.ts";
 import { fetchArgs, parseRefUpdates } from "./ops/fetch.ts";
 import {
   ffOnlyWouldDiverge,
@@ -115,6 +123,7 @@ import {
   forcePushPlainArgs,
   pushArgs,
 } from "./ops/push.ts";
+import { resetArgs, resetKeepArgs } from "./ops/reset.ts";
 import { revertArgs } from "./ops/revert.ts";
 import {
   stashApplyArgs,
@@ -148,10 +157,14 @@ import type { RefsSnapshot } from "./queries.ts";
 import {
   commitDetail,
   countRange,
+  countRangeLeftRight,
   detectDefaultBranch,
   refsSnapshot as fetchRefsSnapshot,
+  isAncestor,
+  listRange,
   mergeBase,
   predictMerge,
+  resolveCommit,
   revertMergeParents,
   stashList as stashListQuery,
   stashShow as stashShowQuery,
@@ -420,6 +433,10 @@ export interface RefsResult {
  *  render gets capped, and only here, at the one layer that knows what "too many to show" means. */
 const DIRTY_PATHS_DISPLAY_CAP = 200;
 
+/** `docs/plans/P10.md` W2/W8: `ResetPreflight.leavingCommits`'s own display cap — `listRange`
+ *  reads one more than this so the dialog can say "and N more" without a second spawn. */
+const RESET_LEAVING_COMMITS_CAP = 10;
+
 function capPaths(paths: readonly string[]): {
   readonly paths: string[];
   readonly truncated: boolean;
@@ -447,6 +464,55 @@ function subtractOwnWorktree(records: readonly RefRecord[], ownRoot: string): Re
  *  drift on what "unmerged" means. */
 function unmergedPathsFrom(result: StatusResult): string[] {
   return result.entries.filter((e) => e.kind === "unmerged").map((e) => e.path);
+}
+
+/** `docs/plans/P10.md` W8's reset/cherry-pick `dirty` shape — staged/unstaged/untracked path
+ *  lists, the split `classifyReset`/`classifyCherryPick` need and `dirtyPathsFrom`'s own
+ *  tracked/untracked split does not make (P9's checkout/stash-pop classifiers never needed to
+ *  tell a staged change from an unstaged one; these two do — `stagedChanges` is cherry-pick's
+ *  own unconditional blocker, and `--hard`'s `destroys` set is staged-plus-unstaged). An
+ *  unmerged path counts as both staged and unstaged — the XY code's own two halves can each be
+ *  non-`.` on a real merge conflict, and there is no case in this phase's scope where reset or
+ *  cherry-pick reaches this fold while one is outstanding without `inProgress` already blocking
+ *  first. */
+function dirtySplitFrom(result: StatusResult): {
+  readonly staged: string[];
+  readonly unstaged: string[];
+  readonly untracked: string[];
+} {
+  const staged: string[] = [];
+  const unstaged: string[] = [];
+  const untracked: string[] = [];
+  for (const entry of result.entries) {
+    switch (entry.kind) {
+      case "ordinary":
+      case "renamed":
+        if (entry.staged !== ".") staged.push(entry.path);
+        if (entry.unstaged !== ".") unstaged.push(entry.path);
+        break;
+      case "unmerged":
+        staged.push(entry.path);
+        unstaged.push(entry.path);
+        break;
+      case "untracked":
+        untracked.push(entry.path);
+        break;
+      case "ignored":
+        break;
+    }
+  }
+  return { staged, unstaged, untracked };
+}
+
+/** §7.7 probe 1's third finding: a staged-but-uncommitted NEW file (status `A.`) reads as
+ *  "added", not "modified" — `--hard` destroys it exactly as it does a staged edit, but it is
+ *  neither `dirtySplitFrom`'s `unstaged` (nothing in the worktree differs from the index) nor
+ *  its `untracked` (the index already has it staged) list, so `classifyReset`'s `destroys` needs
+ *  this as its own third input rather than reading it off either. */
+function stagedNewPathsFrom(result: StatusResult): string[] {
+  return result.entries
+    .filter((e) => e.kind === "ordinary" && e.staged === "A")
+    .map((e) => e.path);
 }
 
 /**
@@ -1398,6 +1464,171 @@ export class RepoService {
     }
   }
 
+  /**
+   * §7.7's pre-flight orchestration for reset. `target` may be anything `git show` can resolve —
+   * a branch, tag, or bare sha — so the first read is `resolveCommit`, which doubles as probe 3's
+   * bad-target guard and the source of the canonical sha `leaving`/`gaining`/`leavingCommits` are
+   * all computed against (never the wire's own possibly-abbreviated `target` string). An
+   * unresolved target short-circuits the range reads entirely: there is no commit to diff, count,
+   * or confirm against, and `classifyReset`'s own `unknownTarget` blocker is what the dialog
+   * renders instead.
+   */
+  async preflightReset(repoId: string, target: string, mode: ResetMode): Promise<ResetPreflight> {
+    const session = this.#requireSession(repoId);
+    const [{ statusResult, inProgress }, currentHead, resolved] = await Promise.all([
+      this.#statusAndInProgress(session),
+      this.#resolveHead(session),
+      resolveCommit(session.driver, target),
+    ]);
+    const branch = session.head.kind === "branch" ? session.head.name : null;
+    const dirty = dirtySplitFrom(statusResult);
+    const stagedNew = stagedNewPathsFrom(statusResult);
+
+    if (resolved === null) {
+      return classifyReset({
+        target,
+        targetSubject: "",
+        mode,
+        currentHead,
+        branch,
+        leaving: 0,
+        gaining: 0,
+        leavingCommits: [],
+        leavingTruncated: false,
+        dirty,
+        stagedNew,
+        inProgress,
+        targetResolves: false,
+      });
+    }
+
+    // `docs/plans/P10.md` probe 4: `<target>...HEAD` — `right` is only-reachable-from-HEAD (what
+    // resetting to `target` leaves behind), `left` is only-reachable-from-`target` (what it would
+    // additionally gain on a diverged target). `countRange`'s own `<a>..<b>` alone answers only
+    // the first half.
+    const counts = await countRangeLeftRight(session.driver, resolved.sha, "HEAD");
+    const leaving = counts.right;
+    const gaining = counts.left;
+    const { commits: leavingCommits, truncated: leavingTruncated } =
+      leaving > 0
+        ? await listRange(session.driver, resolved.sha, "HEAD", RESET_LEAVING_COMMITS_CAP)
+        : { commits: [], truncated: false };
+
+    return classifyReset({
+      target,
+      targetSubject: resolved.subject,
+      mode,
+      currentHead,
+      branch,
+      leaving,
+      gaining,
+      leavingCommits,
+      leavingTruncated,
+      dirty,
+      stagedNew,
+      inProgress,
+      targetResolves: true,
+    });
+  }
+
+  /**
+   * §7.13's pre-flight orchestration for cherry-pick — `preflightRevert`'s direct structural
+   * sibling. `mergeParents` reuses the same `revertMergeParents` lookup (empty unless `sha` is a
+   * merge); `alreadyApplied` is `isAncestor(sha, HEAD)` (an advisory note, never a blocker —
+   * probe 8); `commitPaths` and the prediction are only ever computed once a mainline is actually
+   * known — with none chosen for a merge commit there is no single parent to diff against, and
+   * `mainlineRequired` already blocks the pick regardless of what either would say.
+   */
+  async preflightCherryPick(
+    repoId: string,
+    sha: string,
+    mainline?: number,
+  ): Promise<CherryPickPreflight> {
+    const session = this.#requireSession(repoId);
+    const [{ statusResult, inProgress }, mergeParentsBySha, alreadyApplied, resolved] =
+      await Promise.all([
+        this.#statusAndInProgress(session),
+        revertMergeParents(session.driver, [sha]),
+        isAncestor(session.driver, sha, "HEAD"),
+        resolveCommit(session.driver, sha),
+      ]);
+    const mergeParents = mergeParentsBySha.get(sha) ?? [];
+    const effectiveMainline = mainline ?? (mergeParents.length > 0 ? undefined : 1);
+
+    const [prediction, commitPaths] = await Promise.all([
+      this.#predictCherryPick(session, sha, effectiveMainline),
+      this.#cherryPickCommitPaths(session, sha, effectiveMainline),
+    ]);
+
+    return classifyCherryPick({
+      sha,
+      subject: resolved?.subject ?? "",
+      mergeParents,
+      mainline,
+      commitPaths,
+      dirty: dirtySplitFrom(statusResult),
+      prediction,
+      alreadyApplied,
+      inProgress,
+      detachedHead: session.head.kind === "detached",
+    });
+  }
+
+  /** D64: cherry-pick's prediction is the exact inverse of `#predictRevert`'s own arrangement —
+   *  `HEAD` is the base, `sha` is the other side, `--merge-base=<sha>^<mainline>` — because a
+   *  pick applies its diff forwards and a revert backwards. Left to itself git would pick
+   *  `merge-base(HEAD, sha)`, against which a commit that undoes an earlier one on this same
+   *  branch reads as no change at all (probe 2) — reporting a genuinely conflicting pick as
+   *  clean. `undefined` mainline (a merge with none chosen) predicts nothing: there is no single
+   *  "other" tree to diff against yet, and `mainlineRequired` already names why. */
+  async #predictCherryPick(
+    session: RepoSession,
+    sha: string,
+    effectiveMainline: number | undefined,
+  ): Promise<MergeOutcomePrediction> {
+    if (effectiveMainline === undefined) {
+      return { kind: "unknown", reason: "Pick a mainline parent first." };
+    }
+    try {
+      return await predictMerge(session.driver, "HEAD", sha, {
+        mergeBase: `${sha}^${effectiveMainline}`,
+      });
+    } catch (err) {
+      return { kind: "unknown", reason: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /** §7.13's path-scoped blockers need the picked commit's own changed paths split "added"
+   *  (probe 7E: an untracked file at one of these is refused) from everything else (probe 7C: an
+   *  unstaged change overlapping one of these is refused) — reuses `commitDetail`'s own
+   *  metadata/diff-tree plumbing against whichever parent `effectiveMainline` names, rather than
+   *  a third parser for the same two spawns. A renamed/copied path counts as "touched" under
+   *  both its new and its original name: either one already exists in the worktree and either
+   *  one being locally modified is exactly the collision probe 7C refuses. `undefined` (a merge
+   *  with no mainline chosen yet) returns both empty — see `#predictCherryPick`'s own doc
+   *  comment on why that case computes nothing here either. */
+  async #cherryPickCommitPaths(
+    session: RepoSession,
+    sha: string,
+    effectiveMainline: number | undefined,
+  ): Promise<{ readonly touched: readonly string[]; readonly added: readonly string[] }> {
+    if (effectiveMainline === undefined) return { touched: [], added: [] };
+    const detail = await commitDetail(session.driver, sha, {
+      parentIndex: effectiveMainline - 1,
+    });
+    const touched: string[] = [];
+    const added: string[] = [];
+    for (const file of detail.files) {
+      if (file.kind === "added") {
+        added.push(file.path);
+      } else {
+        touched.push(file.path);
+        if (file.originalPath !== undefined) touched.push(file.originalPath);
+      }
+    }
+    return { touched, added };
+  }
+
   /** T for `classifyCheckout` — `git diff --name-only -z HEAD <target>`, collected into a plain
    *  path list. A failed spawn (an unresolvable `target`) propagates: pre-flight cannot honestly
    *  classify a target git itself cannot resolve, and the caller offered it from a ref list or a
@@ -1649,7 +1880,7 @@ export class RepoService {
     // Step 4: read back head + in-progress state, ALWAYS — success or failure (a conflicting
     // revert fails with `Conflict` and *leaves* `REVERT_HEAD`; this is what surfaces it here
     // rather than waiting on a watcher tick).
-    const { inProgress } = await this.#statusAndInProgress(session);
+    const { statusResult, inProgress } = await this.#statusAndInProgress(session);
 
     // P9/W8: a conflicting `stash pop`/`apply` writes its conflict markers to STDOUT and leaves
     // stderr EMPTY (probe 5) — `classifyGitError` has no pattern that could ever match it, so it
@@ -1668,6 +1899,24 @@ export class RepoService {
       error = {
         kind: "StashConflict",
         message: `Merged with conflicts in ${inProgress.conflictedPaths.join(", ")} — the stash was kept.`,
+      };
+    }
+
+    // P10/W8 probe 6: an empty pick — the change is already present — exits non-zero with
+    // `CHERRY_PICK_HEAD` still set, a clean worktree, and ZERO unmerged paths; the whole message
+    // ("The previous cherry-pick is now empty…") goes to STDOUT, so `error` is already `Unknown`
+    // here exactly as `StashConflict` above. `canSkip` is what makes the banner offer the remedy
+    // git itself names.
+    if (
+      error !== undefined &&
+      error.kind === "Unknown" &&
+      op.kind === "cherryPick" &&
+      inProgress?.kind === "cherryPick" &&
+      unmergedPathsFrom(statusResult).length === 0
+    ) {
+      error = {
+        kind: "EmptyCherryPick",
+        message: "This change is already present on this branch — Skip it, or Continue to commit it anyway.",
       };
     }
 
@@ -2000,6 +2249,137 @@ export class RepoService {
         const mismatch = await this.#verifyStashPosition(session, op.index, op.sha);
         if (mismatch) return { argvList: [], undo: null, earlyError: mismatch };
         return { argvList: [stashBranchArgs(op.branch, op.index)], undo: null };
+      }
+      case "reset": {
+        // P10 probe 3: git itself only refuses a `--soft` reset mid-merge — `--mixed`/`--hard`
+        // succeed and silently delete `MERGE_HEAD`, abandoning the operation. `canRunOp` (via
+        // `GATED_OP_KINDS`) is the only thing standing between the user and that, so it is
+        // re-checked here, host-side, immediately before the write — a pre-flight is advice, not
+        // a lock (D52's own reasoning). The same status read doubles as the FRESH state `--hard`'s
+        // `destroys` is recomputed from below, one spawn serving both checks.
+        const { statusResult, inProgress } = await this.#statusAndInProgress(session);
+        if (!canRunOp(inProgress, "reset")) {
+          return {
+            argvList: [],
+            undo: null,
+            earlyError: {
+              kind: "OperationInProgress",
+              message: `${describeInProgress(inProgress as InProgressOperation)} is in progress — finish or abort it before resetting.`,
+            },
+          };
+        }
+        // Probe 3's bad-target guard, re-run host-side: a pre-flight's `target` may have since
+        // stopped resolving (the ref was deleted, or never existed at all for a hand-typed sha).
+        const resolved = await resolveCommit(session.driver, op.target);
+        if (resolved === null) {
+          return {
+            argvList: [],
+            undo: null,
+            earlyError: {
+              kind: "NotFound",
+              message: `${op.target} does not resolve to a commit.`,
+            },
+          };
+        }
+        // D62: the typed confirmation is gated on what `--hard` would actually destroy, computed
+        // fresh from the status read above — not merely on the pre-flight's now possibly-stale
+        // `destroys`, which a dialog session could be holding open long after it was read.
+        if (op.mode === "hard") {
+          const dirty = dirtySplitFrom(statusResult);
+          const destroys = [
+            ...new Set([...dirty.staged, ...dirty.unstaged, ...stagedNewPathsFrom(statusResult)]),
+          ];
+          if (destroys.length > 0 && op.confirmToken !== resolved.sha.slice(0, 7)) {
+            return {
+              argvList: [],
+              undo: null,
+              earlyError: {
+                kind: "ConfirmationRequired",
+                message:
+                  "Type the target commit's short sha to confirm — this reset would discard uncommitted work.",
+              },
+            };
+          }
+        }
+        // D61: captured BEFORE the write, so the undo's replay can match THIS reset's own mode —
+        // the reflog cannot supply it (every reset logs `reset: moving to <sha>`, soft or hard
+        // alike), so capture-before is the only mechanism, exactly as for branch/tag delete and
+        // stash drop.
+        const prev = await this.#resolveHead(session);
+        return {
+          argvList: [resetArgs(op.mode, op.target)],
+          undo: {
+            id: randomId(),
+            createdAt: Date.now(),
+            label: `Reset (${op.mode}) to ${resolved.subject || resolved.sha.slice(0, 7)}`,
+            recoverySha: prev,
+            replay: [resetArgs(op.mode, prev)],
+          },
+        };
+      }
+      case "cherryPick": {
+        // Same rationale as `reset`'s own re-check just above — probe 3 is reset's own finding,
+        // but the gate is the same `GATED_OP_KINDS` mechanism and a stale pre-flight is exactly
+        // as possible here.
+        const inProgress = await this.#currentInProgress(session);
+        if (!canRunOp(inProgress, "cherryPick")) {
+          return {
+            argvList: [],
+            undo: null,
+            earlyError: {
+              kind: "OperationInProgress",
+              message: `${describeInProgress(inProgress as InProgressOperation)} is in progress — finish or abort it before cherry-picking.`,
+            },
+          };
+        }
+        const prev = await this.#resolveHead(session);
+        const opts: { mainline?: number; noCommit?: boolean } = { noCommit: op.noCommit };
+        if (op.mainline !== undefined) opts.mainline = op.mainline;
+        return {
+          argvList: [cherryPickArgs(op.sha, opts)],
+          // D66/probe 9: `--keep`, never `--hard` — a pick is legal with unrelated dirt already
+          // in the tree, and an undo that destroys work the operation never touched would be
+          // worse than none at all. Withheld entirely for `--no-commit`: that pick moved no ref,
+          // so there is nothing a replay could restore (§7.12's "never present an undo we cannot
+          // honour"). A pick that conflicts moves no ref either — `runOp`'s own post-op
+          // refinement below clears the record for that case, since it is not knowable here,
+          // before the write has even run.
+          undo: op.noCommit
+            ? null
+            : {
+                id: randomId(),
+                createdAt: Date.now(),
+                label: `Undo cherry-pick of ${op.sha.slice(0, 7)}`,
+                recoverySha: prev,
+                replay: [resetKeepArgs(prev)],
+              },
+        };
+      }
+      case "opSkip": {
+        // Mirrors `opContinue`/`opAbort` immediately above: `opSkip` is deliberately absent from
+        // `GATED_OP_KINDS` (it exists *because* an operation is in progress, so there is nothing
+        // to gate), and "no operation at all" / "this operation offers no Skip" are the same two
+        // early refusals those two already use.
+        const inProgress = await this.#currentInProgress(session);
+        if (inProgress === null) {
+          return {
+            argvList: [],
+            undo: null,
+            earlyError: { kind: "Unknown", message: "No operation is currently in progress to skip." },
+          };
+        }
+        const argv = skipArgs(inProgress.kind);
+        if (argv === null) {
+          return {
+            argvList: [],
+            undo: null,
+            earlyError: {
+              kind: "Unknown",
+              message: `${describeInProgress(inProgress)} offers no Skip.`,
+            },
+          };
+        }
+        return { argvList: [argv], undo: null };
       }
     }
   }
