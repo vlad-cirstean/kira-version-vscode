@@ -232,7 +232,7 @@ describe("RepoService", () => {
       runner,
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(3),
+      settings: () => settingsWithPageSize(3),
       configuredGitCandidates: [],
     });
     try {
@@ -265,7 +265,7 @@ describe("RepoService", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(3),
+      settings: () => settingsWithPageSize(3),
       configuredGitCandidates: [],
     });
     try {
@@ -283,7 +283,7 @@ describe("RepoService", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -306,7 +306,7 @@ describe("RepoService", () => {
       runner,
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -332,7 +332,7 @@ describe("RepoService", () => {
         runner,
         fileWatcher: new NodeFileWatcher(),
         logger: new FakeLogger(),
-        settings: settingsWithPageSize(10),
+        settings: () => settingsWithPageSize(10),
         configuredGitCandidates: [],
       },
       { evictMs: 20 },
@@ -363,7 +363,7 @@ describe("RepoService", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -402,7 +402,7 @@ describe("RepoService", () => {
       runner,
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(4),
+      settings: () => settingsWithPageSize(4),
       configuredGitCandidates: [],
     });
     try {
@@ -439,7 +439,7 @@ describe("RepoService", () => {
       runner,
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(3),
+      settings: () => settingsWithPageSize(3),
       configuredGitCandidates: [],
     });
     try {
@@ -480,7 +480,7 @@ describe("RepoService", () => {
       runner,
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -510,7 +510,7 @@ describe("RepoService", () => {
       runner,
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(3),
+      settings: () => settingsWithPageSize(3),
       configuredGitCandidates: [],
     });
     try {
@@ -571,7 +571,7 @@ describe("RepoService", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(3),
+      settings: () => settingsWithPageSize(3),
       configuredGitCandidates: [],
     });
     try {
@@ -617,7 +617,7 @@ describe("RepoService", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(3),
+      settings: () => settingsWithPageSize(3),
       configuredGitCandidates: [],
     });
     try {
@@ -657,7 +657,7 @@ describe("RepoService", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10), // bigger than the repo: the whole fixture arrives as
+      settings: () => settingsWithPageSize(10), // bigger than the repo: the whole fixture arrives as
       // a single chunk, so only rows {0, 5} ever get a dictionary mark — row 1 has none.
       configuredGitCandidates: [],
     });
@@ -685,7 +685,7 @@ describe("RepoService", () => {
       runner,
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -722,7 +722,7 @@ describe("RepoService", () => {
       logger: new FakeLogger(),
       // The whole walk is one page, so the abort lands squarely inside a single readPage()
       // call rather than at a page boundary.
-      settings: settingsWithPageSize(total),
+      settings: () => settingsWithPageSize(total),
       configuredGitCandidates: [],
     });
     try {
@@ -765,7 +765,7 @@ describe("RepoService — commit detail (P5 W3)", () => {
       runner,
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -817,7 +817,7 @@ describe("RepoService — commit detail (P5 W3)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -852,7 +852,7 @@ describe("RepoService — commit detail (P5 W3)", () => {
       runner,
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -884,7 +884,7 @@ describe("RepoService — per-file diff (P5 W3)", () => {
       runner,
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -923,7 +923,7 @@ describe("RepoService — per-file diff (P5 W3)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -947,7 +947,7 @@ describe("RepoService — per-file diff (P5 W3)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -973,7 +973,7 @@ describe("RepoService — per-file diff (P5 W3)", () => {
         runner,
         fileWatcher: new NodeFileWatcher(),
         logger: new FakeLogger(),
-        settings: settingsWithPageSize(10),
+        settings: () => settingsWithPageSize(10),
         configuredGitCandidates: [],
       },
       { diffCacheMaxBytes: 1 },
@@ -1007,7 +1007,7 @@ describe("RepoService — blob() (P5 W3)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1029,7 +1029,7 @@ describe("RepoService — blob() (P5 W3)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1051,7 +1051,7 @@ describe("RepoService — blob() (P5 W3)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1093,7 +1093,7 @@ describe("RepoService — worktreeDiff() and pathExistsInCheckout() (P5 W3)", ()
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1120,7 +1120,7 @@ describe("RepoService — worktreeDiff() and pathExistsInCheckout() (P5 W3)", ()
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1145,7 +1145,7 @@ describe("RepoService — worktreeDiff() and pathExistsInCheckout() (P5 W3)", ()
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1176,7 +1176,7 @@ describe("RepoService — refs() (P6 W8)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1218,7 +1218,7 @@ describe("RepoService — statusSummary() (P6 W8)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1241,7 +1241,7 @@ describe("RepoService — statusSummary() (P6 W8)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1263,7 +1263,7 @@ describe("RepoService — statusSummary() (P6 W8)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1293,7 +1293,7 @@ describe("RepoService — preflightCheckout() (P6 W8)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1315,7 +1315,7 @@ describe("RepoService — preflightCheckout() (P6 W8)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1338,7 +1338,7 @@ describe("RepoService — preflightCheckout() (P6 W8)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1366,7 +1366,7 @@ describe("RepoService — preflightCheckout() (P6 W8)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1403,7 +1403,7 @@ describe("RepoService — preflightCheckout() (P6 W8)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1432,7 +1432,7 @@ describe("RepoService — preflightRevert() (P6 W8)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1457,7 +1457,7 @@ describe("RepoService — preflightRevert() (P6 W8)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1491,7 +1491,7 @@ describe("RepoService — preflightRevert() (P6 W8)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1517,7 +1517,7 @@ describe("RepoService — runOp() executor (P6 W8)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1572,7 +1572,7 @@ describe("RepoService — runOp() executor (P6 W8)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1644,7 +1644,7 @@ describe("RepoService — runOp() executor (P6 W8)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1679,7 +1679,7 @@ describe("RepoService — runOp() executor (P6 W8)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1716,7 +1716,7 @@ describe("RepoService — runOp() executor (P6 W8)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1746,7 +1746,7 @@ describe("RepoService — runOp() executor (P6 W8)", () => {
       runner,
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1775,7 +1775,7 @@ describe("RepoService — runOp() executor (P6 W8)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1811,7 +1811,7 @@ describe("RepoService — runOp() executor (P6 W8)", () => {
       runner,
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1849,7 +1849,7 @@ describe("RepoService — undo slot (P6 W8)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1871,7 +1871,7 @@ describe("RepoService — undo slot (P6 W8)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(10),
+      settings: () => settingsWithPageSize(10),
       configuredGitCandidates: [],
     });
     try {
@@ -1953,7 +1953,7 @@ describe("RepoService — resolveReviewBase() (P7 W4)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(100),
+      settings: () => settingsWithPageSize(100),
       configuredGitCandidates: [],
     });
     try {
@@ -1976,7 +1976,7 @@ describe("RepoService — resolveReviewBase() (P7 W4)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(100),
+      settings: () => settingsWithPageSize(100),
       configuredGitCandidates: [],
     });
     try {
@@ -2002,7 +2002,7 @@ describe("RepoService — resolveReviewBase() (P7 W4)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(100),
+      settings: () => settingsWithPageSize(100),
       configuredGitCandidates: [],
     });
     try {
@@ -2044,7 +2044,7 @@ describe("RepoService — resolveReviewBase() (P7 W4)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(100),
+      settings: () => settingsWithPageSize(100),
       configuredGitCandidates: [],
     });
     try {
@@ -2065,10 +2065,10 @@ describe("RepoService — resolveReviewBase() (P7 W4)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: {
+      settings: () => ({
         ...settingsWithPageSize(100),
         "kiraVersion.review.baseCandidates": [],
-      },
+      }),
       configuredGitCandidates: [],
     });
     try {
@@ -2097,7 +2097,7 @@ describe("RepoService — ranged streamGraph/loadMore/status and endReview (P7 W
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(2),
+      settings: () => settingsWithPageSize(2),
       configuredGitCandidates: [],
     });
     try {
@@ -2145,7 +2145,7 @@ describe("RepoService — ranged streamGraph/loadMore/status and endReview (P7 W
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: settingsWithPageSize(2),
+      settings: () => settingsWithPageSize(2),
       configuredGitCandidates: [],
     });
     try {
@@ -2207,7 +2207,7 @@ describe("RepoService — ranged streamGraph/loadMore/status and endReview (P7 W
         runner: new NodeProcessRunner(),
         fileWatcher: new NodeFileWatcher(),
         logger: new FakeLogger(),
-        settings: settingsWithPageSize(100),
+        settings: () => settingsWithPageSize(100),
         configuredGitCandidates: [],
       },
       { evictMs: 60_000 },
@@ -2244,7 +2244,7 @@ describe("RepoService — remote ops (W14)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: defaultSettings(),
+      settings: () => defaultSettings(),
       configuredGitCandidates: [],
     });
     try {
@@ -2285,7 +2285,7 @@ describe("RepoService — remote ops (W14)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: defaultSettings(),
+      settings: () => defaultSettings(),
       configuredGitCandidates: [],
     });
     try {
@@ -2323,7 +2323,7 @@ describe("RepoService — remote ops (W14)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: defaultSettings(),
+      settings: () => defaultSettings(),
       configuredGitCandidates: [],
     });
     try {
@@ -2374,7 +2374,7 @@ describe("RepoService — remote ops (W14)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: defaultSettings(),
+      settings: () => defaultSettings(),
       configuredGitCandidates: [],
     });
     try {
@@ -2406,7 +2406,7 @@ describe("RepoService — remote ops (W14)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: defaultSettings(),
+      settings: () => defaultSettings(),
       configuredGitCandidates: [],
     });
     try {
@@ -2445,7 +2445,7 @@ describe("RepoService — remote ops (W14)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: defaultSettings(),
+      settings: () => defaultSettings(),
       configuredGitCandidates: [],
     });
     try {
@@ -2480,7 +2480,7 @@ describe("RepoService — remote ops (W14)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: defaultSettings(),
+      settings: () => defaultSettings(),
       configuredGitCandidates: [],
     });
     try {
@@ -2519,7 +2519,7 @@ describe("RepoService — remote ops (W14)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: defaultSettings(), // protectedBranches defaults to ["main", "master", "release/*"]
+      settings: () => defaultSettings(), // protectedBranches defaults to ["main", "master", "release/*"]
       configuredGitCandidates: [],
     });
     try {
@@ -2570,7 +2570,7 @@ describe("RepoService — remote ops (W14)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: defaultSettings(),
+      settings: () => defaultSettings(),
       configuredGitCandidates: [],
     });
     try {
@@ -2606,13 +2606,171 @@ describe("RepoService — remote ops (W14)", () => {
       runner: new NodeProcessRunner(),
       fileWatcher: new NodeFileWatcher(),
       logger: new FakeLogger(),
-      settings: defaultSettings(),
+      settings: () => defaultSettings(),
       configuredGitCandidates: [],
     });
     try {
       const opened = await service.open(repo.dir);
       if (opened.kind !== "ok") throw new Error("unreachable");
       expect(service.cancelRemoteOp(opened.repoId)).toBe(false);
+    } finally {
+      service.dispose();
+    }
+  });
+});
+
+describe("RepoService — auto-fetch scheduler (W15)", () => {
+  function autoFetchSettings(intervalMinutes: number) {
+    return { ...defaultSettings(), "kiraVersion.fetch.autoInterval": intervalMinutes };
+  }
+
+  test("runs a silent fetch once the configured interval elapses, while focused and visible", async () => {
+    const repo = withRemote({ localOnlyCommits: 0 });
+    const service = await RepoService.create(
+      {
+        runner: new NodeProcessRunner(),
+        fileWatcher: new NodeFileWatcher(),
+        logger: new FakeLogger(),
+        settings: () => autoFetchSettings(1),
+        configuredGitCandidates: [],
+      },
+      { autoFetchPollMs: 5, autoFetchMsPerMinute: 5 },
+    );
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+
+      const externalTip = pushExternalCommit(repo.remoteDir, "main", "external change");
+
+      await waitFor(() => {
+        const onDisk = execFileSync("git", ["rev-parse", "origin/main"], {
+          cwd: repo.dir,
+          env: baseEnv(repo.dir),
+          encoding: "utf8",
+        }).trim();
+        return onDisk === externalTip;
+      }, 2000);
+
+      const onDisk = execFileSync("git", ["rev-parse", "origin/main"], {
+        cwd: repo.dir,
+        env: baseEnv(repo.dir),
+        encoding: "utf8",
+      }).trim();
+      expect(onDisk).toBe(externalTip);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("never runs while the host is unfocused, and resumes once focus returns", async () => {
+    const repo = withRemote({ localOnlyCommits: 0 });
+    const service = await RepoService.create(
+      {
+        runner: new NodeProcessRunner(),
+        fileWatcher: new NodeFileWatcher(),
+        logger: new FakeLogger(),
+        settings: () => autoFetchSettings(1),
+        configuredGitCandidates: [],
+      },
+      { autoFetchPollMs: 5, autoFetchMsPerMinute: 5 },
+    );
+    try {
+      service.setHostFocused(false);
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+      const preTip = execFileSync("git", ["rev-parse", "origin/main"], {
+        cwd: repo.dir,
+        env: baseEnv(repo.dir),
+        encoding: "utf8",
+      }).trim();
+
+      const externalTip = pushExternalCommit(repo.remoteDir, "main", "external change");
+
+      // Several poll cycles' worth of real time, unfocused throughout — the tracking ref must
+      // not move.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const stillPreTip = execFileSync("git", ["rev-parse", "origin/main"], {
+        cwd: repo.dir,
+        env: baseEnv(repo.dir),
+        encoding: "utf8",
+      }).trim();
+      expect(stillPreTip).toBe(preTip);
+
+      service.setHostFocused(true);
+      await waitFor(() => {
+        const onDisk = execFileSync("git", ["rev-parse", "origin/main"], {
+          cwd: repo.dir,
+          env: baseEnv(repo.dir),
+          encoding: "utf8",
+        }).trim();
+        return onDisk === externalTip;
+      }, 2000);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("disables itself for the session after a failure, logs at warn, and never retries", async () => {
+    const repo = withRemote({ localOnlyCommits: 0 });
+    const env = baseEnv(repo.dir);
+    execFileSync("git", ["remote", "set-url", "origin", "/does/not/exist"], {
+      cwd: repo.dir,
+      env,
+    });
+    const logger = new FakeLogger();
+    const service = await RepoService.create(
+      {
+        runner: new NodeProcessRunner(),
+        fileWatcher: new NodeFileWatcher(),
+        logger,
+        settings: () => autoFetchSettings(1),
+        configuredGitCandidates: [],
+      },
+      { autoFetchPollMs: 5, autoFetchMsPerMinute: 5 },
+    );
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+
+      await waitFor(
+        () => logger.entries.some((e) => e.level === "warn" && e.message.includes("auto-fetch")),
+        2000,
+      );
+      const warnCountAfterFirst = logger.entries.filter(
+        (e) => e.level === "warn" && e.message.includes("auto-fetch"),
+      ).length;
+      expect(warnCountAfterFirst).toBeGreaterThan(0);
+
+      // Several more poll cycles: a disabled session must never try again.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const warnCountAfterMore = logger.entries.filter(
+        (e) => e.level === "warn" && e.message.includes("auto-fetch"),
+      ).length;
+      expect(warnCountAfterMore).toBe(warnCountAfterFirst);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  test("does not fetch a session with no upstream, and is not treated as a failure", async () => {
+    const repo = linear(3); // no remote at all — HEAD's branch has no upstream
+    const logger = new FakeLogger();
+    const service = await RepoService.create(
+      {
+        runner: new NodeProcessRunner(),
+        fileWatcher: new NodeFileWatcher(),
+        logger,
+        settings: () => autoFetchSettings(1),
+        configuredGitCandidates: [],
+      },
+      { autoFetchPollMs: 5, autoFetchMsPerMinute: 5 },
+    );
+    try {
+      const opened = await service.open(repo.dir);
+      if (opened.kind !== "ok") throw new Error("unreachable");
+
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(logger.entries.some((e) => e.level === "warn")).toBe(false);
     } finally {
       service.dispose();
     }

@@ -86,7 +86,7 @@ async function measureCommitDetail(): Promise<{
     runner: new NodeProcessRunner(),
     fileWatcher: new NodeFileWatcher(),
     logger: new FakeLogger(),
-    settings: defaultSettings(),
+    settings: () => defaultSettings(),
     configuredGitCandidates: [],
   });
   try {

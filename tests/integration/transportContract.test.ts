@@ -90,7 +90,7 @@ async function setup(pageSize = 4) {
     runner,
     fileWatcher: new NodeFileWatcher(),
     logger: new FakeLogger(),
-    settings: { ...defaultSettings(), "kiraVersion.graph.pageSize": pageSize },
+    settings: () => ({ ...defaultSettings(), "kiraVersion.graph.pageSize": pageSize }),
     configuredGitCandidates: [],
   });
   const roots = new FakeWorkspaceRoots();

@@ -48,7 +48,7 @@ async function openService(dir: string, settings = defaultSettings(), runner?: P
     runner: runner ?? new NodeProcessRunner(),
     fileWatcher: new NodeFileWatcher(),
     logger: new FakeLogger(),
-    settings,
+    settings: () => settings,
     configuredGitCandidates: [],
   });
   const opened = await service.open(dir);

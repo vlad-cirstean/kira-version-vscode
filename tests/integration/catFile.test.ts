@@ -1,7 +1,7 @@
+import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
 import { openCatFileSession } from "../../packages/git/src/catFile.ts";
 import { locateGit } from "../../packages/git/src/discovery.ts";
 import { NodeProcessRunner } from "../../packages/git/src/nodeProcessRunner.ts";

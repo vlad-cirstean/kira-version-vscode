@@ -41,7 +41,7 @@ async function openService(dir: string, runner: ProcessRunner = new NodeProcessR
     runner,
     fileWatcher: new NodeFileWatcher(),
     logger: new FakeLogger(),
-    settings: settingsWithPageSize(10),
+    settings: () => settingsWithPageSize(10),
     configuredGitCandidates: [],
   });
   const opened = await service.open(dir);
