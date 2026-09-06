@@ -590,6 +590,128 @@ export function conflicting(opts: ConflictingOptions = {}): GeneratedRepo {
   });
 }
 
+export interface WithDivergedBranchOptions {
+  /** Commits on `main` (HEAD) past the fork point. Default 2 — probe 4's own "2 2" example. */
+  mainCommits?: number;
+  /** Commits on the diverged `other` branch past the same fork point. Default 2. */
+  otherCommits?: number;
+}
+
+/** `docs/plans/P10.md` W16, probe 4's own shape: `other` is an ancestor of neither HEAD nor HEAD
+ *  of `other` — `rev-list --count --left-right other...HEAD` must report a genuinely two-sided
+ *  count, the case a plain `<sha>..HEAD` count cannot distinguish from "reset back N commits on
+ *  the same line" (probe 4's whole finding, `--count other..HEAD` reads `2` for both shapes).
+ *  `other` is left un-checked-out; HEAD stays on `main`, matching a reset dialog's own "current
+ *  branch resets to a diverged target" setup. */
+export function withDivergedBranch(opts: WithDivergedBranchOptions = {}): GeneratedRepo {
+  const mainCommits = opts.mainCommits ?? 2;
+  const otherCommits = opts.otherCommits ?? 2;
+  return cachedShape("withDivergedBranch", { mainCommits, otherCommits }, () => {
+    const repo = new Repo(tempRepoDir("diverged"));
+    repo.init("main");
+    const commits: string[] = [];
+
+    repo.writeFile("base.txt", "base\n");
+    repo.add("base.txt");
+    commits.push(repo.commit("base commit"));
+    const forkSha = repo.head();
+
+    repo.checkoutNew("other", forkSha);
+    for (let i = 0; i < otherCommits; i++) {
+      repo.writeFile("other.txt", `other change ${i}\n`);
+      repo.add("other.txt");
+      commits.push(repo.commit(`other commit ${i}`));
+    }
+    const otherSha = repo.head();
+
+    repo.checkout("main");
+    for (let i = 0; i < mainCommits; i++) {
+      repo.writeFile("main.txt", `main change ${i}\n`);
+      repo.add("main.txt");
+      commits.push(repo.commit(`main commit ${i}`));
+    }
+
+    return { dir: repo.dir, commits, refs: { main: repo.head(), other: otherSha } };
+  });
+}
+
+/** `docs/plans/P10.md` W16, probe 8's own shape: a genuine two-parent merge commit (`merged`),
+ *  with HEAD left on `target` — a branch forked *before* either parent's own change, so cherry-
+ *  picking the merge commit there is exactly probe 8's own "a merge commit needs `-m`" case. Both
+ *  parent choices apply cleanly (`-m 1` carries over `feature`'s own edit to `shared.txt`, `-m 2`
+ *  carries over `main`'s own addition of `other.txt`) and each produces a *different* result, so a
+ *  test picking the wrong mainline is caught by the file it lands, not only by an argv assertion. */
+export function withMergeCommitToPick(): GeneratedRepo {
+  return cachedShape("withMergeCommitToPick", {}, () => {
+    const repo = new Repo(tempRepoDir("merge-to-pick"));
+    repo.init("main");
+    const commits: string[] = [];
+
+    repo.writeFile("shared.txt", "root\n");
+    repo.add("shared.txt");
+    commits.push(repo.commit("root"));
+    const rootSha = repo.head();
+
+    repo.checkoutNew("target", rootSha);
+
+    repo.checkoutNew("feature", rootSha);
+    repo.writeFile("shared.txt", "feature change\n");
+    repo.add("shared.txt");
+    commits.push(repo.commit("feature change"));
+    const featureSha = repo.head();
+
+    repo.checkout("main");
+    repo.writeFile("other.txt", "main change\n");
+    repo.add("other.txt");
+    commits.push(repo.commit("main change"));
+    const mainSha = repo.head();
+
+    repo.checkoutNew("merged", mainSha);
+    const mergeSha = repo.merge("merge feature into merged", [featureSha]);
+    commits.push(mergeSha);
+
+    repo.checkout("target");
+
+    return {
+      dir: repo.dir,
+      commits,
+      refs: { main: mainSha, feature: featureSha, merged: mergeSha, target: rootSha },
+    };
+  });
+}
+
+/** `docs/plans/P10.md` W16, probe 6's own empty-pick shape: `topic`'s one commit and `main`'s own
+ *  tip make the *identical* edit to the same file independently, so cherry-picking `topic` onto
+ *  `main` reproduces a patch already present — `CHERRY_PICK_HEAD` present, zero unmerged paths, a
+ *  clean worktree, exit 1, and git's own "previous cherry-pick is now empty" text on **stdout**
+ *  (probe 6's own finding: `classifyGitError` cannot see it, so detection is exit-code-plus-
+ *  read-back, not a stderr pattern). HEAD is left on `main`, the pick's natural target. */
+export function withEmptyPickCandidate(): GeneratedRepo {
+  return cachedShape("withEmptyPickCandidate", {}, () => {
+    const repo = new Repo(tempRepoDir("empty-pick"));
+    repo.init("main");
+    const commits: string[] = [];
+
+    repo.writeFile("note.txt", "base\n");
+    repo.add("note.txt");
+    commits.push(repo.commit("base commit"));
+    const baseSha = repo.head();
+
+    repo.checkoutNew("topic", baseSha);
+    repo.writeFile("note.txt", "same change\n");
+    repo.add("note.txt");
+    commits.push(repo.commit("the change to pick"));
+    const topicSha = repo.head();
+
+    repo.checkout("main");
+    repo.writeFile("note.txt", "same change\n");
+    repo.add("note.txt");
+    commits.push(repo.commit("independently made the same change"));
+
+    return { dir: repo.dir, commits, refs: { main: repo.head(), topic: topicSha } };
+  });
+}
+
 /** A server-side hook to install on the bare remote's `hooks/<type>` before returning — W19's
  *  `HookRejected` scenario needs a *real* rejecting `pre-receive`, not a simulated one, since the
  *  whole point is proving `classifyGitError` reads the hook's own stderr text back out of a real

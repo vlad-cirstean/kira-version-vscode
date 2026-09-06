@@ -11,6 +11,9 @@ import {
   large,
   linear,
   octopus,
+  withDivergedBranch,
+  withEmptyPickCandidate,
+  withMergeCommitToPick,
   withRemote,
   withStash,
   withStashes,
@@ -166,6 +169,83 @@ describe("generateRepo shapes", () => {
     });
     expect(status).toContain("UU conflict.txt");
     execFileSync("git", ["merge", "--abort"], { cwd: repo.dir });
+  });
+
+  test("docs/plans/P10.md W16: withDivergedBranch's own 'done when' — a genuinely two-sided count", () => {
+    const repo = track(withDivergedBranch());
+    const leftRight = execFileSync("git", ["rev-list", "--count", "--left-right", "other...HEAD"], {
+      cwd: repo.dir,
+      encoding: "utf8",
+    }).trim();
+    expect(leftRight).toBe("2\t2"); // probe 4's own "2 2" example, not the one-sided "2" a plain count gives
+    const isAncestor = () =>
+      execFileSync("git", ["merge-base", "--is-ancestor", "other", "HEAD"], { cwd: repo.dir });
+    expect(isAncestor).toThrow(); // neither side is an ancestor of the other
+  });
+
+  test("docs/plans/P10.md W16: withMergeCommitToPick needs -m, and each parent choice lands differently", () => {
+    const repo = track(withMergeCommitToPick());
+    expect(() =>
+      execFileSync("git", ["cherry-pick", "--no-gpg-sign", repo.refs.merged ?? ""], {
+        cwd: repo.dir,
+        encoding: "utf8",
+        stdio: "pipe",
+      }),
+    ).toThrow(/is a merge but no -m option was given/);
+
+    execFileSync("git", ["cherry-pick", "--no-gpg-sign", "-m", "1", repo.refs.merged ?? ""], {
+      cwd: repo.dir,
+      encoding: "utf8",
+    });
+    expect(readFileSync(join(repo.dir, "shared.txt"), "utf8")).toBe("feature change\n");
+    expect(existsSync(join(repo.dir, "other.txt"))).toBe(false); // -m 1's own diff never touches it
+    // By its own sha, not the `target` branch name — the first pick above already advanced that
+    // branch (this test runs on the checked-out `target` worktree), so the name alone would land
+    // back on the post-pick tip rather than the pre-pick fork point `refs.target` still names.
+    execFileSync("git", ["reset", "--hard", repo.refs.target ?? ""], { cwd: repo.dir });
+
+    execFileSync("git", ["cherry-pick", "--no-gpg-sign", "-m", "2", repo.refs.merged ?? ""], {
+      cwd: repo.dir,
+      encoding: "utf8",
+    });
+    expect(readFileSync(join(repo.dir, "other.txt"), "utf8")).toBe("main change\n");
+    expect(readFileSync(join(repo.dir, "shared.txt"), "utf8")).toBe("root\n"); // -m 2's own diff never touches it
+  });
+
+  test("docs/plans/P10.md W16: withEmptyPickCandidate's own 'done when' — an empty, exit-1 pick", () => {
+    const repo = track(withEmptyPickCandidate());
+    let threw = false;
+    try {
+      execFileSync("git", ["cherry-pick", "--no-gpg-sign", repo.refs.topic ?? ""], {
+        cwd: repo.dir,
+        encoding: "utf8",
+        stdio: "pipe",
+      });
+    } catch (err) {
+      threw = true;
+      // git 2.43 writes "The previous cherry-pick is now empty…" to STDERR (this repo's own
+      // re-verification of probe 6 — the plan's transcript names stdout, but the mechanism this
+      // fixture exists for reads neither: `classifyGitError` pattern-matches stderr and has no
+      // rule for this text either way, so detection is exit-code-plus-read-back regardless of
+      // which stream carries it).
+      const stderr = String((err as { stderr?: Buffer | string }).stderr ?? "");
+      const stdout = String((err as { stdout?: Buffer | string }).stdout ?? "");
+      expect(`${stdout}${stderr}`).toContain("previous cherry-pick is now empty");
+    }
+    expect(threw).toBe(true);
+
+    const status = execFileSync("git", ["status", "--porcelain"], {
+      cwd: repo.dir,
+      encoding: "utf8",
+    });
+    expect(status).toBe(""); // clean worktree — nothing left unmerged
+    const cherryPickHead = execFileSync(
+      "git",
+      ["rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD"],
+      { cwd: repo.dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    expect(cherryPickHead).not.toBe("");
+    execFileSync("git", ["cherry-pick", "--skip"], { cwd: repo.dir });
   });
 
   test("withRemote wires a bare remote with ahead/behind commits", async () => {
