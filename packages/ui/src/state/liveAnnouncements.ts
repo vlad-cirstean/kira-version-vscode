@@ -83,6 +83,12 @@ const OP_ERROR_TEXT: Record<OpErrorKind, string> = {
   OperationInProgress: "another operation is in progress",
   RemoteRefMissing: "the remote ref is missing",
   HookRejected: "a hook rejected it",
+  LeaseViolation: "the remote moved since it was last checked",
+  RemoteRefUpdated: "the remote moved since it was last fetched",
+  NetworkFailed: "a network error occurred",
+  RemoteNotFound: "the remote repository was not found",
+  ProtectedBranch: "the branch is protected",
+  Cancelled: "it was cancelled",
   Unknown: "an unexpected error occurred",
 };
 

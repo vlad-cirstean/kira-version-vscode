@@ -72,6 +72,10 @@ export type RepoServicePort = Pick<
   | "undoRun"
   | "resolveReviewBase"
   | "endReview"
+  | "preflightPull"
+  | "preflightPush"
+  | "runRemoteOp"
+  | "cancelRemoteOp"
 >;
 
 export interface RepoHandlersDeps {
@@ -147,6 +151,9 @@ function toSettingsSnapshot(settings: Settings): SettingsSnapshot {
     "kiraVersion.graph.scope": settings["kiraVersion.graph.scope"],
     "kiraVersion.log.level": settings["kiraVersion.log.level"],
     "kiraVersion.review.baseCandidates": settings["kiraVersion.review.baseCandidates"],
+    "kiraVersion.fetch.autoInterval": settings["kiraVersion.fetch.autoInterval"],
+    "kiraVersion.pull.strategy": settings["kiraVersion.pull.strategy"],
+    "kiraVersion.protectedBranches": settings["kiraVersion.protectedBranches"],
   };
 }
 
@@ -395,6 +402,40 @@ export function createRepoHandlers(deps: RepoHandlersDeps): ServerHandlers {
   const undoRunImpl: RequestHandler<"undo.run"> = async ({ repoId, id }) =>
     deps.service.undoRun(repoId, id);
 
+  const remotePullPreflightImpl: RequestHandler<"remote.pullPreflight"> = async ({
+    repoId,
+    branch,
+  }) => deps.service.preflightPull(repoId, branch);
+
+  const remotePushPreflightImpl: RequestHandler<"remote.pushPreflight"> = async ({
+    repoId,
+    branch,
+    remote,
+  }) => deps.service.preflightPush(repoId, branch, remote);
+
+  // `opId` is `runRemoteOp`'s own internal correlation id (the askpass broker's `withOp`, D50's
+  // per-session `activeRemoteOp` bookkeeping) — never part of the wire (`RemoteOpParams` carries
+  // none), since exactly one remote op may ever be in flight per repo (OQ7), so the client never
+  // needs to name which one it means. Generated fresh per call, here, not in `RepoService`.
+  //
+  // `ctx.signal` is honoured as a *second* cancel path alongside the client's explicit
+  // `remote.cancel` (W16): a webview that closes (or a request the transport itself abandons)
+  // mid-fetch must not strand the child process `runRemoteOp` started on its behalf.
+  const remoteRunImpl: RequestHandler<"remote.run"> = async ({ repoId, ...request }, ctx) => {
+    const opId = crypto.randomUUID();
+    const onAbort = () => deps.service.cancelRemoteOp(repoId);
+    ctx.signal.addEventListener("abort", onAbort);
+    try {
+      return await deps.service.runRemoteOp(repoId, opId, request);
+    } finally {
+      ctx.signal.removeEventListener("abort", onAbort);
+    }
+  };
+
+  const remoteCancelImpl: RequestHandler<"remote.cancel"> = async ({ repoId }) => ({
+    cancelled: deps.service.cancelRemoteOp(repoId),
+  });
+
   const editorResolveConflictImpl: RequestHandler<"editor.resolveConflict"> = async ({
     repoId,
     path,
@@ -441,6 +482,10 @@ export function createRepoHandlers(deps: RepoHandlersDeps): ServerHandlers {
       "op.run": logged("op.run", opRunImpl),
       "undo.peek": logged("undo.peek", undoPeekImpl),
       "undo.run": logged("undo.run", undoRunImpl),
+      "remote.pullPreflight": logged("remote.pullPreflight", remotePullPreflightImpl),
+      "remote.pushPreflight": logged("remote.pushPreflight", remotePushPreflightImpl),
+      "remote.run": logged("remote.run", remoteRunImpl),
+      "remote.cancel": logged("remote.cancel", remoteCancelImpl),
       "editor.resolveConflict": logged("editor.resolveConflict", editorResolveConflictImpl),
       "review.resolveBase": logged("review.resolveBase", reviewResolveBaseImpl),
       "review.open": logged("review.open", reviewOpenImpl),

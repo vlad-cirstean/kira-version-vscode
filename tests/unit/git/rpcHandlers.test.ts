@@ -6,6 +6,10 @@ import type {
   FileDiff,
   OpRequest,
   OpResult,
+  PullPreflight,
+  PushPreflight,
+  RemoteOpRequest,
+  RemoteOpResult,
   RevertPreflight,
   Settings,
   StatusSummary,
@@ -171,6 +175,16 @@ class FakeRepoService implements RepoServicePort {
   }> = [];
   readonly endReviewCalls: string[] = [];
 
+  // P8 W16
+  pullPreflightResult: PullPreflight | undefined;
+  readonly preflightPullCalls: Array<{ repoId: string; branch: string }> = [];
+  pushPreflightResult: PushPreflight | undefined;
+  readonly preflightPushCalls: Array<{ repoId: string; branch: string; remote: string }> = [];
+  remoteOpResult: RemoteOpResult | undefined;
+  readonly runRemoteOpCalls: Array<{ repoId: string; opId: string; request: RemoteOpRequest }> = [];
+  cancelRemoteOpResult = false;
+  readonly cancelRemoteOpCalls: string[] = [];
+
   constructor(git: GitStatus) {
     this.git = git;
   }
@@ -302,6 +316,37 @@ class FakeRepoService implements RepoServicePort {
 
   endReview(repoId: string): void {
     this.endReviewCalls.push(repoId);
+  }
+
+  async preflightPull(repoId: string, branch: string): Promise<PullPreflight> {
+    this.preflightPullCalls.push({ repoId, branch });
+    if (!this.pullPreflightResult) {
+      throw new Error("FakeRepoService.pullPreflightResult not set");
+    }
+    return this.pullPreflightResult;
+  }
+
+  async preflightPush(repoId: string, branch: string, remote: string): Promise<PushPreflight> {
+    this.preflightPushCalls.push({ repoId, branch, remote });
+    if (!this.pushPreflightResult) {
+      throw new Error("FakeRepoService.pushPreflightResult not set");
+    }
+    return this.pushPreflightResult;
+  }
+
+  async runRemoteOp(
+    repoId: string,
+    opId: string,
+    request: RemoteOpRequest,
+  ): Promise<RemoteOpResult> {
+    this.runRemoteOpCalls.push({ repoId, opId, request });
+    if (!this.remoteOpResult) throw new Error("FakeRepoService.remoteOpResult not set");
+    return this.remoteOpResult;
+  }
+
+  cancelRemoteOp(repoId: string): boolean {
+    this.cancelRemoteOpCalls.push(repoId);
+    return this.cancelRemoteOpResult;
   }
 }
 
